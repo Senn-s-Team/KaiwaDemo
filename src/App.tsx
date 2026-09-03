@@ -18,6 +18,7 @@ import {
   streamReply,
 } from './lib/api'
 import { buildSessionReport, createRoundRecord, downloadReport, duration } from './lib/metrics'
+import { startSparkPractice } from './lib/spark-practice'
 import { buildPracticeTrend } from './lib/trend'
 import { preflightMicrophone, type MicrophoneReadiness } from './lib/microphone'
 import { requestMicrophoneStream } from './lib/audio-engine'
@@ -682,6 +683,23 @@ function App() {
       setIsDraftingScenario(false)
     }
   }, [clarifications, customInputZh])
+  const handleStartSpark = useCallback(async (spark: VocabScenario) => {
+    if (isDraftingScenario) return
+    setIsDraftingScenario(true)
+    setUiError(null)
+    try {
+      await startSparkPractice(
+        spark,
+        draftScenario,
+        (scenarioToken) => startSession({ scenarioToken }),
+      )
+    } catch (error) {
+      setUiError(toUiError(error))
+    } finally {
+      setIsDraftingScenario(false)
+    }
+  }, [isDraftingScenario, startSession])
+
 
   const handleAnswerClarification = useCallback((answer: string) => {
     if (!pendingClarification) return
@@ -1260,10 +1278,7 @@ function App() {
               setHomeTab={setHomeTab}
               sparkScenario={sparkScenario}
               setSparkScenario={setSparkScenario}
-              onStartSpark={(sc) => {
-                const prompt = `场所：${sc.settingZh}。对方：${sc.partnerZh}。挑战：${sc.challengeZh}。参考表达：${sc.keyExpressions.join('、')}`
-                void handleDraftScenario(prompt)
-              }}
+              onStartSpark={(spark) => void handleStartSpark(spark)}
               customInputZh={customInputZh}
               setCustomInputZh={setCustomInputZh}
               clarifications={clarifications}
