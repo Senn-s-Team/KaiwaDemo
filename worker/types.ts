@@ -199,6 +199,34 @@ export interface HintResponse {
   fullExampleJa: string
 }
 
+export interface CatalogRescueRequest {
+  scenarioType?: 'catalog'
+  scenarioId: ScenarioId
+  variantId: string
+  turn: number
+  aiPrompt: string
+  userFinal: string
+  history: ConversationMessage[]
+}
+
+export interface DynamicRescueRequest {
+  scenarioType: 'dynamic'
+  sessionToken?: string
+  dynamicData?: DynamicScenarioDefinition
+  turn: number
+  aiPrompt: string
+  userFinal: string
+  history: ConversationMessage[]
+}
+
+export type RescueRequest = CatalogRescueRequest | DynamicRescueRequest
+
+export interface RescueResponse {
+  interpretedIntentZh: string
+  suggestedJa: string
+  politenessTipZh: string
+}
+
 export interface SessionCheckpointRequest {
   sessionToken: string
   turn: number

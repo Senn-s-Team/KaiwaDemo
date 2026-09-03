@@ -11,6 +11,8 @@ import type {
   ScenarioDraftModelResult,
   ScenarioDraftRequest,
   SessionCheckpointRequest,
+  RescueRequest,
+  RescueResponse,
   SessionStartRequest,
   TokenRequest,
 } from './types'
@@ -216,6 +218,51 @@ const DynamicHintRequestSchema = z
 
 const HintRequestSchema = z.union([CatalogHintRequestSchema, DynamicHintRequestSchema])
 
+const CatalogRescueRequestSchema = z
+  .object({
+    scenarioType: z.literal('catalog').optional(),
+    scenarioId: z.enum(SCENARIO_IDS),
+    variantId: z.string().trim().min(1).max(64),
+    turn: z.number().int().min(1).max(LIMITS.maxCap),
+    aiPrompt: z.string().trim().min(1).max(LIMITS.maxAssistantCharacters * 2),
+    userFinal: z.string().trim().min(1).max(LIMITS.maxUserCharacters),
+    history: z.array(ConversationMessageSchema).max(LIMITS.maxDynamicHistoryMessages),
+  })
+  .strict()
+
+const DynamicRescueRequestSchema = z
+  .object({
+    scenarioType: z.literal('dynamic'),
+    sessionToken: z.string().trim().min(1).optional(),
+    dynamicData: DynamicScenarioDefinitionSchema.optional(),
+    turn: z.number().int().min(1).max(LIMITS.maxCap),
+    aiPrompt: z.string().trim().min(1).max(LIMITS.maxAssistantCharacters * 2),
+    userFinal: z.string().trim().min(1).max(LIMITS.maxUserCharacters),
+    history: z.array(ConversationMessageSchema).max(LIMITS.maxDynamicHistoryMessages),
+  })
+  .strict()
+  .refine((data) => Boolean(data.sessionToken || data.dynamicData), {
+    message: 'Either sessionToken or dynamicData must be provided for dynamic rescue request.',
+  })
+
+const RescueRequestSchema = z.union([CatalogRescueRequestSchema, DynamicRescueRequestSchema])
+
+const FORBIDDEN_EVALUATION_PATTERNS = /(?:发音|声调|口音|语调|情绪|発音|声調|アクセント|イントネーション|\b(?:[1-9]\d?|100)分\b|★|⭐|星[1-5一二三四五]|得分)/
+
+const RescueResponseSchema = z
+  .object({
+    interpretedIntentZh: z.string().trim().min(1).refine(
+      (val) => !FORBIDDEN_EVALUATION_PATTERNS.test(val),
+      'Forbidden mention of pronunciation, tone, accent, score, or emotion in rescue output.',
+    ),
+    suggestedJa: z.string().trim().min(1),
+    politenessTipZh: z.string().trim().min(1).refine(
+      (val) => !FORBIDDEN_EVALUATION_PATTERNS.test(val),
+      'Forbidden mention of pronunciation, tone, accent, score, or emotion in rescue output.',
+    ),
+  })
+  .strict()
+
 const SessionCheckpointRequestSchema = z
   .object({
     sessionToken: z.string().trim().min(1),
@@ -224,15 +271,19 @@ const SessionCheckpointRequestSchema = z
   })
   .strict()
 
+const KANA_REGEX = /[\u3040-\u309F\u30A0-\u30FF]/
+
 const HintResponseSchema = z
   .object({
-    directionZh: z.string().trim().min(1),
-    keyPhrasesJa: z.array(z.string().trim().min(1)).min(1).max(5),
+    directionZh: z.string().trim().min(1).refine(
+      (val) => !KANA_REGEX.test(val),
+      'Level 1 directionZh must give thinking direction in Chinese without Japanese words or sentences.',
+    ),
+    keyPhrasesJa: z.array(z.string().trim().min(1)).min(2).max(5),
     sentenceStarterJa: z.string().trim().min(1),
     fullExampleJa: z.string().trim().min(1),
   })
   .strict()
-
 const SessionCheckpointEvaluationSchema = z
   .object({
     isGoalCompleted: z.boolean(),
@@ -337,8 +388,6 @@ const DynamicFeedbackRequestSchema = z
       }
     })
   })
-
-const FORBIDDEN_EVALUATION_PATTERNS = /(?:发音|声调|口音|语调|情绪|発音|声調|アクセント|イントネーション|\b(?:[1-9]\d?|100)分\b|★|⭐|星[1-5一二三四五]|得分)/
 
 const FeedbackStrengthItemSchema = z
   .object({
@@ -524,6 +573,26 @@ export function parseHintResponse(value: unknown): HintResponse {
   const parsed = HintResponseSchema.safeParse(value)
   if (!parsed.success) {
     throw new ValidationError('invalid_hint_output', 'Hint model output is invalid.')
+  }
+  return parsed.data
+}
+
+export function validateRescueRequest(value: unknown): RescueRequest {
+  const parsed = RescueRequestSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new ValidationError('invalid_rescue_request', 'Rescue request is invalid.')
+  }
+  return parsed.data
+}
+
+export function parseRescueRequest(value: unknown): RescueRequest {
+  return validateRescueRequest(value)
+}
+
+export function parseRescueResponse(value: unknown): RescueResponse {
+  const parsed = RescueResponseSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new ValidationError('invalid_rescue_output', 'Rescue model output is invalid.')
   }
   return parsed.data
 }

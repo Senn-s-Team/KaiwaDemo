@@ -235,12 +235,13 @@ describe('scenario reply context', () => {
     expect(prompt).toContain('同じ内容・不足説明・提案を繰り返してはいけません')
 
     expect(prompt).toContain('次がユーザーの最後の回答')
-    expect(prompt).toContain('「この内容で合っていますか」のような理解確認')
+    expect(prompt).toContain('完了条件')
+    expect(prompt).toContain('追質問方針')
     expect(prompt).toContain('予定の確定・変更、外部確認、将来の実行を提案してはいけません')
 
     expect(prompt).toContain('場面の初期アンカー（完全な一覧ではない）')
-    expect(prompt).toContain('架空の人物・背景・理由・出来事を自由に追加')
-    expect(prompt).toContain('ユーザーが別の話題を始めたら、その話題に直接応答')
+    expect(prompt).toContain('補足事実を1つだけ設定')
+    expect(prompt).toContain('軽度に話題を広げたり逸れたりした場合')
     expect(prompt).toContain('方向性でありチェックリストではない')
     expect(prompt).toContain('会話内で一度設定した事実は後のターンでも維持')
   })

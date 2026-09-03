@@ -94,6 +94,34 @@ export interface HintResponse {
   fullExampleJa: string
 }
 
+export interface RescueResponse {
+  interpretedIntentZh: string
+  suggestedJa: string
+  politenessTipZh: string
+}
+
+export interface RescueRequestPayload {
+  scenarioType?: 'catalog' | 'dynamic'
+  scenarioId?: string
+  variantId?: string
+  sessionToken?: string
+  dynamicData?: DynamicScenarioData
+  turn: number
+  aiPrompt: string
+  userFinal: string
+  history: ConversationMessage[]
+}
+
+export interface RescueDrawerState {
+  isOpen: boolean
+  turn: number
+  aiPrompt: string
+  userFinal: string
+  loading: boolean
+  error: string | null
+  data: RescueResponse | null
+}
+
 export interface CompletedGoal {
   id: string
   evidence: string

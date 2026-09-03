@@ -13,6 +13,7 @@ import {
   draftScenario,
   generateConversationFeedback,
   generateHint,
+  generateRescueAnalysis,
   generateSessionCheckpoint,
   ScenarioDraftError,
   streamOpenAiReply,
@@ -28,6 +29,7 @@ import {
   parseConversationFeedbackRequest,
   parseHintRequest,
   parseReplyRequest,
+  parseRescueRequest,
   parseScenarioDraftRequest,
   parseSessionCheckpointRequest,
   parseSessionStartRequest,
@@ -134,6 +136,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     if (request.method !== 'POST') return methodNotAllowed('POST')
     const body = await readJsonBody(request, LIMITS.requestBytes)
     return json(await generateHint(env, parseHintRequest(body)))
+  }
+
+  if (url.pathname === '/api/rescue') {
+    if (request.method !== 'POST') return methodNotAllowed('POST')
+    const body = await readJsonBody(request, LIMITS.requestBytes)
+    return json(await generateRescueAnalysis(env, parseRescueRequest(body)))
   }
 
   if (url.pathname === '/api/session/checkpoint') {

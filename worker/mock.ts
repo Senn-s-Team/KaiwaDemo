@@ -2,6 +2,8 @@ import type {
   ConversationFeedbackRequest,
   ConversationFeedbackResponse,
   ReplyRequest,
+  RescueRequest,
+  RescueResponse,
   ScenarioId,
 } from './types'
 import { LIMITS } from './constants'
@@ -116,5 +118,14 @@ export function createMockFeedback(request: ConversationFeedbackRequest): Conver
       recommendedReferenceJa: `${firstQuote}、確認をお願いできますか。`,
       hintZh: '尝试结合礼貌请求句型重新表达，使交流更加流畅自然。',
     },
+  }
+}
+
+export function getMockRescueResponse(request: RescueRequest): RescueResponse {
+  const raw = request.userFinal.trim() || 'ありがとうございます'
+  return {
+    interpretedIntentZh: `对方理解你希望传达「${raw.slice(0, 18)}」相关的意图并推进当前事项。`,
+    suggestedJa: `恐れ入りますが、${raw}、お願いできますでしょうか。`,
+    politenessTipZh: '使用「恐れ入りますが」前置垫话与「〜でしょうか」疑问句尾，可使语气更柔和得体。',
   }
 }

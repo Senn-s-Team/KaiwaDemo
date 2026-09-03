@@ -1,11 +1,12 @@
 import { DEFAULT_MODELS, LIMITS } from './constants'
 import type { Env } from './env'
-import { createMockFeedback, createMockReply } from './mock'
+import { createMockFeedback, createMockReply, getMockRescueResponse } from './mock'
 import {
   buildDeveloperPrompt,
   buildDynamicDeveloperPrompt,
   buildFeedbackPrompt,
   buildHintPrompt,
+  buildRescuePrompt,
   buildCheckpointPrompt,
   buildScenarioDraftPrompt,
   getScenarioVariant,
@@ -19,6 +20,8 @@ import type {
   ConversationFeedbackResponse,
   HintRequest,
   HintResponse,
+  RescueRequest,
+  RescueResponse,
   ReplyDoneEvent,
   ReplyRequest,
   ReplyStreamEvent,
@@ -33,6 +36,7 @@ import type {
 import {
   parseConversationFeedbackResponse,
   parseHintResponse,
+  parseRescueResponse,
   parseScenarioDraftModelResult,
   parseSessionCheckpointEvaluation,
   validateAssistantReply,
@@ -595,6 +599,8 @@ export async function generateHint(env: Env, request: HintRequest): Promise<Hint
     titleZh?: string
     aiRole: string
     userRole?: string
+    relationship?: string
+    tone?: string
     userGoal: string
     worldFacts?: string
     worldAnchors?: readonly string[]
@@ -607,6 +613,8 @@ export async function generateHint(env: Env, request: HintRequest): Promise<Hint
       titleZh: sessionPayload.scenario.titleZh,
       aiRole: sessionPayload.scenario.aiRole,
       userRole: sessionPayload.scenario.userRole,
+      relationship: sessionPayload.scenario.relationship,
+      tone: sessionPayload.scenario.tone,
       userGoal: sessionPayload.scenario.userGoal,
       worldAnchors: sessionPayload.scenario.worldAnchors,
       hintStrategy: sessionPayload.scenario.hintStrategy,
@@ -661,6 +669,102 @@ export async function generateHint(env: Env, request: HintRequest): Promise<Hint
   const payload: unknown = await upstream.json()
   const text = responseTextFromCompletedJson(payload)
   return parseHintResponse(parseModelJson(text))
+}
+
+export async function generateRescueAnalysis(env: Env, request: RescueRequest): Promise<RescueResponse> {
+  if (!env.OPENAI_API_KEY) {
+    if (env.ALLOW_MOCK === 'true') {
+      return getMockRescueResponse(request)
+    }
+    throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
+  }
+
+  let scenarioInfo: {
+    titleZh?: string
+    aiRole: string
+    userRole?: string
+    relationship?: string
+    tone?: string
+    userGoal: string
+    worldFacts?: string
+    worldAnchors?: readonly string[]
+  }
+
+  if (request.scenarioType === 'dynamic') {
+    if (request.dynamicData) {
+      scenarioInfo = {
+        titleZh: request.dynamicData.titleZh,
+        aiRole: request.dynamicData.aiRole,
+        userRole: request.dynamicData.userRole,
+        relationship: request.dynamicData.relationship,
+        tone: request.dynamicData.tone,
+        userGoal: request.dynamicData.userGoal,
+        worldAnchors: request.dynamicData.worldAnchors,
+      }
+    } else if (request.sessionToken) {
+      const sessionPayload = await verifySessionToken(env, request.sessionToken)
+      scenarioInfo = {
+        titleZh: sessionPayload.scenario.titleZh,
+        aiRole: sessionPayload.scenario.aiRole,
+        userRole: sessionPayload.scenario.userRole,
+        relationship: sessionPayload.scenario.relationship,
+        tone: sessionPayload.scenario.tone,
+        userGoal: sessionPayload.scenario.userGoal,
+        worldAnchors: sessionPayload.scenario.worldAnchors,
+      }
+    } else {
+      throw new ValidationError('invalid_rescue_request', 'Missing scenario information.')
+    }
+  } else {
+    const variant = getScenarioVariant(request.scenarioId, request.variantId)
+    if (!variant) throw new ValidationError('scenario_variant_mismatch', 'Variant not found.')
+    scenarioInfo = {
+      titleZh: variant.titleZh,
+      aiRole: variant.aiRole,
+      userGoal: variant.userGoal,
+      worldFacts: variant.worldFacts,
+    }
+  }
+
+  const prompt = buildRescuePrompt(scenarioInfo, request.turn, request.aiPrompt, request.userFinal, request.history)
+  const responsesUrl = resolveOpenAiResponsesUrl(env.OPENAI_BASE_URL)
+  const isResponsesEndpoint = responsesUrl.endsWith('/responses')
+
+  const requestBody = isResponsesEndpoint
+    ? {
+        model: env.OPENAI_MODEL || DEFAULT_MODELS.openai,
+        input: [{ role: 'developer', content: prompt }],
+        reasoning: { effort: 'low' },
+        max_output_tokens: LIMITS.rescueOutputTokens,
+        store: false,
+        stream: false,
+        tools: [],
+        text: { format: { type: 'json_object' } },
+      }
+    : {
+        model: env.OPENAI_MODEL || DEFAULT_MODELS.openai,
+        messages: [{ role: 'system', content: prompt }],
+        max_tokens: LIMITS.rescueOutputTokens,
+        response_format: { type: 'json_object' },
+      }
+
+  const upstream = await fetch(responsesUrl, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      'content-type': 'application/json',
+      accept: 'application/json',
+    },
+    body: JSON.stringify(requestBody),
+  })
+
+  if (!upstream.ok) {
+    throw new ScenarioDraftError('rescue_request_failed', 'OpenAI rescue analysis generation failed.', 502)
+  }
+
+  const payload: unknown = await upstream.json()
+  const text = responseTextFromCompletedJson(payload)
+  return parseRescueResponse(parseModelJson(text))
 }
 
 export async function generateSessionCheckpoint(

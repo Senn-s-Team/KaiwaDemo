@@ -4,6 +4,7 @@ import type {
   ConversationFeedbackResponse,
   ConversationMessage,
   PrototypeConfig,
+  RescueResponse,
   RoundRecord,
   SessionScenario,
   UsageSummary,
@@ -119,6 +120,14 @@ const FeedbackRetryTaskSchema = z
   })
   .strict()
 
+
+const RescueResponseSchema = z
+  .object({
+    interpretedIntentZh: z.string().trim().min(1),
+    suggestedJa: z.string().trim().min(1),
+    politenessTipZh: z.string().trim().min(1),
+  })
+  .strict()
 export const FeedbackResponseSchema = z
   .object({
     isGoalCompleted: z.boolean(),
@@ -352,6 +361,46 @@ export async function fetchHint(
   })
   if (!response.ok) throw await errorFromResponse(response)
   return response.json() as Promise<import('../types').HintResponse>
+}
+
+export async function fetchRescueAnalysis(
+  scenario: SessionScenario,
+  turn: number,
+  aiPrompt: string,
+  userFinal: string,
+  history: ConversationMessage[],
+  signal?: AbortSignal,
+): Promise<RescueResponse> {
+  const isDynamic = scenario.scenarioType === 'dynamic'
+  const body = isDynamic
+    ? {
+        scenarioType: 'dynamic',
+        sessionToken: scenario.sessionToken,
+        dynamicData: scenario.dynamicData,
+        turn,
+        aiPrompt,
+        userFinal,
+        history: history.map(({ role, text }) => ({ role, text })),
+      }
+    : {
+        scenarioType: 'catalog',
+        scenarioId: scenario.id,
+        variantId: scenario.variantId,
+        turn,
+        aiPrompt,
+        userFinal,
+        history: history.map(({ role, text }) => ({ role, text })),
+      }
+
+  const response = await fetch('/api/rescue', {
+    method: 'POST',
+    signal,
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) throw await errorFromResponse(response)
+  const data = await response.json()
+  return RescueResponseSchema.parse(data)
 }
 
 export async function checkSessionCheckpoint(

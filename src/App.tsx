@@ -1,4 +1,4 @@
-import { ArrowRight, BookOpen, Keyboard, Lightbulb, MessageCircle, Mic, Pencil, Sparkles, Square, Target, ThumbsUp, TrendingUp, Volume2, Wrench, X, AlertCircle } from 'lucide-react'
+import { ArrowRight, BookOpen, Keyboard, LifeBuoy, Lightbulb, MessageCircle, Mic, Pencil, RotateCcw, Sparkles, Square, Target, ThumbsUp, TrendingUp, Volume2, Wrench, X, AlertCircle } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
@@ -12,6 +12,7 @@ import {
   draftScenario,
   fetchConfig,
   fetchHint,
+  fetchRescueAnalysis,
   requestConversationFeedback,
   requestElevenLabsToken,
   startScenarioSession,
@@ -38,6 +39,7 @@ import type {
   FeedbackLoadingState,
   HintResponse,
   PrototypeConfig,
+  RescueDrawerState,
   RoundRecord,
   SelfAssessment,
   SessionCheckpointResponse,
@@ -86,7 +88,7 @@ const PHASE_TRANSITIONS: Record<AppPhase, readonly AppPhase[]> = {
   recording: ['finalizing_transcript', 'confirming_transcript', 'waiting_user', 'error', 'session_complete'],
   finalizing_transcript: ['confirming_transcript', 'waiting_user', 'error', 'session_complete'],
   confirming_transcript: ['waiting_user', 'recording', 'fetching_token', 'requesting_llm', 'error', 'session_complete'],
-  requesting_llm: ['preparing_tts', 'error', 'session_complete'],
+  requesting_llm: ['preparing_tts', 'waiting_user', 'error', 'session_complete'],
   preparing_tts: ['playing_ai', 'waiting_user', 'error', 'session_complete'],
   playing_ai: ['waiting_user', 'error', 'session_complete'],
   round_complete: ['waiting_user', 'recording', 'fetching_token', 'session_complete', 'error'],
@@ -168,6 +170,17 @@ function App() {
   const [showHintSheet, setShowHintSheet] = useState(false)
   const [showGoalsSheet, setShowGoalsSheet] = useState(false)
   const [showTranscriptSheet, setShowTranscriptSheet] = useState(false)
+  const [rescueDrawerState, setRescueDrawerState] = useState<RescueDrawerState>({
+    isOpen: false,
+    turn: 1,
+    aiPrompt: '',
+    userFinal: '',
+    loading: false,
+    error: null,
+    data: null,
+  })
+  const [isPlayingRescueTts, setIsPlayingRescueTts] = useState(false)
+  const rescueAbortRef = useRef<AbortController | null>(null)
   const [dockInputMode, setDockInputMode] = useState<'voice' | 'text'>('voice')
   const [dockTextValue, setDockTextValue] = useState('')
   const [expandedAiMessageIds, setExpandedAiMessageIds] = useState<Set<string>>(new Set())
@@ -1170,6 +1183,116 @@ function App() {
     else transitionTo('waiting_user')
   }, [finalizeAndAdvance, stopActiveResources, transitionTo])
 
+  const openRescueDrawer = useCallback(async (userMessage: ConversationMessage, msgIndex: number) => {
+    if (!scenario) return
+    const currentMessages = messagesRef.current
+    const promptText =
+      currentMessages
+        .slice(0, msgIndex)
+        .filter((m) => m.role === 'assistant')
+        .pop()?.text || scenario.firstLine
+
+    const historySlice = currentMessages.slice(0, msgIndex)
+
+    rescueAbortRef.current?.abort()
+    const controller = new AbortController()
+    rescueAbortRef.current = controller
+
+    setRescueDrawerState({
+      isOpen: true,
+      turn: userMessage.turn,
+      aiPrompt: promptText,
+      userFinal: userMessage.text,
+      loading: true,
+      error: null,
+      data: null,
+    })
+
+    try {
+      const data = await fetchRescueAnalysis(
+        scenario,
+        userMessage.turn,
+        promptText,
+        userMessage.text,
+        historySlice,
+        controller.signal,
+      )
+      if (controller.signal.aborted) return
+      setRescueDrawerState((prev) => ({
+        ...prev,
+        loading: false,
+        data,
+      }))
+    } catch (err) {
+      if (controller.signal.aborted) return
+      const message = err instanceof Error ? err.message : '分析获取失败'
+      setRescueDrawerState((prev) => ({
+        ...prev,
+        loading: false,
+        error: message,
+      }))
+    }
+  }, [scenario])
+
+  const handleRewindTurn = useCallback((targetTurn: number) => {
+    if (!scenario) return
+    stopActiveResources()
+    setRescueDrawerState((prev) => ({ ...prev, isOpen: false }))
+
+    const currentMessages = messagesRef.current
+    const revertedMessages = currentMessages.filter(
+      (m) => m.turn < targetTurn || (m.turn === targetTurn && m.role === 'assistant'),
+    )
+    replaceMessages(revertedMessages)
+
+    const revertedRounds = roundsRef.current.filter((r) => r.turn < targetTurn)
+    roundsRef.current = revertedRounds
+    setRounds(revertedRounds)
+
+    setTurn(targetTurn)
+    const targetAiPrompt =
+      revertedMessages.findLast((m) => m.role === 'assistant')?.text || scenario.firstLine
+    replaceCurrentRound(createRoundRecord(targetTurn, targetAiPrompt, 0))
+
+    resetTranscript()
+    setPartialTranscript('')
+    setManualInput(false)
+    submitLockRef.current = false
+    setUiError(null)
+    setInlineError('')
+    setHintData(null)
+    setHintLevel(0)
+    pendingAdvanceReplyRef.current = null
+    pendingHistoryRef.current = revertedMessages
+    transitionTo('waiting_user')
+    setForegroundNotice(`已撤回第 ${targetTurn} 轮发话，请重新作答。`)
+  }, [replaceCurrentRound, replaceMessages, resetTranscript, scenario, stopActiveResources, transitionTo])
+
+  const playRescueAudio = useCallback(async (text: string) => {
+    if (!config?.elevenlabs.ttsAvailable || !config.elevenlabs.voiceId || ttsActionLockRef.current) return
+    ttsActionLockRef.current = true
+    setIsPlayingRescueTts(true)
+    try {
+      await ttsRef.current.speak({
+        text,
+        voiceId: config.elevenlabs.voiceId,
+        modelId: config.elevenlabs.ttsModel,
+        onGenerationStarted: () => {},
+        onFirstAudio: () => {},
+        onAudioStarted: () => {},
+        onAudioEnded: () => {},
+        onTtsRequest: () => {},
+      })
+    } catch (error) {
+      if (!(error instanceof TtsCancelledError)) {
+        setForegroundNotice('参考语音暂时无法播放，请直接阅读文字。')
+      }
+    } finally {
+      ttsActionLockRef.current = false
+      setIsPlayingRescueTts(false)
+    }
+  }, [config])
+
   const resetSession = useCallback(() => {
     stopActiveResources()
     setSessionId('')
@@ -1453,8 +1576,19 @@ function App() {
                             )}
                           </>
                         ) : (
-                          <div className="im-user-text-bubble">
-                            <p lang="ja">{message.text}</p>
+                          <div className="im-user-bubble-wrapper">
+                            <div className="im-user-text-bubble">
+                              <p lang="ja">{message.text}</p>
+                            </div>
+                            <button
+                              className="im-user-rescue-btn"
+                              type="button"
+                              onClick={() => void openRescueDrawer(message, index)}
+                              aria-label={`第 ${message.turn} 轮：这句说得对吗`}
+                            >
+                              <Lightbulb size={12} aria-hidden="true" />
+                              <span>说得对吗</span>
+                            </button>
                           </div>
                         )}
                       </div>
@@ -1821,6 +1955,126 @@ function App() {
                 </div>
               </div>
             )}
+
+            {/* ================================================================
+                Bottom Sheet 4: 按需单句对齐与急救抽屉 (Rescue Bottom Sheet)
+                ================================================================ */}
+            {rescueDrawerState.isOpen && (
+              <div
+                className="im-bottom-sheet-backdrop"
+                onClick={() => setRescueDrawerState((prev) => ({ ...prev, isOpen: false }))}
+              >
+                <div
+                  className="im-bottom-sheet im-rescue-sheet"
+                  onClick={(e) => e.stopPropagation()}
+                  role="dialog"
+                  aria-label="这句说得对吗"
+                >
+                  <div className="im-sheet-drag-handle" />
+                  <div className="im-sheet-header">
+                    <h3 className="im-sheet-title">
+                      <LifeBuoy size={18} aria-hidden="true" /> 这句说得对吗 (第 {rescueDrawerState.turn} 轮)
+                    </h3>
+                    <button
+                      className="im-sheet-close-btn"
+                      type="button"
+                      onClick={() => setRescueDrawerState((prev) => ({ ...prev, isOpen: false }))}
+                      aria-label="关闭急救抽屉"
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+
+                  <div className="im-sheet-content im-rescue-sheet-content">
+                    {/* 原发话卡片 */}
+                    <div className="im-rescue-user-quote">
+                      <span className="im-rescue-label">你的发话：</span>
+                      <p lang="ja">{rescueDrawerState.userFinal}</p>
+                    </div>
+
+                    {rescueDrawerState.loading && (
+                      <div className="im-rescue-loading">
+                        <span className="pulse-dot" aria-hidden="true" />
+                        <p>相手正在核对意图与地道度点拨...</p>
+                      </div>
+                    )}
+
+                    {rescueDrawerState.error && (
+                      <div className="im-rescue-error" role="alert">
+                        <AlertCircle size={16} />
+                        <p>{rescueDrawerState.error}</p>
+                      </div>
+                    )}
+
+                    {rescueDrawerState.data && (
+                      <div className="im-rescue-modules">
+                        {/* 模块 1: 相手理解的意图 */}
+                        <div className="im-rescue-card intent-card">
+                          <div className="im-rescue-card-title">
+                            <MessageCircle size={15} /> 相手理解的意图
+                          </div>
+                          <p className="im-rescue-intent-text">
+                            {rescueDrawerState.data.interpretedIntentZh}
+                          </p>
+                        </div>
+
+                        {/* 模块 2: 地道升级参考 */}
+                        <div className="im-rescue-card suggestion-card">
+                          <div className="im-rescue-card-header">
+                            <span className="im-rescue-card-title">
+                              <Sparkles size={15} /> 地道升级参考
+                            </span>
+                            <button
+                              className={`im-rescue-listen-btn ${isPlayingRescueTts ? 'is-playing' : ''}`}
+                              type="button"
+                              onClick={() => void playRescueAudio(rescueDrawerState.data?.suggestedJa || '')}
+                              disabled={isPlayingRescueTts || !config?.elevenlabs.ttsAvailable}
+                              aria-label="试听地道推荐表达"
+                            >
+                              <Volume2 size={14} />
+                              <span>{isPlayingRescueTts ? '播放中...' : '试听'}</span>
+                            </button>
+                          </div>
+                          <p className="im-rescue-suggested-ja" lang="ja">
+                            {rescueDrawerState.data.suggestedJa}
+                          </p>
+                          <p className="im-rescue-politeness-tip">
+                            <span className="im-rescue-badge">点拨</span> {rescueDrawerState.data.politenessTipZh}
+                          </p>
+                        </div>
+
+                        {/* 模块 3: 逃生通道 - 撤回本轮重说 */}
+                        <div className="im-rescue-card rewind-card">
+                          <div className="im-rescue-card-title">
+                            <RotateCcw size={15} /> 逃生通道
+                          </div>
+                          <p className="im-rescue-rewind-desc">
+                            觉得没表达好？撤回本轮发话，回滚到发话前状态重新组织语言。
+                          </p>
+                          <button
+                            className="secondary-button im-rescue-rewind-btn"
+                            type="button"
+                            onClick={() => handleRewindTurn(rescueDrawerState.turn)}
+                          >
+                            <RotateCcw size={14} /> 撤回本轮并重新表达
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="im-sheet-footer">
+                    <button
+                      className="primary-button"
+                      type="button"
+                      onClick={() => setRescueDrawerState((prev) => ({ ...prev, isOpen: false }))}
+                    >
+                      关闭
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         )}
       </main>
@@ -1874,26 +2128,34 @@ function Home({
   const [customClarifyInput, setCustomClarifyInput] = useState('')
 
   return (
-    <div className="intro-block">
-      <h1 id="conversation-heading">日语语音会话</h1>
-      <p>听懂对方，完成这段交流。</p>
-
-      <div className="home-tabs">
-        <button
-          className={`home-tab ${homeTab === 'spark' ? 'is-active' : ''}`}
-          type="button"
-          onClick={() => { setHomeTab('spark'); onResetCustom() }}
-        >
-          灵感速练
-        </button>
-        <button
-          className={`home-tab ${homeTab === 'custom' ? 'is-active' : ''}`}
-          type="button"
-          onClick={() => setHomeTab('custom')}
-        >
-          自定义场景
-        </button>
+    <div className="intro-block home-dual-layout">
+      <header className="home-header">
+        <h1 id="conversation-heading">日语语音会话</h1>
+        <p className="home-subtitle">听懂对方，完成这段交流。</p>
+      </header>
+      <div className="home-tabs-container">
+        <div className="home-tabs" role="tablist" aria-label="场景选择模式">
+          <button
+            role="tab"
+            aria-selected={homeTab === 'spark'}
+            className={`home-tab ${homeTab === 'spark' ? 'is-active' : ''}`}
+            type="button"
+            onClick={() => { setHomeTab('spark'); onResetCustom() }}
+          >
+            灵感速练
+          </button>
+          <button
+            role="tab"
+            aria-selected={homeTab === 'custom'}
+            className={`home-tab ${homeTab === 'custom' ? 'is-active' : ''}`}
+            type="button"
+            onClick={() => setHomeTab('custom')}
+          >
+            自定义场景
+          </button>
+        </div>
       </div>
+      <div className="home-main-grid">
 
       {homeTab === 'spark' && (
         <div className="spark-card">
@@ -2071,6 +2333,7 @@ function Home({
           )}
         </div>
       )}
+      </div>
     </div>
   )
 }
