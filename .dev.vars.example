@@ -1,0 +1,19 @@
+# Copy to .dev.vars for local development. Never commit .dev.vars.
+# Leave keys empty to inspect the clearly labelled text-only demo flow.
+ELEVENLABS_API_KEY=
+OPENAI_API_KEY=
+
+# Required for signing dynamic scenario and session tokens. Use a unique high-entropy value.
+SCENARIO_SIGNING_SECRET=
+
+# Required for real ElevenLabs TTS. This is a voice ID, not a permanent key.
+ELEVENLABS_VOICE_ID=
+
+# Local-only flow inspection. Keep false in deployed environments.
+ALLOW_MOCK=true
+
+# Optional fixed server-side overrides. The browser cannot choose these values.
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-5.6-luna
+ELEVENLABS_STT_MODEL=scribe_v2_realtime
+ELEVENLABS_TTS_MODEL=eleven_flash_v2_5

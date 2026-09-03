@@ -1,0 +1,33 @@
+{
+  "name": "kaiwademo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build && node scripts/sanitize-build.mjs",
+    "check": "tsc -b",
+    "test": "vitest run",
+    "preview": "vite preview",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "@elevenlabs/client": "^1.23.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.54.2",
+    "@cloudflare/workers-types": "^5.20260901.1",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "oxlint": "^1.79.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.127.1"
+  }
+}

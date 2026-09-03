@@ -1,0 +1,47 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", "PingFang SC", "Noto Sans CJK JP", sans-serif;
+  color: #1B2B38;
+  background: #EAF8E9;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: #EAF8E9;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100dvh;
+  margin: 0;
+  background: #EAF8E9;
+}
+
+button,
+textarea { font: inherit; }
+
+button { touch-action: manipulation; }
+
+button:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+a:focus-visible {
+  outline: 3px solid #FABA9D;
+  outline-offset: 3px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+::selection {
+  color: #1B2B38;
+  background: #EDDEA5;
+}

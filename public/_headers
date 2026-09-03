@@ -1,0 +1,9 @@
+/*
+  Content-Security-Policy: default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self' blob:; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' wss://api.elevenlabs.io https://api.elevenlabs.io
+  Permissions-Policy: microphone=(self), camera=(), geolocation=()
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

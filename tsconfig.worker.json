@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.worker.tsbuildinfo",
+    "types": ["@cloudflare/workers-types", "vite/client"],
+    "module": "esnext",
+    "moduleResolution": "bundler"
+  },
+  "include": ["worker", "tests/worker"]
+}

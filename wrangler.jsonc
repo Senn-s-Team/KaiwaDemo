@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kaiwa-demo",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "vars": {
+    "OPENAI_BASE_URL": "https://sub2api.chinnsenn.com/v1",
+    "OPENAI_MODEL": "gemini-3.7-flash-high",
+    "ELEVENLABS_STT_MODEL": "scribe_v2_realtime",
+    "ELEVENLABS_TTS_MODEL": "eleven_flash_v2_5",
+    "ELEVENLABS_VOICE_ID": "Hdr5XDtXP7R1qHDNSwll",
+    "ALLOW_MOCK": "false"
+  }
+}
