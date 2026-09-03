@@ -43,9 +43,9 @@ const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1'
 
 export class ScenarioDraftError extends Error {
   readonly code: string
-  readonly status: 500 | 502 | 503
+  readonly status: 500 | 502 | 503 | 504
 
-  constructor(code: string, message: string, status: 500 | 502 | 503) {
+  constructor(code: string, message: string, status: 500 | 502 | 503 | 504) {
     super(message)
     this.code = code
     this.status = status
@@ -254,9 +254,10 @@ export async function draftScenario(env: Env, request: ScenarioDraftRequest): Pr
     throw new ScenarioDraftError('openai_base_url_invalid', 'OPENAI_BASE_URL is invalid.', 500)
   }
 
+  const mustGenerate = request.forceGenerate === true
+    || request.clarifications.length >= LIMITS.maxScenarioDraftClarifications
   const promptContent = buildScenarioDraftPrompt(request)
   const isResponsesEndpoint = responsesUrl.endsWith('/responses')
-  
   const requestBody = isResponsesEndpoint
     ? {
         model: env.OPENAI_MODEL || DEFAULT_MODELS.openai,
@@ -275,17 +276,35 @@ export async function draftScenario(env: Env, request: ScenarioDraftRequest): Pr
         response_format: { type: 'json_object' },
       }
 
-  const upstream = await fetch(responsesUrl, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      'content-type': 'application/json',
-      accept: 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-  })
+  let upstream: Response
+  try {
+    upstream = await fetch(responsesUrl, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        'content-type': 'application/json',
+        accept: 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(20_000),
+    })
+  } catch {
+    if (mustGenerate) {
+      return {
+        status: 'ready',
+        scenario: createFallbackReadyScenario(request.inputZh),
+      }
+    }
+    throw new ScenarioDraftError('scenario_draft_request_timeout', 'Scenario draft request timed out. Please retry.', 504)
+  }
 
   if (!upstream.ok) {
+    if (mustGenerate) {
+      return {
+        status: 'ready',
+        scenario: createFallbackReadyScenario(request.inputZh),
+      }
+    }
     let upstreamErrText = ''
     try {
       upstreamErrText = (await upstream.text()).slice(0, 500)
@@ -313,9 +332,6 @@ export async function draftScenario(env: Env, request: ScenarioDraftRequest): Pr
     }
     throw new ScenarioDraftError('scenario_draft_model_invalid', 'Scenario draft model output is invalid. Retry this request.', 502)
   }
-
-  const mustGenerate = request.forceGenerate === true
-    || request.clarifications.length >= LIMITS.maxScenarioDraftClarifications
   if (mustGenerate && result.status === 'needs_clarification') {
     return {
       status: 'ready',

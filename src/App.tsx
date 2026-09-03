@@ -661,7 +661,6 @@ function App() {
       sessionStartLockRef.current = false
     }
   }, [beginOperation, config, isCurrentOperation, online, playAiText, replaceCurrentRound, replaceMessages, resetTranscript, transitionTo, unlockAudio])
-
   const handleDraftScenario = useCallback(async (customPrompt?: string, clarificationsList?: Array<{ questionZh: string; answerZh: string }>, forceGen?: boolean) => {
     const text = customPrompt ?? customInputZh
     if (!text.trim()) return
@@ -670,7 +669,7 @@ function App() {
     const list = clarificationsList ?? clarifications
 
     try {
-      const res = await draftScenario(text.trim(), list, forceGen ?? false)
+      const res = await draftScenario(text.trim(), list, forceGen ?? false, AbortSignal.timeout(25_000))
       if (res.status === 'needs_clarification') {
         setPendingClarification({ questionZh: res.questionZh, optionsZh: res.optionsZh })
       } else {
@@ -690,7 +689,7 @@ function App() {
     try {
       await startSparkPractice(
         spark,
-        draftScenario,
+        (prompt, clars, force) => draftScenario(prompt, clars, force, AbortSignal.timeout(25_000)),
         (scenarioToken) => startSession({ scenarioToken }),
       )
     } catch (error) {
