@@ -10,6 +10,9 @@ export function microphoneLevelToBars(level: number, barCount = 7): number {
   return Math.min(barCount, Math.max(1, Math.ceil(level * barCount)))
 }
 
+// 静音判定与倒计时策略：
+// - 以 STT 实时转写事件（lastTextAtRef）为主驱动（语义级）
+// - 麦克风能量达标事件（lastVoiceAtRef）为辅助兜底
 export function shouldWarnSilence(recordingSeconds: number, speechDetected: boolean): boolean {
   return recordingSeconds >= 4 && !speechDetected
 }

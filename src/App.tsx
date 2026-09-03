@@ -1,3 +1,4 @@
+import { ArrowRight, BookOpen, Keyboard, Lightbulb, MessageCircle, Mic, Pencil, Sparkles, Square, Target, ThumbsUp, TrendingUp, Volume2, Wrench, X, AlertCircle } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
@@ -26,15 +27,19 @@ import { CachedTtsPlayer, TtsCancelledError } from './lib/tts'
 import { formatDuration, toUiError } from './lib/ui'
 import { consumePreparedScenario, prepareNextScenario, scenarioForPractice } from './scenarios/queue'
 import { deriveScenarioReveal } from './scenarios/reveal'
+import { drawRandomScenario, type VocabScenario } from './data/vocab-bank'
 import type {
   AppPhase,
   ConversationFeedbackResponse,
   ConversationMessage,
+  DynamicScenarioData,
   FeedbackImprovement,
   FeedbackLoadingState,
+  HintResponse,
   PrototypeConfig,
   RoundRecord,
   SelfAssessment,
+  SessionCheckpointResponse,
   SessionReport,
   SessionScenario,
   TranscriptText,
@@ -149,13 +154,14 @@ function App() {
   const [selfAssessment, setSelfAssessment] = useState<SelfAssessment>(null)
   const [previousReport, setPreviousReport] = useState<SessionReport | null>(null)
   const [reviewAudioNotice, setReviewAudioNotice] = useState('')
-  const [homeMode, setHomeMode] = useState<'catalog' | 'custom'>('catalog')
+  const [sparkScenario, setSparkScenario] = useState<VocabScenario>(() => drawRandomScenario())
+  const [homeTab, setHomeTab] = useState<'spark' | 'custom'>('spark')
   const [customInputZh, setCustomInputZh] = useState('')
   const [clarifications, setClarifications] = useState<Array<{ questionZh: string; answerZh: string }>>([])
   const [pendingClarification, setPendingClarification] = useState<{ questionZh: string; optionsZh: readonly string[] } | null>(null)
-  const [readyScenarioData, setReadyScenarioData] = useState<{ scenario: import('./types').DynamicScenarioData; scenarioToken: string } | null>(null)
+  const [readyScenarioData, setReadyScenarioData] = useState<{ scenario: DynamicScenarioData; scenarioToken: string } | null>(null)
   const [isDraftingScenario, setIsDraftingScenario] = useState(false)
-  const [hintData, setHintData] = useState<import('./types').HintResponse | null>(null)
+  const [hintData, setHintData] = useState<HintResponse | null>(null)
   const [hintLevel, setHintLevel] = useState<number>(0)
   const [isLoadingHint, setIsLoadingHint] = useState(false)
   const [showHintSheet, setShowHintSheet] = useState(false)
@@ -166,7 +172,7 @@ function App() {
   const [expandedAiMessageIds, setExpandedAiMessageIds] = useState<Set<string>>(new Set())
   const [activeAiMessageId, setActiveAiMessageId] = useState<string | null>(null)
   const [playedAiMessageIds, setPlayedAiMessageIds] = useState<Set<string>>(new Set())
-  const [checkpointData, setCheckpointData] = useState<import('./types').SessionCheckpointResponse | null>(null)
+  const [checkpointData, setCheckpointData] = useState<SessionCheckpointResponse | null>(null)
   const [, setIsCheckingCheckpoint] = useState(false)
   const [feedbackData, setFeedbackData] = useState<ConversationFeedbackResponse | null>(null)
   const [feedbackStatus, setFeedbackStatus] = useState<FeedbackLoadingState>('idle')
@@ -1250,8 +1256,14 @@ function App() {
               ready={config !== null}
               online={online}
               error={uiError}
-              homeMode={homeMode}
-              setHomeMode={setHomeMode}
+              homeTab={homeTab}
+              setHomeTab={setHomeTab}
+              sparkScenario={sparkScenario}
+              setSparkScenario={setSparkScenario}
+              onStartSpark={(sc) => {
+                const prompt = `场所：${sc.settingZh}。对方：${sc.partnerZh}。挑战：${sc.challengeZh}。参考表达：${sc.keyExpressions.join('、')}`
+                void handleDraftScenario(prompt)
+              }}
               customInputZh={customInputZh}
               setCustomInputZh={setCustomInputZh}
               clarifications={clarifications}
@@ -1260,10 +1272,8 @@ function App() {
               isDraftingScenario={isDraftingScenario}
               onDraftScenario={handleDraftScenario}
               onAnswerClarification={handleAnswerClarification}
-              onStart={() => void startSession()}
               onStartDynamic={(tok) => void startSession({ scenarioToken: tok })}
               onResetCustom={() => { setClarifications([]); setPendingClarification(null); setReadyScenarioData(null) }}
-              onRetry={() => void retryFailedStep()}
             />
           </section>
         )}
@@ -1311,7 +1321,7 @@ function App() {
             <header className="im-top-bar">
               <div className="im-top-info">
                 <div className="im-top-avatar" aria-hidden="true">
-                  {scenario?.dynamicData ? '💇' : '💬'}
+                  {scenario?.dynamicData ? <MessageCircle size={18} /> : <MessageCircle size={18} />}
                 </div>
                 <div className="im-top-meta">
                   <h2 className="im-top-name" title={scenario?.dynamicData?.aiRole || '相手'}>
@@ -1330,7 +1340,7 @@ function App() {
                     onClick={() => setShowGoalsSheet((show) => !show)}
                     aria-label="查看训练目标"
                   >
-                    🎯 目标
+                    <Target size={16} /> 目标
                   </button>
                 )}
                 <button
@@ -1356,7 +1366,7 @@ function App() {
 
               {checkpointData && checkpointData.canExtend && checkpointData.newSessionToken && checkpointData.nextCap && (
                 <div className="im-checkpoint-card">
-                  <p><strong>🎯 阶段目标检查：</strong>还有 {checkpointData.remainingGoals.length} 项小目标未完成，要延长 4 轮吗？</p>
+                  <p><strong><Target size={16} /> 阶段目标检查：</strong>还有 {checkpointData.remainingGoals.length} 项小目标未完成，要延长 4 轮吗？</p>
                   <div className="im-checkpoint-btns">
                     <button className="primary-button" type="button" onClick={() => handleExtendSession(checkpointData.nextCap!, checkpointData.newSessionToken!)}>
                       继续 4 轮 (至 {checkpointData.nextCap} 轮)
@@ -1382,7 +1392,7 @@ function App() {
                     <div className={`im-message-item ${isAssistant ? 'is-ai' : 'is-user'}`} key={message.id}>
                       {isAssistant && (
                         <div className="im-sender-avatar" aria-hidden="true">
-                          {scenario?.dynamicData ? '💇' : 'AI'}
+                          {scenario?.dynamicData ? <MessageCircle size={18} /> : 'AI'}
                         </div>
                       )}
                       <div className="im-msg-column">
@@ -1472,7 +1482,7 @@ function App() {
                 {/* 错误提示卡片 */}
                 {uiError && (
                   <div className="im-error-card" role="alert">
-                    <strong>⚠️ {uiError.title}</strong>
+                    <strong><AlertCircle size={16} /> {uiError.title}</strong>
                     <p>{uiError.message}</p>
                   </div>
                 )}
@@ -1498,7 +1508,7 @@ function App() {
                     onClick={() => setDockInputMode((m) => m === 'voice' ? 'text' : 'voice')}
                     title={dockInputMode === 'voice' ? '切换为键盘打字' : '切换为语音输入'}
                   >
-                    {dockInputMode === 'voice' ? '⌨️' : '🎙️'}
+                    {dockInputMode === 'voice' ? <Keyboard size={18} /> : <Mic size={18} />}
                   </button>
 
                   {dockInputMode === 'voice' ? (
@@ -1560,7 +1570,7 @@ function App() {
                     title="获取表达提示"
                     disabled={isLoadingHint}
                   >
-                    💡
+                    <Lightbulb size={18} />
                   </button>
                 </>
               ) : phase === 'recording' ? (
@@ -1574,7 +1584,7 @@ function App() {
                     }}
                   >
                     <span className="im-dock-recording-indicator" aria-hidden="true">
-                      {silenceCountdownSeconds ?? '■'}
+                      {silenceCountdownSeconds ?? <Square size={14} fill="currentColor" />}
                     </span>
                     <span className="im-dock-recording-copy">
                       {silenceCountdownSeconds !== null ? '秒后自动结束，说话可继续' : '说完了，点击结束'}
@@ -1586,7 +1596,7 @@ function App() {
                     onClick={enterTextInput}
                     title="放弃录音改用打字"
                   >
-                    ⌨️
+                    <Keyboard size={18} />
                   </button>
                 </div>
               ) : phase === 'confirming_transcript' ? (
@@ -1597,7 +1607,7 @@ function App() {
                     style={{ background: 'var(--butter)' }}
                     onClick={() => setShowTranscriptSheet(true)}
                   >
-                    📝 检查/修改回答内容 ➔
+                    <Pencil size={16} /> 检查/修改回答内容 <ArrowRight size={14} />
                   </button>
                 </div>
               ) : (
@@ -1631,8 +1641,8 @@ function App() {
                 <div className="im-bottom-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className="im-sheet-drag-handle" />
                   <div className="im-sheet-header">
-                    <h3 className="im-sheet-title">{manualInput ? '✍️ 确认文字回答' : '🎙️ 确认语音转写'}</h3>
-                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowTranscriptSheet(false)}>✕</button>
+                    <h3 className="im-sheet-title">{manualInput ? '确认文字回答' : <><Mic size={18} /> 确认语音转写</>}</h3>
+                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowTranscriptSheet(false)}><X size={18} /></button>
                   </div>
                   <div className="im-sheet-content">
                     <label htmlFor="transcript-sheet-input" style={{ fontSize: '0.85rem', fontWeight: 700, display: 'block', marginBottom: '6px' }}>
@@ -1680,7 +1690,7 @@ function App() {
                         void rerecord()
                       }}
                     >
-                      🎙️ 重录
+                      <Mic size={18} /> 重录
                     </button>
                     <button
                       className="primary-button"
@@ -1691,7 +1701,7 @@ function App() {
                         void confirmTranscript()
                       }}
                     >
-                      确认发送 ➔
+                      确认发送 <ArrowRight size={14} />
                     </button>
                   </div>
                 </div>
@@ -1706,8 +1716,8 @@ function App() {
                 <div className="im-bottom-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className="im-sheet-drag-handle" />
                   <div className="im-sheet-header">
-                    <h3 className="im-sheet-title">💡 表达提示 ({Math.max(1, hintLevel)}/4 级)</h3>
-                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowHintSheet(false)}>✕</button>
+                    <h3 className="im-sheet-title"><Lightbulb size={18} /> 表达提示 ({Math.max(1, hintLevel)}/4 级)</h3>
+                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowHintSheet(false)}><X size={18} /></button>
                   </div>
                   <div className="im-sheet-content">
                     {isLoadingHint && !hintData && (
@@ -1747,7 +1757,7 @@ function App() {
                         type="button"
                         onClick={() => setHintLevel((l) => Math.min(4, l + 1))}
                       >
-                        进阶下一级提示 ➔
+                        进阶下一级提示 <ArrowRight size={14} />
                       </button>
                     )}
                     <button
@@ -1770,8 +1780,8 @@ function App() {
                 <div className="im-bottom-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className="im-sheet-drag-handle" />
                   <div className="im-sheet-header">
-                    <h3 className="im-sheet-title">🎯 场景目标：{scenario.dynamicData.titleZh}</h3>
-                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowGoalsSheet(false)}>✕</button>
+                    <h3 className="im-sheet-title"><Target size={16} /> 场景目标：{scenario.dynamicData.titleZh}</h3>
+                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowGoalsSheet(false)}><X size={18} /></button>
                   </div>
                   <div className="im-sheet-content">
                     <p style={{ fontSize: '0.85rem', color: 'var(--muted)', marginTop: 0 }}>
@@ -1818,8 +1828,21 @@ interface HomeProps {
   ready: boolean
   online: boolean
   error: UiError | null
-  onStart: () => void
-  onRetry: () => void
+  homeTab: 'spark' | 'custom'
+  setHomeTab: (tab: 'spark' | 'custom') => void
+  sparkScenario: VocabScenario
+  setSparkScenario: React.Dispatch<React.SetStateAction<VocabScenario>>
+  onStartSpark: (scenario: VocabScenario) => void
+  customInputZh: string
+  setCustomInputZh: (val: string) => void
+  clarifications: Array<{ questionZh: string; answerZh: string }>
+  pendingClarification: { questionZh: string; optionsZh: readonly string[] } | null
+  readyScenarioData: { scenario: DynamicScenarioData; scenarioToken: string } | null
+  isDraftingScenario: boolean
+  onDraftScenario: (prompt?: string, clarList?: Array<{ questionZh: string; answerZh: string }>, force?: boolean) => void
+  onAnswerClarification: (ans: string) => void
+  onStartDynamic: (scenarioToken: string) => void
+  onResetCustom: () => void
 }
 
 function Home({
@@ -1827,8 +1850,11 @@ function Home({
   ready,
   online,
   error,
-  homeMode,
-  setHomeMode,
+  homeTab,
+  setHomeTab,
+  sparkScenario,
+  setSparkScenario,
+  onStartSpark,
   customInputZh,
   setCustomInputZh,
   clarifications,
@@ -1837,24 +1863,9 @@ function Home({
   isDraftingScenario,
   onDraftScenario,
   onAnswerClarification,
-  onStart,
   onStartDynamic,
   onResetCustom,
-  onRetry,
-}: HomeProps & {
-  homeMode: 'catalog' | 'custom'
-  setHomeMode: (mode: 'catalog' | 'custom') => void
-  customInputZh: string
-  setCustomInputZh: (val: string) => void
-  clarifications: Array<{ questionZh: string; answerZh: string }>
-  pendingClarification: { questionZh: string; optionsZh: readonly string[] } | null
-  readyScenarioData: { scenario: import('./types').DynamicScenarioData; scenarioToken: string } | null
-  isDraftingScenario: boolean
-  onDraftScenario: (prompt?: string, clarList?: Array<{ questionZh: string; answerZh: string }>, force?: boolean) => void
-  onAnswerClarification: (ans: string) => void
-  onStartDynamic: (scenarioToken: string) => void
-  onResetCustom: () => void
-}): React.JSX.Element {
+}: HomeProps): React.JSX.Element {
   const [customClarifyInput, setCustomClarifyInput] = useState('')
 
   return (
@@ -1862,36 +1873,59 @@ function Home({
       <h1 id="conversation-heading">日语语音会话</h1>
       <p>听懂对方，完成这段交流。</p>
 
-      <div className="mode-tabs">
+      <div className="home-tabs">
         <button
-          className={`mode-tab ${homeMode === 'catalog' ? 'is-active' : ''}`}
+          className={`home-tab ${homeTab === 'spark' ? 'is-active' : ''}`}
           type="button"
-          onClick={() => { setHomeMode('catalog'); onResetCustom() }}
+          onClick={() => { setHomeTab('spark'); onResetCustom() }}
         >
-          🎲 随机场景
+          灵感速练
         </button>
         <button
-          className={`mode-tab ${homeMode === 'custom' ? 'is-active' : ''}`}
+          className={`home-tab ${homeTab === 'custom' ? 'is-active' : ''}`}
           type="button"
-          onClick={() => setHomeMode('custom')}
+          onClick={() => setHomeTab('custom')}
         >
-          ✨ 自定义场景
+          自定义场景
         </button>
       </div>
 
-      {homeMode === 'catalog' && (
-        <>
-          <p className="session-length">预计 3-5 分钟 · 5 轮</p>
-          <p className="microphone-hint">开始后会请求麦克风权限，录音完成后会自动释放硬件占用。</p>
+      {homeTab === 'spark' && (
+        <div className="spark-card">
+          <span className="spark-card-domain">{sparkScenario.domainZh}</span>
+          <h2 className="spark-card-title">{sparkScenario.titleZh} <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: '0.9rem' }}>({sparkScenario.titleJa})</span></h2>
+          <div className="spark-card-row">
+            <span className="spark-card-label">场所环境：</span>
+            <span>{sparkScenario.settingZh}</span>
+          </div>
+          <div className="spark-card-row">
+            <span className="spark-card-label">对方角色：</span>
+            <span>{sparkScenario.partnerZh}</span>
+          </div>
+          <div className="spark-card-row">
+            <span className="spark-card-label">核心挑战：</span>
+            <span>{sparkScenario.challengeZh}</span>
+          </div>
+          <div style={{ marginTop: '10px' }}>
+            <span className="spark-card-label" style={{ display: 'block', marginBottom: '4px' }}>必备表达 (N2)：</span>
+            <div className="spark-expressions">
+              {sparkScenario.keyExpressions.map((exp) => (
+                <span key={exp} className="spark-expression-tag" lang="ja">
+                  {exp}
+                </span>
+              ))}
+            </div>
+          </div>
+
           {error && (
-            <div className="error-panel" role="alert">
+            <div className="error-panel" role="alert" style={{ marginTop: '14px' }}>
               <div>
                 <p className="error-title">{error.title}</p>
                 <p>{error.message}</p>
               </div>
               <div className="error-actions">
                 {online && (
-                  <button className="primary-button" type="button" onClick={onRetry}>
+                  <button className="primary-button" type="button" onClick={() => onStartSpark(sparkScenario)}>
                     重试
                   </button>
                 )}
@@ -1899,18 +1933,28 @@ function Home({
             </div>
           )}
 
-          <button
-            className="primary-button start-button"
-            type="button"
-            onClick={onStart}
-            disabled={loading || !ready || !online}
-          >
-            {loading ? '正在准备' : '开始随机练习'}
-          </button>
-        </>
+          <div className="spark-actions">
+            <button
+              className="spark-shuffle-btn"
+              type="button"
+              onClick={() => setSparkScenario(drawRandomScenario(sparkScenario.id))}
+              disabled={isDraftingScenario}
+            >
+              换一组灵感
+            </button>
+            <button
+              className="spark-start-btn"
+              type="button"
+              onClick={() => onStartSpark(sparkScenario)}
+              disabled={loading || !ready || isDraftingScenario || !online}
+            >
+              {isDraftingScenario ? '正在设计场景...' : '开始此场景对练'}
+            </button>
+          </div>
+        </div>
       )}
 
-      {homeMode === 'custom' && (
+      {homeTab === 'custom' && (
         <div className="custom-scenario-box">
           {error && (
             <div className="error-panel" role="alert">
@@ -1954,7 +1998,7 @@ function Home({
 
           {pendingClarification && (
             <div className="clarification-panel">
-              <p className="clarification-question"><strong>🤔 确认意图：</strong>{pendingClarification.questionZh}</p>
+              <p className="clarification-question"><strong>确认意图：</strong>{pendingClarification.questionZh}</p>
               <div className="clarification-options">
                 {pendingClarification.optionsZh.map((opt) => (
                   <button key={opt} className="secondary-button clarify-opt-btn" type="button" onClick={() => onAnswerClarification(opt)}>
@@ -1980,14 +2024,14 @@ function Home({
                 </button>
               </div>
               <button className="text-button skip-clarify-btn" type="button" onClick={() => onDraftScenario(customInputZh, clarifications, true)}>
-                跳过追问，直接生成 ➔
+                跳过追问，直接生成 <ArrowRight size={14} />
               </button>
             </div>
           )}
 
           {readyScenarioData && (
             <div className="ready-scenario-card">
-              <p className="ready-badge">✨ 定制场景已就绪</p>
+              <p className="ready-badge"><Sparkles size={16} /> 定制场景已就绪</p>
               <h3>{readyScenarioData.scenario.titleZh}</h3>
               <p className="ready-desc">{readyScenarioData.scenario.summaryZh}</p>
               <div className="ready-meta">
@@ -1995,7 +2039,7 @@ function Home({
                 <p><strong>你的角色：</strong>{readyScenarioData.scenario.userRole}</p>
               </div>
               <div className="ready-goals">
-                <strong>🎯 训练目标 (6~8 轮自适应)：</strong>
+                <strong><Target size={16} /> 训练目标 (6~8 轮自适应)：</strong>
                 <ul>
                   {readyScenarioData.scenario.coreGoals.map((g) => (
                     <li key={g.id}><strong>[核心]</strong> {g.titleZh}: {g.descriptionZh}</li>
@@ -2176,14 +2220,14 @@ function SessionComplete({
           type="button"
           onClick={() => setActiveTab('conversation')}
         >
-          💬 完整对话
+          <MessageCircle size={18} /> 完整对话
         </button>
         <button
           className={`review-tab ${activeTab === 'feedback' ? 'is-active' : ''}`}
           type="button"
           onClick={() => setActiveTab('feedback')}
         >
-          ✨ 反馈重点
+          <Sparkles size={18} /> 反馈重点
           {feedbackStatus === 'loading' && <span className="tab-badge">生成中</span>}
           {feedbackStatus === 'success' && <span className="tab-badge is-ready">就绪</span>}
           {feedbackStatus === 'error' && <span className="tab-badge is-error">失败</span>}
@@ -2194,7 +2238,7 @@ function SessionComplete({
         <div className="review-conversation-tab">
           {practiceTrend.hasPrevious && (
             <section className="practice-trend-card" aria-labelledby="trend-heading">
-              <h2 id="trend-heading">📈 同场景二刷趋势对比</h2>
+              <h2 id="trend-heading"><TrendingUp size={18} /> 同场景二刷趋势对比</h2>
               <p className="trend-narrative">{practiceTrend.narrativeZh}</p>
               <div className="trend-grid">
                 {practiceTrend.metrics.map((m, idx) => (
@@ -2244,7 +2288,7 @@ function SessionComplete({
                         type="button"
                         onClick={() => onReplayAi(message.text)}
                       >
-                        🔊 再听
+                        <Volume2 size={16} /> 再听
                       </button>
                     </div>
                     <p className="review-message-text" lang="ja">{message.text}</p>
@@ -2293,7 +2337,7 @@ function SessionComplete({
                                 }))
                               }
                             >
-                              💡 建议 {idx + 1}：{imp.type === 'grammar_fix' ? '语法修正' : '地道表达'} {isSugOpen ? '▲' : '▼'}
+                              <Lightbulb size={18} /> 建议 {idx + 1}：{imp.type === 'grammar_fix' ? '语法修正' : '地道表达'} {isSugOpen ? '▲' : '▼'}
                             </button>
                             {isSugOpen && (
                               <div className="improvement-dropdown">
@@ -2345,12 +2389,12 @@ function SessionComplete({
           {feedbackStatus === 'success' && feedbackData && (
             <div className="feedback-content">
               <section className="feedback-section goal-summary-card">
-                <h2>🎯 交流目标达成总结</h2>
+                <h2><Target size={16} /> 交流目标达成总结</h2>
                 <p>{feedbackData.goalSummaryZh}</p>
               </section>
 
               <section className="feedback-section strengths-card">
-                <h2>👏 表现出色的两处（Strengths）</h2>
+                <h2><ThumbsUp size={18} /> 表现出色的两处（Strengths）</h2>
                 <ul className="feedback-list">
                   {feedbackData.strengths.map((item, idx) => (
                     <li key={idx}>
@@ -2362,7 +2406,7 @@ function SessionComplete({
               </section>
 
               <section className="feedback-section improvements-card">
-                <h2>🔧 改进与地道表达建议（Improvements）</h2>
+                <h2><Wrench size={18} /> 改进与地道表达建议（Improvements）</h2>
                 <ul className="feedback-list">
                   {feedbackData.improvements.map((item, idx) => (
                     <li key={idx}>
@@ -2373,7 +2417,7 @@ function SessionComplete({
                         </span>
                       </div>
                       <p className="feedback-quote" lang="ja">原句：{item.originalQuoteJa}</p>
-                      <p className="feedback-suggestion" lang="ja">👉 推荐：{item.suggestedJa}</p>
+                      <p className="feedback-suggestion" lang="ja"><ArrowRight size={16} /> 推荐：{item.suggestedJa}</p>
                       <p className="feedback-desc">原因：{item.reasonZh}</p>
                     </li>
                   ))}
@@ -2381,7 +2425,7 @@ function SessionComplete({
               </section>
 
               <section className="feedback-section expressions-card">
-                <h2>📚 值得复用的句型表达（Reusable Expressions）</h2>
+                <h2><BookOpen size={18} /> 值得复用的句型表达（Reusable Expressions）</h2>
                 <div className="expressions-grid">
                   {feedbackData.reusableExpressions.map((item, idx) => (
                     <div key={idx} className="expression-item">
@@ -2410,7 +2454,7 @@ function SessionComplete({
               </section>
 
               <section className="feedback-section retry-task-card">
-                <h2>🎯 针对性单句重说（Targeted Retry）</h2>
+                <h2><Target size={16} /> 针对性单句重说（Targeted Retry）</h2>
                 <div className="retry-task-context">
                   <p><strong>相手当时问题 (第 {feedbackData.retryTask.turn} 轮)：</strong><span lang="ja">{feedbackData.retryTask.targetAiPromptJa}</span></p>
                   <p><strong>你的第一次回答：</strong><span lang="ja">{feedbackData.retryTask.userOriginalJa}</span></p>
@@ -2421,10 +2465,10 @@ function SessionComplete({
                       type="button"
                       onClick={() => onReplayAi(feedbackData.retryTask.recommendedReferenceJa)}
                     >
-                      🔊 听参考表达
+                      <Volume2 size={16} /> 听参考表达
                     </button>
                   </div>
-                  <p className="retry-hint">💡 中文思路提示：{feedbackData.retryTask.hintZh}</p>
+                  <p className="retry-hint"><Lightbulb size={18} /> 中文思路提示：{feedbackData.retryTask.hintZh}</p>
                 </div>
 
                 {retryErrorMsg && <p className="inline-error" role="alert">{retryErrorMsg}</p>}
@@ -2432,7 +2476,7 @@ function SessionComplete({
                 {retryAudioState === 'idle' && (
                   <div className="retry-actions">
                     <button className="primary-button retry-mic-btn" type="button" onClick={() => void handleStartRetryRecord()}>
-                      🎙️ 开始重说 (录音)
+                      <Mic size={18} /> 开始重说 (录音)
                     </button>
                     <button
                       className="text-button retry-text-toggle"
@@ -2485,7 +2529,7 @@ function SessionComplete({
 
                 {retryAudioState === 'completed' && (
                   <div className="retry-completed-panel">
-                    <h3>✨ 第一次 vs 这次重说 文本对比</h3>
+                    <h3><Sparkles size={18} /> 第一次 vs 这次重说 文本对比</h3>
                     <div className="retry-comparison-grid">
                       <div className="retry-comp-col original">
                         <span>第一次回答</span>
