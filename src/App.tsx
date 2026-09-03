@@ -1265,7 +1265,7 @@ function App() {
       </header>
 
       <main id="main-content" className="main-layout">
-        {(phase === 'idle' || phase === 'loading_config' || (phase === 'error' && !isSessionActive)) && (
+        {!isSessionActive && phase !== 'session_complete' && (
           <section className="conversation-panel" aria-labelledby="conversation-heading">
             {!online && <p className="network-notice" role="status">网络已断开。恢复连接后可以继续。</p>}
             <Home
