@@ -20,7 +20,7 @@ import {
 import { buildSessionReport, createRoundRecord, downloadReport, duration } from './lib/metrics'
 import { startSparkPractice } from './lib/spark-practice'
 import { buildPracticeTrend } from './lib/trend'
-import { preflightMicrophone, type MicrophoneReadiness } from './lib/microphone'
+import { type MicrophoneReadiness } from './lib/microphone'
 import { requestMicrophoneStream } from './lib/audio-engine'
 import { createMessageId, createSessionId } from './lib/session'
 import { RealtimeSttSession, SttError } from './lib/stt'
@@ -601,17 +601,14 @@ function App() {
     transitionTo('loading_config')
     setMicrophoneReadiness(config.elevenlabs.sttAvailable ? 'unknown' : 'unavailable')
 
-    // 同一次点击手势内并发完成音频上下文激活与场景初始化（不主动弹窗抢占麦克风，录音时再请求）
-    const audioUnlock = unlockAudio().catch(() => undefined)
-    const microphonePreflight = config.elevenlabs.sttAvailable
-      ? preflightMicrophone(false)
-      : Promise.resolve<MicrophoneReadiness>('unavailable')
+    // 音频预热与麦克风探测非阻塞后台运行，绝不卡死场景初始化
+    void unlockAudio().catch(() => undefined)
     const scenarioRequest = startScenarioSession(scenarioParam, controller.signal)
 
     try {
-      const [, readiness, nextScenario] = await Promise.all([audioUnlock, microphonePreflight, scenarioRequest])
+      const nextScenario = await scenarioRequest
       if (controller.signal.aborted || !isCurrentOperation(operationId)) return
-      setMicrophoneReadiness(readiness)
+      setMicrophoneReadiness(config.elevenlabs.sttAvailable ? 'unknown' : 'unavailable')
       if (!isDynamic && 'scenarioId' in scenarioParam && typeof practiceTarget !== 'string') {
         consumePreparedScenario(config.scenarioCatalog, sessionStorage, scenarioParam.scenarioId)
       }
@@ -643,13 +640,7 @@ function App() {
       setManualInput(false)
       setSelfAssessment(null)
       setUiError(null)
-      setForegroundNotice(
-        readiness === 'denied'
-          ? '未允许麦克风。回答时会直接切换到文字输入。'
-          : readiness === 'unavailable'
-            ? '没有检测到可用麦克风，回答时会直接切换到文字输入。'
-            : '',
-      )
+      setForegroundNotice('')
       await playAiText(nextScenario.firstLine, false, false, operationId, firstMessage.id)
     } catch (error) {
       if (controller.signal.aborted || !isCurrentOperation(operationId)) return

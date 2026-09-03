@@ -106,28 +106,40 @@ export class CachedTtsPlayer {
   private operationId = 0
 
   async unlock(): Promise<void> {
-    if (!this.audio) {
-      this.audio = new Audio()
-      this.audio.preload = 'auto'
-      this.audio.setAttribute('playsinline', '')
-    }
-
-    const silentUrl = URL.createObjectURL(new Blob([createSilentWavBytes().slice().buffer], { type: 'audio/wav' }))
-    this.audio.muted = true
-    this.audio.src = silentUrl
     try {
-      await this.audio.play()
-    } finally {
-      this.audio.pause()
-      this.audio.removeAttribute('src')
-      this.audio.load()
-      this.audio.muted = false
-      URL.revokeObjectURL(silentUrl)
-    }
+      if (!this.audio) {
+        this.audio = new Audio()
+        this.audio.preload = 'auto'
+        this.audio.setAttribute('playsinline', '')
+      }
 
-    const AudioContextConstructor = window.AudioContext
-    if (!this.audioContext) this.audioContext = new AudioContextConstructor()
-    if (this.audioContext.state === 'suspended') await this.audioContext.resume()
+      const silentUrl = URL.createObjectURL(new Blob([createSilentWavBytes().slice().buffer], { type: 'audio/wav' }))
+      this.audio.muted = true
+      this.audio.src = silentUrl
+      try {
+        await Promise.race([
+          this.audio.play(),
+          new Promise((resolve) => setTimeout(resolve, 200)),
+        ])
+      } catch {} finally {
+        this.audio.pause()
+        this.audio.removeAttribute('src')
+        this.audio.load()
+        this.audio.muted = false
+        URL.revokeObjectURL(silentUrl)
+      }
+
+      const AudioContextConstructor = window.AudioContext
+      if (AudioContextConstructor && !this.audioContext) {
+        this.audioContext = new AudioContextConstructor()
+      }
+      if (this.audioContext && this.audioContext.state === 'suspended') {
+        await Promise.race([
+          this.audioContext.resume(),
+          new Promise((resolve) => setTimeout(resolve, 200)),
+        ])
+      }
+    } catch {}
   }
 
   async speak(options: SpeakOptions): Promise<{ generated: boolean; bytes: number }> {
