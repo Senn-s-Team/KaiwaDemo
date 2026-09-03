@@ -24,6 +24,7 @@ import type {
   ReplyStreamEvent,
   ScenarioDraftModelResult,
   ScenarioDraftRequest,
+  DynamicScenarioDefinition,
   SessionCheckpointRequest,
   SessionCheckpointResponse,
   TrainingGoal,
@@ -136,19 +137,33 @@ function parseModelJson(text: string): unknown {
     return JSON.parse(unfenced.slice(start, end + 1))
   }
 }
-function normalizeScenarioDraftResult(value: unknown): unknown {
+export function normalizeScenarioDraftResult(value: unknown): unknown {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
-  const result = { ...(value as Record<string, unknown>) }
-  if (result.status !== 'ready' || typeof result.scenario !== 'object' || result.scenario === null || Array.isArray(result.scenario)) {
+  const raw = value as Record<string, unknown>
+
+  if (raw.status === 'needs_clarification') {
+    const questionZh = typeof raw.questionZh === 'string' ? raw.questionZh.trim() : raw.questionZh
+    const optionsZh = Array.isArray(raw.optionsZh)
+      ? raw.optionsZh.map((x) => (typeof x === 'string' ? x.trim() : x))
+      : raw.optionsZh
+    return {
+      ...raw,
+      questionZh,
+      optionsZh,
+    }
+  }
+
+  if (raw.status !== 'ready' || typeof raw.scenario !== 'object' || raw.scenario === null || Array.isArray(raw.scenario)) {
     return value
   }
 
-  const scenario = { ...(result.scenario as Record<string, unknown>) }
+  const scenario = { ...(raw.scenario as Record<string, unknown>) }
   if (typeof scenario.version === 'string') {
     const versionMatch = scenario.version.match(/\d+/)
     const numericVersion = versionMatch ? Number(versionMatch[0]) : NaN
     if (Number.isInteger(numericVersion) && numericVersion > 0) scenario.version = numericVersion
   }
+
   for (const field of ['worldAnchors', 'followUpPrinciples', 'feedbackFocus'] as const) {
     if (typeof scenario[field] === 'string') scenario[field] = [scenario[field]]
   }
@@ -157,12 +172,22 @@ function normalizeScenarioDraftResult(value: unknown): unknown {
     const goals = scenario[field]
     if (!Array.isArray(goals)) continue
     scenario[field] = goals.map((goal, index) => {
-      if (typeof goal !== 'string') return goal
-      return {
-        id: `${field === 'coreGoals' ? 'core' : 'optional'}_${index + 1}`,
-        titleZh: goal,
-        descriptionZh: goal,
+      if (typeof goal === 'object' && goal !== null && !Array.isArray(goal)) {
+        const g = goal as Record<string, unknown>
+        return {
+          id: typeof g.id === 'string' && g.id.trim() ? g.id.trim() : `${field === 'coreGoals' ? 'core' : 'optional'}_${index + 1}`,
+          titleZh: g.titleZh,
+          descriptionZh: g.descriptionZh,
+        }
       }
+      if (typeof goal === 'string') {
+        return {
+          id: `${field === 'coreGoals' ? 'core' : 'optional'}_${index + 1}`,
+          titleZh: goal,
+          descriptionZh: goal,
+        }
+      }
+      return goal
     })
   }
 
@@ -177,42 +202,47 @@ function normalizeScenarioDraftResult(value: unknown): unknown {
       .join('；')
   }
 
-  result.scenario = scenario
-  return result
+  return {
+    ...raw,
+    scenario,
+  }
 }
 
+export function createFallbackReadyScenario(inputZh: string): DynamicScenarioDefinition {
+  return {
+    id: `dyn_${crypto.randomUUID().slice(0, 8)}`,
+    version: 1,
+    titleZh: inputZh.slice(0, 30) || '日语情境会话',
+    summaryZh: inputZh || '根据您的需求生成的日语日常口语会话练习。',
+    aiRole: '日本の店員・同僚',
+    userRole: '日本語学習者',
+    relationship: '丁寧な関係',
+    tone: '丁寧で自然な日常会話',
+    firstLine: 'こんにちは！お疲れ様です。',
+    userGoal: inputZh || '自然な日本語で相手とコミュニケーションをとる',
+    coreGoals: [
+      { id: 'core_1', titleZh: '清晰传达主要想法', descriptionZh: '用自然的日语表达自己的观点与需求' },
+      { id: 'core_2', titleZh: '积极回应对方提问', descriptionZh: '针对对方说的话给予合适回应并顺畅推进交流' },
+    ],
+    optionalGoals: [
+      { id: 'optional_1', titleZh: '进阶表达与追问', descriptionZh: '在交流中自然运用所学表达并主动提问' },
+    ],
+    worldAnchors: ['日常生活或职场交流背景'],
+    followUpPrinciples: ['根据用户回答自然追问，每次只问一个问题'],
+    hintStrategy: '先明确表达观点，再展开具体细节。',
+    feedbackFocus: ['用词地道性', '对话流畅度'],
+    safetyBoundary: '遵守日常礼貌，不涉及敏感隐私。',
+    recommendedMinTurns: 6,
+    recommendedMaxTurns: 8,
+  }
+}
 
 export async function draftScenario(env: Env, request: ScenarioDraftRequest): Promise<ScenarioDraftModelResult> {
   if (!env.OPENAI_API_KEY) {
     if (env.ALLOW_MOCK === 'true') {
       return {
         status: 'ready',
-        scenario: {
-          id: `dyn_${crypto.randomUUID().slice(0, 8)}`,
-          version: 1,
-          titleZh: request.inputZh.slice(0, 20) || '自定义日语场景',
-          summaryZh: request.inputZh,
-          aiRole: '日本の店員・同僚',
-          userRole: '学習者',
-          relationship: '丁寧な関係',
-          tone: '自然で親切',
-          firstLine: 'いらっしゃいませ。どのようなご用件でしょうか？',
-          userGoal: request.inputZh,
-          coreGoals: [
-            { id: 'goal_1', titleZh: '明确表达主要诉求', descriptionZh: '使用自然日语传达自己的需求' },
-            { id: 'goal_2', titleZh: '补充细节或限制条件', descriptionZh: '说明具体要求或偏好' }
-          ],
-          optionalGoals: [
-            { id: 'goal_3', titleZh: '确认相关事项', descriptionZh: '确认时间、费用或下一步安排' }
-          ],
-          worldAnchors: ['日本の一般的な施設・店舗', '必要なサービスが提供可能'],
-          followUpPrinciples: ['ユーザーの要望を丁寧に確認し、1回に1つ質問する'],
-          hintStrategy: 'まずは要件を簡潔に伝え、必要に応じて詳細を追加する。',
-          feedbackFocus: ['丁寧な依頼表現', '条件や理由の伝え方'],
-          safetyBoundary: '実在の個人情報や危険な助言を扱わない。',
-          recommendedMinTurns: 6,
-          recommendedMaxTurns: 8,
-        },
+        scenario: createFallbackReadyScenario(request.inputZh),
       }
     }
     throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
@@ -271,7 +301,8 @@ export async function draftScenario(env: Env, request: ScenarioDraftRequest): Pr
 
   let result: ScenarioDraftModelResult
   try {
-    const modelJson = parseModelJson(responseTextFromCompletedJson(modelPayload))
+    const text = responseTextFromCompletedJson(modelPayload)
+    const modelJson = parseModelJson(text)
     result = parseScenarioDraftModelResult(normalizeScenarioDraftResult(modelJson))
   } catch (error) {
     if (error instanceof ScenarioDraftError) {
@@ -286,7 +317,10 @@ export async function draftScenario(env: Env, request: ScenarioDraftRequest): Pr
   const mustGenerate = request.forceGenerate === true
     || request.clarifications.length >= LIMITS.maxScenarioDraftClarifications
   if (mustGenerate && result.status === 'needs_clarification') {
-    throw new ScenarioDraftError('scenario_draft_model_invalid', 'Scenario draft model output is invalid. Retry this request.', 502)
+    return {
+      status: 'ready',
+      scenario: createFallbackReadyScenario(request.inputZh),
+    }
   }
 
   return result

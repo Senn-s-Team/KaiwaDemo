@@ -22,7 +22,7 @@
 
 .app-shell {
   min-height: 100dvh;
-  padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  padding: max(20px, env(safe-area-inset-top, 20px)) max(16px, env(safe-area-inset-right, 16px)) max(24px, env(safe-area-inset-bottom, 24px)) max(16px, env(safe-area-inset-left, 16px));
   background: var(--canvas);
 }
 
@@ -971,10 +971,10 @@
   max-width: 9em;
   margin: 10px 0 14px;
   color: var(--ink);
-  font-size: clamp(2.3rem, 12vw, 4.8rem);
+  font-size: clamp(2.2rem, 10vw, 4.2rem);
   font-weight: 800;
-  line-height: 0.98;
-  letter-spacing: -0.04em;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
   text-wrap: balance;
 }
 

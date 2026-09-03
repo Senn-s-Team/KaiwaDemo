@@ -7,7 +7,7 @@ export const LIMITS = {
   maxAssistantCharacters: 120,
   maxOutputTokens: 180,
   maxScenarioDraftClarifications: 2,
-  scenarioDraftOutputTokens: 1_200,
+  scenarioDraftOutputTokens: 3_000,
   hintOutputTokens: 500,
   checkpointOutputTokens: 1_000,
   feedbackOutputTokens: 2_500,
