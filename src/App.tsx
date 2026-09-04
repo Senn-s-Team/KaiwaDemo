@@ -172,7 +172,7 @@ function App() {
   const [showHintSheet, setShowHintSheet] = useState(false)
   const [showGoalsSheet, setShowGoalsSheet] = useState(false)
   const [showTranscriptSheet, setShowTranscriptSheet] = useState(false)
-  const [showPrimerBanner, setShowPrimerBanner] = useState(true)
+  const [showPrimerSheet, setShowPrimerSheet] = useState(false)
   const [rescueDrawerState, setRescueDrawerState] = useState<RescueDrawerState>({
     isOpen: false,
     turn: 1,
@@ -617,7 +617,7 @@ function App() {
     setCopyStatus('')
     setCheckpointData(null)
     setShowGoalsSheet(false)
-    setShowPrimerBanner(true)
+    setShowPrimerSheet(false)
     setFeedbackData(null)
     setFeedbackStatus('idle')
     setFeedbackErrorMsg('')
@@ -1338,7 +1338,7 @@ function App() {
     setUiError(null)
     setInlineError('')
     setCopyStatus('')
-    setShowPrimerBanner(true)
+    setShowPrimerSheet(false)
     setSelfAssessment(null)
     sessionStartLockRef.current = false
     recordingStartLockRef.current = false
@@ -1482,18 +1482,21 @@ function App() {
                     onClick={() => setShowGoalsSheet((show) => !show)}
                     aria-label="查看训练目标"
                   >
-                    <Target size={16} /> 目标
+                    <Target size={15} />
+                    <span className="im-btn-text-full">目标</span>
                   </button>
                 )}
                 {currentPrimers.length > 0 && (
                   <button
-                    className={`im-icon-pill-btn ${showPrimerBanner ? 'is-active' : ''}`}
+                    className={`im-icon-pill-btn ${showPrimerSheet ? 'is-active' : ''}`}
                     type="button"
-                    onClick={() => setShowPrimerBanner((show) => !show)}
+                    onClick={() => setShowPrimerSheet((show) => !show)}
                     aria-label="表达武器库"
                     title="本场高频表达武器库"
                   >
-                    <Sparkles size={15} /> 武器库
+                    <Sparkles size={14} style={{ color: '#D4A346' }} />
+                    <span className="im-btn-text-full">武器库</span>
+                    <span className="im-btn-text-compact">武器</span>
                   </button>
                 )}
                 <button
@@ -1503,7 +1506,8 @@ function App() {
                   aria-label={showRuby ? '关闭振假名' : '开启振假名'}
                   title={showRuby ? '点击隐藏振假名（ルビ）' : '点击显示振假名（ルビ）'}
                 >
-                  振仮名 {showRuby ? '开' : '关'}
+                  <span className="im-btn-text-full">振仮名 {showRuby ? '开' : '关'}</span>
+                  <span className="im-btn-text-compact">ルビ</span>
                 </button>
                 <button
                   className="im-finish-pill-btn"
@@ -1525,53 +1529,18 @@ function App() {
                   <button className="text-button" type="button" onClick={() => setForegroundNotice('')}>关闭</button>
                 </div>
               )}
-              {showPrimerBanner && currentPrimers.length > 0 && (
-                <aside className="im-primer-card" aria-label="表达武器库">
-                  <div className="im-primer-header">
-                    <div className="im-primer-title">
-                      <Sparkles size={15} className="im-primer-sparkle" />
-                      <strong>本场进阶表达推荐（3组）</strong>
-                      <span className="im-primer-badge">开口弹药</span>
-                    </div>
-                    <button
-                      className="im-primer-close-btn"
-                      type="button"
-                      onClick={() => setShowPrimerBanner(false)}
-                      aria-label="收起武器库"
-                      title="收起（随时可从右上角重新展开）"
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                  <div className="im-primer-list">
-                    {currentPrimers.map((primer, idx) => (
-                      <div key={idx} className="im-primer-item">
-                        <div className="im-primer-item-main">
-                          <div className="im-primer-phrase-row">
-                            <span className="im-primer-phrase" lang="ja">
-                              <RubyText text={primer.phraseRuby || primer.phraseJa} showRuby={showRuby} />
-                            </span>
-                            <button
-                              className="im-primer-play-btn"
-                              type="button"
-                              onClick={() => void playRescueAudio(primer.phraseJa)}
-                              disabled={isPlayingRescueTts || !config?.elevenlabs.ttsAvailable}
-                              aria-label={`试听第 ${idx + 1} 组发音`}
-                              title="试听发音"
-                            >
-                              <Volume2 size={13} />
-                            </button>
-                          </div>
-                          <div className="im-primer-meta">
-                            <span className="im-primer-meaning">{primer.meaningZh}</span>
-                            <span className="im-primer-dot">·</span>
-                            <span className="im-primer-timing">{primer.timingZh}</span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </aside>
+              {currentPrimers.length > 0 && (
+                <div className="im-primer-micro-bar">
+                  <button
+                    type="button"
+                    className="im-primer-micro-chip"
+                    onClick={() => setShowPrimerSheet(true)}
+                    aria-label={`查看本场高频武器，共 ${currentPrimers.length} 组`}
+                  >
+                    <Sparkles size={13} style={{ color: '#D4A346' }} />
+                    <span>查看本场高频武器（{currentPrimers.length}组）</span>
+                  </button>
+                </div>
               )}
 
               {checkpointData && checkpointData.canExtend && checkpointData.newSessionToken && checkpointData.nextCap && (
@@ -2033,6 +2002,62 @@ function App() {
                   <div className="im-sheet-footer">
                     <button className="primary-button" type="button" onClick={() => setShowGoalsSheet(false)}>
                       关闭
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ================================================================
+                Bottom Sheet 3.5: 本场高频表达武器库 (Primer Bottom Sheet)
+                ================================================================ */}
+            {showPrimerSheet && currentPrimers.length > 0 && (
+              <div className="im-bottom-sheet-backdrop" onClick={() => setShowPrimerSheet(false)}>
+                <div className="im-bottom-sheet im-primer-sheet" onClick={(e) => e.stopPropagation()}>
+                  <div className="im-sheet-drag-handle" />
+                  <div className="im-sheet-header">
+                    <h3 className="im-sheet-title">
+                      <Sparkles size={18} style={{ color: '#D4A346' }} /> 本场高频表达武器库
+                    </h3>
+                    <button
+                      className="im-sheet-close-btn"
+                      type="button"
+                      onClick={() => setShowPrimerSheet(false)}
+                      aria-label="关闭武器库"
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+                  <div className="im-sheet-content">
+                    <div className="im-primer-sheet-list">
+                      {currentPrimers.map((primer, idx) => (
+                        <div key={idx} className="im-primer-sheet-item">
+                          <div className="im-primer-sheet-item-header">
+                            <span className="im-primer-sheet-phrase" lang="ja">
+                              <RubyText text={primer.phraseRuby || primer.phraseJa} showRuby={showRuby} />
+                            </span>
+                            <button
+                              className="im-primer-play-btn"
+                              type="button"
+                              onClick={() => void playRescueAudio(primer.phraseJa)}
+                              disabled={isPlayingRescueTts || !config?.elevenlabs.ttsAvailable}
+                              aria-label={`试听第 ${idx + 1} 组发音`}
+                              title="试听发音"
+                            >
+                              <Volume2 size={14} />
+                            </button>
+                          </div>
+                          <div className="im-primer-sheet-meta">
+                            <span className="im-primer-sheet-meaning">{primer.meaningZh}</span>
+                            <span className="im-primer-sheet-timing">💡 {primer.timingZh}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="im-sheet-footer">
+                    <button className="primary-button" type="button" onClick={() => setShowPrimerSheet(false)}>
+                      收起武器库
                     </button>
                   </div>
                 </div>
