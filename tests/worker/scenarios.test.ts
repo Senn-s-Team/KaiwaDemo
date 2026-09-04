@@ -245,4 +245,16 @@ describe('scenario reply context', () => {
     expect(prompt).toContain('方向性でありチェックリストではない')
     expect(prompt).toContain('会話内で一度設定した事実は後のターンでも維持')
   })
+  it('includes i+1 upward pull instructions in catalog developer prompt', () => {
+    const prompt = buildDeveloperPrompt(
+      replyRequest({
+        scenarioId: 'weekend-chat',
+        variantId: 'casual-coworker',
+        turn: 2,
+      }),
+    )
+    expect(prompt).toContain('上行牽引（i+1）言語モデル提示')
+    expect(prompt).toContain('自然で一段上の表現やクッション言葉')
+    expect(prompt).toContain('説教や訂正は行わず、自然な相手役として模範的なインプットを提供')
+  })
 })

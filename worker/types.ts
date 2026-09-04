@@ -224,6 +224,7 @@ export type RescueRequest = CatalogRescueRequest | DynamicRescueRequest
 export interface RescueResponse {
   interpretedIntentZh: string
   suggestedJa: string
+  suggestedJaRuby?: string
   politenessTipZh: string
 }
 

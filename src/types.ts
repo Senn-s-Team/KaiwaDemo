@@ -97,6 +97,7 @@ export interface HintResponse {
 export interface RescueResponse {
   interpretedIntentZh: string
   suggestedJa: string
+  suggestedJaRuby?: string
   politenessTipZh: string
 }
 

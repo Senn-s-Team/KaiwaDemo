@@ -125,6 +125,7 @@ const RescueResponseSchema = z
   .object({
     interpretedIntentZh: z.string().trim().min(1),
     suggestedJa: z.string().trim().min(1),
+    suggestedJaRuby: z.string().trim().min(1).optional(),
     politenessTipZh: z.string().trim().min(1),
   })
   .strict()

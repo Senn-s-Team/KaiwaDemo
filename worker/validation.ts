@@ -256,6 +256,7 @@ const RescueResponseSchema = z
       'Forbidden mention of pronunciation, tone, accent, score, or emotion in rescue output.',
     ),
     suggestedJa: z.string().trim().min(1),
+    suggestedJaRuby: z.string().trim().min(1).optional(),
     politenessTipZh: z.string().trim().min(1).refine(
       (val) => !FORBIDDEN_EVALUATION_PATTERNS.test(val),
       'Forbidden mention of pronunciation, tone, accent, score, or emotion in rescue output.',

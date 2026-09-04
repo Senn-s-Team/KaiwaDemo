@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { buildRescuePrompt } from '../../worker/scenarios'
 import worker from '../../worker/index'
 import type { Env } from '../../worker/env'
 import { signSessionToken } from '../../worker/tokens'
@@ -63,6 +64,7 @@ const validCatalogRequest: CatalogRescueRequest = {
 const validRescueModelResponse: RescueResponse = {
   interpretedIntentZh: '对方理解你周末待在家里观赏了日本电影并分享了该经历。',
   suggestedJa: '家でのんびり日本の映画を観て過ごしました。',
+  suggestedJaRuby: '[家|いえ]でのんびり[日本|にほん]の[映画|えいが]を[観|み]て[過|す]ごしました。',
   politenessTipZh: '使用「〜てのんびり過ごしました」能更自然地传达周末放松的闲适氛围。',
 }
 
@@ -235,6 +237,73 @@ describe('POST /api/rescue', () => {
       expect(response.status).toBe(503)
       const data = (await response.json()) as { error: { code: string } }
       expect(data.error.code).toBe('openai_unconfigured')
+    })
+  })
+  describe('buildRescuePrompt', () => {
+    it('generates prompt with upgrade challenge instructions and native nuance expectations', () => {
+      const prompt = buildRescuePrompt(
+        {
+          titleZh: '周末闲聊',
+          aiRole: '同僚',
+          userGoal: '分享周末',
+        },
+        1,
+        '週末は何をして過ごしたんですか？',
+        '家で映画を見ました。',
+        [{ role: 'assistant', text: '週末は何をして過ごしたんですか？' }],
+      )
+      expect(prompt).toContain('地道アップグレード')
+      expect(prompt).toContain('大人の自然な口語やクッション言葉')
+      expect(prompt).toContain('洗練された表現にアップグレード')
+      expect(prompt).toContain('suggestedJaRuby')
+      expect(prompt).toContain('[漢字|かんじ]')
+    })
+
+    it('parses valid rescue response with or without optional suggestedJaRuby', async () => {
+      const responseWithRuby = {
+        interpretedIntentZh: '意图理解',
+        suggestedJa: '映画を観ました',
+        suggestedJaRuby: '[映画|えいが]を[観|み]ました',
+        politenessTipZh: '更自然',
+      }
+      const responseWithoutRuby = {
+        interpretedIntentZh: '意图理解',
+        suggestedJa: '映画を観ました',
+        politenessTipZh: '更自然',
+      }
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              output_text: JSON.stringify(responseWithRuby),
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        ),
+      )
+      const res1 = await fetchWorker(post('/api/rescue', validCatalogRequest), env)
+      expect(res1.status).toBe(200)
+      const data1 = (await res1.json()) as RescueResponse
+      expect(data1.suggestedJaRuby).toBe('[映画|えいが]を[観|み]ました')
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              output_text: JSON.stringify(responseWithoutRuby),
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        ),
+      )
+      const res2 = await fetchWorker(post('/api/rescue', validCatalogRequest), env)
+      expect(res2.status).toBe(200)
+      const data2 = (await res2.json()) as RescueResponse
+      expect(data2.suggestedJaRuby).toBeUndefined()
+      expect(data2.suggestedJa).toBe('映画を観ました')
     })
   })
 })

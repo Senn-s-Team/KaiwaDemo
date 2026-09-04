@@ -1,4 +1,4 @@
-import { ArrowRight, BookOpen, Keyboard, LifeBuoy, Lightbulb, MessageCircle, Mic, Pencil, RotateCcw, Sparkles, Square, Target, ThumbsUp, TrendingUp, Volume2, Wrench, X, AlertCircle } from 'lucide-react'
+import { ArrowRight, BookOpen, Keyboard, Lightbulb, MessageCircle, Mic, Pencil, RotateCcw, Sparkles, Square, Target, ThumbsUp, TrendingUp, Volume2, Wrench, X, AlertCircle } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
@@ -30,6 +30,7 @@ import { formatDuration, toUiError } from './lib/ui'
 import { consumePreparedScenario, prepareNextScenario, scenarioForPractice } from './scenarios/queue'
 import { deriveScenarioReveal } from './scenarios/reveal'
 import { drawRandomScenario, type VocabScenario } from './data/vocab-bank'
+import { RubyText } from './components/RubyText'
 import type {
   AppPhase,
   ConversationFeedbackResponse,
@@ -48,6 +49,7 @@ import type {
   TranscriptText,
   UiError,
 } from './types'
+import { getExpressionPrimers } from './data/expression-primers'
 const BUILD_ID = '2026-09-02-random-blind-practice-1'
 
 const STATUS_LABELS: Record<AppPhase, string> = {
@@ -170,6 +172,7 @@ function App() {
   const [showHintSheet, setShowHintSheet] = useState(false)
   const [showGoalsSheet, setShowGoalsSheet] = useState(false)
   const [showTranscriptSheet, setShowTranscriptSheet] = useState(false)
+  const [showPrimerBanner, setShowPrimerBanner] = useState(true)
   const [rescueDrawerState, setRescueDrawerState] = useState<RescueDrawerState>({
     isOpen: false,
     turn: 1,
@@ -180,7 +183,16 @@ function App() {
     data: null,
   })
   const [isPlayingRescueTts, setIsPlayingRescueTts] = useState(false)
+  const [showRuby, setShowRuby] = useState(true)
   const rescueAbortRef = useRef<AbortController | null>(null)
+  const currentPrimers = useMemo(() => {
+    if (!scenario) return []
+    return getExpressionPrimers(
+      scenario.id,
+      scenario.variantId,
+      scenario.dynamicData,
+    )
+  }, [scenario])
   const [dockInputMode, setDockInputMode] = useState<'voice' | 'text'>('voice')
   const [dockTextValue, setDockTextValue] = useState('')
   const [expandedAiMessageIds, setExpandedAiMessageIds] = useState<Set<string>>(new Set())
@@ -605,6 +617,7 @@ function App() {
     setCopyStatus('')
     setCheckpointData(null)
     setShowGoalsSheet(false)
+    setShowPrimerBanner(true)
     setFeedbackData(null)
     setFeedbackStatus('idle')
     setFeedbackErrorMsg('')
@@ -1325,6 +1338,7 @@ function App() {
     setUiError(null)
     setInlineError('')
     setCopyStatus('')
+    setShowPrimerBanner(true)
     setSelfAssessment(null)
     sessionStartLockRef.current = false
     recordingStartLockRef.current = false
@@ -1471,6 +1485,26 @@ function App() {
                     <Target size={16} /> 目标
                   </button>
                 )}
+                {currentPrimers.length > 0 && (
+                  <button
+                    className={`im-icon-pill-btn ${showPrimerBanner ? 'is-active' : ''}`}
+                    type="button"
+                    onClick={() => setShowPrimerBanner((show) => !show)}
+                    aria-label="表达武器库"
+                    title="本场高频表达武器库"
+                  >
+                    <Sparkles size={15} /> 武器库
+                  </button>
+                )}
+                <button
+                  className={`im-icon-pill-btn ${showRuby ? 'is-active' : ''}`}
+                  type="button"
+                  onClick={() => setShowRuby((prev) => !prev)}
+                  aria-label={showRuby ? '关闭振假名' : '开启振假名'}
+                  title={showRuby ? '点击隐藏振假名（ルビ）' : '点击显示振假名（ルビ）'}
+                >
+                  振仮名 {showRuby ? '开' : '关'}
+                </button>
                 <button
                   className="im-finish-pill-btn"
                   type="button"
@@ -1490,6 +1524,54 @@ function App() {
                   <span>{foregroundNotice}</span>
                   <button className="text-button" type="button" onClick={() => setForegroundNotice('')}>关闭</button>
                 </div>
+              )}
+              {showPrimerBanner && currentPrimers.length > 0 && (
+                <aside className="im-primer-card" aria-label="表达武器库">
+                  <div className="im-primer-header">
+                    <div className="im-primer-title">
+                      <Sparkles size={15} className="im-primer-sparkle" />
+                      <strong>本场进阶表达推荐（3组）</strong>
+                      <span className="im-primer-badge">开口弹药</span>
+                    </div>
+                    <button
+                      className="im-primer-close-btn"
+                      type="button"
+                      onClick={() => setShowPrimerBanner(false)}
+                      aria-label="收起武器库"
+                      title="收起（随时可从右上角重新展开）"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                  <div className="im-primer-list">
+                    {currentPrimers.map((primer, idx) => (
+                      <div key={idx} className="im-primer-item">
+                        <div className="im-primer-item-main">
+                          <div className="im-primer-phrase-row">
+                            <span className="im-primer-phrase" lang="ja">
+                              <RubyText text={primer.phraseRuby || primer.phraseJa} showRuby={showRuby} />
+                            </span>
+                            <button
+                              className="im-primer-play-btn"
+                              type="button"
+                              onClick={() => void playRescueAudio(primer.phraseJa)}
+                              disabled={isPlayingRescueTts || !config?.elevenlabs.ttsAvailable}
+                              aria-label={`试听第 ${idx + 1} 组发音`}
+                              title="试听发音"
+                            >
+                              <Volume2 size={13} />
+                            </button>
+                          </div>
+                          <div className="im-primer-meta">
+                            <span className="im-primer-meaning">{primer.meaningZh}</span>
+                            <span className="im-primer-dot">·</span>
+                            <span className="im-primer-timing">{primer.timingZh}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </aside>
               )}
 
               {checkpointData && checkpointData.canExtend && checkpointData.newSessionToken && checkpointData.nextCap && (
@@ -1581,13 +1663,14 @@ function App() {
                               <p lang="ja">{message.text}</p>
                             </div>
                             <button
-                              className="im-user-rescue-btn"
+                              className="im-user-rescue-btn im-user-upgrade-btn"
                               type="button"
                               onClick={() => void openRescueDrawer(message, index)}
-                              aria-label={`第 ${message.turn} 轮：这句说得对吗`}
+                              aria-label={`第 ${message.turn} 轮：地道表达升级`}
+                              title="查看母语级表达升级"
                             >
-                              <Lightbulb size={12} aria-hidden="true" />
-                              <span>说得对吗</span>
+                              <Sparkles size={12} aria-hidden="true" />
+                              <span>地道升级</span>
                             </button>
                           </div>
                         )}
@@ -1973,7 +2056,7 @@ function App() {
                   <div className="im-sheet-drag-handle" />
                   <div className="im-sheet-header">
                     <h3 className="im-sheet-title">
-                      <LifeBuoy size={18} aria-hidden="true" /> 这句说得对吗 (第 {rescueDrawerState.turn} 轮)
+                      <Sparkles size={18} aria-hidden="true" style={{ color: '#D4A346' }} /> 地道表达升级 (第 {rescueDrawerState.turn} 轮)
                     </h3>
                     <button
                       className="im-sheet-close-btn"
@@ -1995,7 +2078,7 @@ function App() {
                     {rescueDrawerState.loading && (
                       <div className="im-rescue-loading">
                         <span className="pulse-dot" aria-hidden="true" />
-                        <p>相手正在核对意图与地道度点拨...</p>
+                        <p>相手正在分析意图并生成母语级地道升级...</p>
                       </div>
                     )}
 
@@ -2036,27 +2119,30 @@ function App() {
                             </button>
                           </div>
                           <p className="im-rescue-suggested-ja" lang="ja">
-                            {rescueDrawerState.data.suggestedJa}
+                            <RubyText
+                              text={rescueDrawerState.data.suggestedJaRuby || rescueDrawerState.data.suggestedJa}
+                              showRuby={showRuby}
+                            />
                           </p>
                           <p className="im-rescue-politeness-tip">
                             <span className="im-rescue-badge">点拨</span> {rescueDrawerState.data.politenessTipZh}
                           </p>
                         </div>
 
-                        {/* 模块 3: 逃生通道 - 撤回本轮重说 */}
+                        {/* 模块 3: 换用升级句重说本轮 */}
                         <div className="im-rescue-card rewind-card">
                           <div className="im-rescue-card-title">
-                            <RotateCcw size={15} /> 逃生通道
+                            <RotateCcw size={15} /> 肌肉记忆强化
                           </div>
                           <p className="im-rescue-rewind-desc">
-                            觉得没表达好？撤回本轮发话，回滚到发话前状态重新组织语言。
+                            觉得上面这句表达更地道？撤回并重新录音，趁热打铁把高级句式读出来。
                           </p>
                           <button
-                            className="secondary-button im-rescue-rewind-btn"
+                            className="primary-button im-rescue-rewind-btn"
                             type="button"
                             onClick={() => handleRewindTurn(rescueDrawerState.turn)}
                           >
-                            <RotateCcw size={14} /> 撤回本轮并重新表达
+                            <RotateCcw size={14} /> 换用升级句重说本轮
                           </button>
                         </div>
                       </div>
