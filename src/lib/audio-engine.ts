@@ -37,8 +37,8 @@ export function getSharedAudioContext(): AudioContext {
 
 export async function unlockAudio(): Promise<void> {
   const ctx = getSharedAudioContext()
-  if (ctx.state === 'suspended') {
-    await ctx.resume()
+  if (ctx.state !== 'running') {
+    await ctx.resume().catch(() => undefined)
   }
 }
 
@@ -225,7 +225,7 @@ export class MicrophoneAudioPipeline {
     this.isRunning = true
 
     const ctx = getSharedAudioContext()
-    if (ctx.state === 'suspended') {
+    if (ctx.state !== 'running') {
       await ctx.resume().catch(() => undefined)
     }
 

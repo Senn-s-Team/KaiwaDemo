@@ -9,8 +9,13 @@ import {
 } from './audio-engine'
 export { isMicrophoneTrackReady, SttError }
 
-interface SttHandlers {
-  onPartial: (text: string) => void
+export interface SttTranscriptParts {
+  confirmed: string
+  ghost: string
+}
+
+export interface SttHandlers {
+  onPartial: (text: string, parts?: SttTranscriptParts) => void
   onConnectionState: (state: 'connecting' | 'connected' | 'closed') => void
   onAudioLevel: (level: number) => void
 }
@@ -133,15 +138,36 @@ export class RealtimeSttSession {
       }
     })
 
-    const showTranscript = (data: { text: string }) => {
+    const confirmedSegments: string[] = []
+    let currentInterim = ''
+
+    const emitTranscript = () => {
+      const confirmed = confirmedSegments.join(' ').trim()
+      const ghost = currentInterim.trim()
+      const combined = [confirmed, ghost].filter(Boolean).join(' ')
+      handlers.onPartial(combined, { confirmed, ghost })
+    }
+
+    const handlePartial = (data: { text: string }) => {
       if (currentGen !== this.sessionGeneration) return
-      handlers.onPartial(data.text)
+      currentInterim = data.text || ''
+      emitTranscript()
+    }
+
+    const handleFinal = (data: { text: string }) => {
+      if (currentGen !== this.sessionGeneration) return
+      if (data.text?.trim()) {
+        confirmedSegments.push(data.text.trim())
+      }
+      currentInterim = ''
+      emitTranscript()
     }
 
     const handleCommitted = (data: { text: string }) => {
       if (currentGen !== this.sessionGeneration) return
       this.clearFinalizeTimer()
-      this.committedText = `${this.committedText} ${data.text}`.trim()
+      const text = data.text?.trim() || confirmedSegments.join(' ').trim()
+      this.committedText = `${this.committedText} ${text}`.trim()
       const resolver = this.stopResolve
       this.stopResolve = null
       this.stopReject = null
@@ -151,12 +177,11 @@ export class RealtimeSttSession {
       }
     }
 
-    connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, showTranscript)
-    connection.on(RealtimeEvents.FINAL_TRANSCRIPT, showTranscript)
-    connection.on(RealtimeEvents.FINAL_TRANSCRIPT_WITH_TIMESTAMPS, showTranscript)
+    connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, handlePartial)
+    connection.on(RealtimeEvents.FINAL_TRANSCRIPT, handleFinal)
+    connection.on(RealtimeEvents.FINAL_TRANSCRIPT_WITH_TIMESTAMPS, handleFinal)
     connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT, handleCommitted)
     connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT_WITH_TIMESTAMPS, handleCommitted)
-
     connection.on(RealtimeEvents.ERROR, (event) => {
       if (currentGen !== this.sessionGeneration) return
       const raw = typeof event === 'object' && event !== null && 'message' in event ? String(event.message) : ''

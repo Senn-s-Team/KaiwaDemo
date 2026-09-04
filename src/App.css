@@ -554,6 +554,36 @@
   color: var(--muted);
   font-style: italic;
 }
+.im-recording-transcript-row {
+  display: inline-block;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.im-transcript-live {
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.im-streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  background: #D4A346;
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  animation: cursorBlink 750ms infinite;
+}
+
+.im-transcript-placeholder {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-style: italic;
+}
 
 .im-recording-time {
   width: 3rem;
@@ -2180,6 +2210,46 @@
   color: var(--muted);
   line-height: 1.5;
 }
+.section-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.section-header-row h2 {
+  margin: 0;
+}
+
+.master-upgrade-action-row {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.master-challenge-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.84rem;
+  font-weight: 700;
+  padding: 6px 14px;
+  background: #FFF3D6;
+  color: #7C4A03;
+  border: 1.5px solid #D4A346;
+  border-radius: var(--radius-small);
+  box-shadow: 1px 1px 0 #D4A346;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.master-challenge-btn:hover {
+  background: #FFE8A3;
+  transform: translateY(-1px);
+  box-shadow: 2px 2px 0 #D4A346;
+}
 /* Phase 3: Practice Trend Card */
 .practice-trend-card {
   margin: 18px 0;
@@ -2254,6 +2324,57 @@
 /* Phase 3: Retry Task Card */
 .retry-task-card {
   background: #FAF8F5;
+}
+.retry-mode-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.retry-mode-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.retry-mode-btn:hover {
+  color: var(--ink);
+  background: var(--surface-pressed);
+}
+
+.retry-mode-btn.is-active {
+  background: var(--butter);
+  color: var(--ink);
+  border-color: var(--ink);
+  box-shadow: 1.5px 1.5px 0 var(--ink);
+}
+
+.retry-task-context.master-context {
+  background: #FFFDF0;
+  border: 1.5px solid #E5C378;
+}
+
+.master-complete-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 0.74rem;
+  font-weight: 800;
+  background: #E8F5E9;
+  color: #2E7D32;
+  border: 1px solid #81C784;
+  border-radius: 10px;
 }
 
 .retry-task-context {

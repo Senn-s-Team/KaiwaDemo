@@ -1,3 +1,5 @@
+import { VOCAB_BANK, type VocabScenario } from './vocab-bank'
+
 export interface ExpressionPrimerItem {
   phraseJa: string
   phraseRuby?: string
@@ -218,11 +220,147 @@ export const CATALOG_EXPRESSION_PRIMERS: Record<string, Record<string, Expressio
   },
 }
 
+// 针对灵感速练场景库的专属武器映射（覆盖全部高频场景）
+export const SPARK_SCENARIO_PRIMERS: Record<string, ExpressionPrimerItem[]> = {
+  'daily-cafe': [
+    {
+      phraseJa: '甘さ控えめでお願いします',
+      phraseRuby: '[甘|あま]さ[控|ひか]えめでお[願|ねが]いします',
+      meaningZh: '甜度减半 / 做微糖',
+      timingZh: '向咖啡师说明口味甜度偏好时',
+    },
+    {
+      phraseJa: 'おすすめのコーヒー豆やメニューはありますか？',
+      phraseRuby: 'おすすめのコーヒー[豆|まめ]やメニューはありますか？',
+      meaningZh: '请问有推荐的咖啡豆或饮品吗？',
+      timingZh: '不知道选什么向店主求推荐时',
+    },
+    {
+      phraseJa: 'テイクアウトでお願いできますか？',
+      phraseRuby: 'テイクアウトでお[願|ねが]いできますか？',
+      meaningZh: '能麻烦做成外带吗？',
+      timingZh: '确认带走或打包时',
+    },
+  ],
+  'daily-conbini': [
+    {
+      phraseJa: 'すみません、〜はどのあたりに置いてありますか？',
+      phraseRuby: 'すみません、〜はどのあたりに[置|お]いてありますか？',
+      meaningZh: '不好意思，请问...大概放在哪个位置？',
+      timingZh: '在便利店找不到商品位置时向店员发问',
+    },
+    {
+      phraseJa: '袋は大丈夫です、シールだけでお願いします',
+      phraseRuby: '[袋|ふくろ]は[大丈夫|だいじょうぶ]です、シールだけでお[願|ねが]いします',
+      meaningZh: '不需要塑料袋，贴个已购标签就行',
+      timingZh: '店员询问是否需要塑料袋时',
+    },
+    {
+      phraseJa: '〜で支払いたいのですが、使えますか？',
+      phraseRuby: '〜で[支払|しはら]いたいのですが、[使|つか]えますか？',
+      meaningZh: '我想用...支付，请问支持吗？',
+      timingZh: '确认电子支付或信用卡时',
+    },
+  ],
+  'daily-salon': [
+    {
+      phraseJa: '全体的に長さを少し短めにしてください',
+      phraseRuby: '[全体的|ぜんたいてき]に[長|なが]さを[少|すこ]し[短|みじか]めにしてください',
+      meaningZh: '整体长度请帮我稍微剪短一点',
+      timingZh: '向发型师说明修剪基调时',
+    },
+    {
+      phraseJa: '毛量を少しすいて、軽さを出したいです',
+      phraseRuby: '[毛量|もうりょう]を[少|すこ]しすいて、[軽|かる]さを[出|だ]したいです',
+      meaningZh: '希望能稍微打薄发量，看起来轻盈一些',
+      timingZh: '头发厚重提出打薄要求时',
+    },
+    {
+      phraseJa: '朝のセットがしやすい感じでお願いします',
+      phraseRuby: '[朝|あさ]のセットがしやすい[感|かん]じでお[願|ねが]いします',
+      meaningZh: '请剪成早上容易打理的感觉',
+      timingZh: '提出日常好打理的造型需求时',
+    },
+  ],
+  'daily-izakaya': [
+    {
+      phraseJa: 'とりあえず生ビールを二つお願いします',
+      phraseRuby: 'とりあえず[生|なま]ビールを[二|ふた]つお[願|ねが]いします',
+      meaningZh: '先来两杯生啤',
+      timingZh: '居酒屋落座后的首次开点黄金句',
+    },
+    {
+      phraseJa: '本日のおすすめの料理は何ですか？',
+      phraseRuby: '[本日|ほんじつ]のおすすめの[料理|りょうり]は[何|なん]ですか？',
+      meaningZh: '请问今天有什么招牌菜品吗？',
+      timingZh: '向店员询问当日特色或新鲜鱼鲜时',
+    },
+    {
+      phraseJa: 'お会計は別々でお願いできますでしょうか',
+      phraseRuby: 'お[会計|かいけい]は[別々|べつべつ]でお[願|ねが]いできますでしょうか',
+      meaningZh: '买单能麻烦分开结吗？',
+      timingZh: '结账提出 AA 分账时',
+    },
+  ],
+  'work-leave': [
+    {
+      phraseJa: '私事で大変恐縮ですが、休暇をいただきたくご相談に伺いました',
+      phraseRuby: '[私事|わたくしごと]で[大変恐縮|たいへんきょうしゅく]ですが、[休暇|きゅうか]をいただきたくご[相談|そうだん]に[伺|うかが]いました',
+      meaningZh: '因私事非常抱歉，我想向您申请请假特来商量',
+      timingZh: '向上司正式报备请假事由的稳妥起手',
+    },
+    {
+      phraseJa: '不在中の業務につきましては、〇〇さんに引き継ぎをお願いしてあります',
+      phraseRuby: '[不在中|ふざいちゅう]の[業務|ぎょうむ]につきましては、〇〇さんに[引|ひ]き[継|つ]ぎをお[願|ねが]いしてあります',
+      meaningZh: '请假期间的工作已提前拜托给某某同事交接代理',
+      timingZh: '主动说明交接安排消除上司担忧',
+    },
+    {
+      phraseJa: '急なご相談となりご迷惑をおかけしますが、よろしくお願いいたします',
+      phraseRuby: '[急|きゅう]なご[相談|そうだん]となりご[迷惑|めいわく]をおかけしますが、よろしくお[願|ねが]いいたします',
+      meaningZh: '临时商量给您添麻烦了，拜托您了',
+      timingZh: '请假沟通收尾时的得体感谢',
+    },
+  ],
+  'emergency-train': [
+    {
+      phraseJa: '電車の遅延証明書をいただくことはできますか？',
+      phraseRuby: '[電車|でんしゃ]の[遅延証明書|ちえんしょうめいしょ]をいただくことはできますか？',
+      meaningZh: '请问能给我开一份电车延误证明吗？',
+      timingZh: '因列车延误向站务员索取迟到凭证时',
+    },
+    {
+      phraseJa: '〜駅まで振替輸送は行っていますでしょうか？',
+      phraseRuby: '〜[駅|えき]まで[振替輸送|ふりかえゆそう]は[行|おこな]っていますでしょうか？',
+      meaningZh: '请问去往某某站有联运接驳替代运行吗？',
+      timingZh: '寻找其他铁路或地铁换乘路线时',
+    },
+    {
+      phraseJa: '一番早く着く別のルートを教えていただけますか',
+      phraseRuby: '[一番早|いちばんはや]く[着|つ]く[別|べつ]のルートを[教|おし]えていただけますか',
+      meaningZh: '能指引我一条最快到达的目的地路线吗？',
+      timingZh: '向站务员寻求紧急替代方案时',
+    },
+  ],
+}
+
+/**
+ * 根据场景 ID、变体、动态数据与灵感速练词库智能推导最精准的 3 组进阶表达
+ */
 export function getExpressionPrimers(
   scenarioId?: string,
   variantId?: string,
-  dynamicData?: { hintStrategy?: string; tone?: string; relationship?: string } | null,
+  dynamicData?: {
+    titleZh?: string
+    summaryZh?: string
+    aiRole?: string
+    hintStrategy?: string
+    tone?: string
+    relationship?: string
+  } | null,
+  activeSpark?: VocabScenario | null,
 ): ExpressionPrimerItem[] {
+  // 1. 固定场景直接精确命中
   if (scenarioId && variantId && CATALOG_EXPRESSION_PRIMERS[scenarioId]?.[variantId]) {
     return CATALOG_EXPRESSION_PRIMERS[scenarioId][variantId]
   }
@@ -231,6 +369,60 @@ export function getExpressionPrimers(
     if (firstVariant) return firstVariant
   }
 
+  // 2. 灵感速练显式传入时直接精准匹配
+  if (activeSpark) {
+    if (SPARK_SCENARIO_PRIMERS[activeSpark.id]) {
+      return SPARK_SCENARIO_PRIMERS[activeSpark.id]
+    }
+    // 若无手写精细配置，从 activeSpark.keyExpressions 自动生成专属武器
+    if (activeSpark.keyExpressions.length > 0) {
+      return activeSpark.keyExpressions.slice(0, 3).map((expr) => ({
+        phraseJa: expr,
+        meaningZh: `${activeSpark.titleZh}场景核心必用表达`,
+        timingZh: `在交流挑战「${activeSpark.challengeZh}」时调用`,
+      }))
+    }
+  }
+
+  // 3. 动态场景基于标题 / 角色 / 摘要关键词进行主题命中
+  const contextStr = `${dynamicData?.titleZh || ''} ${dynamicData?.summaryZh || ''} ${dynamicData?.aiRole || ''}`
+
+  // 咖啡 / 饮品 / 下午茶
+  if (/カフェ|咖啡|珈琲|コーヒー|ラテ|喫茶/i.test(contextStr)) {
+    return SPARK_SCENARIO_PRIMERS['daily-cafe']
+  }
+  // 便利店 / 购物 / 超市
+  if (/コンビニ|便利店|セブン|ローソン|スーパー|買い物|商品/i.test(contextStr)) {
+    return SPARK_SCENARIO_PRIMERS['daily-conbini']
+  }
+  // 美发 / 理发
+  if (/美容|美发|理发|サロン|髪|ヘア/i.test(contextStr)) {
+    return SPARK_SCENARIO_PRIMERS['daily-salon']
+  }
+  // 居酒屋 / 餐厅 / 吃饭点单
+  if (/居酒屋|レストラン|食事|注文|点单|定食|ディナー|乾杯/i.test(contextStr)) {
+    return SPARK_SCENARIO_PRIMERS['daily-izakaya']
+  }
+  // 请假 / 调休
+  if (/休|休暇|请假|有給|休業|体調/i.test(contextStr)) {
+    return SPARK_SCENARIO_PRIMERS['work-leave']
+  }
+  // 电车 / 地铁 / 交通延误
+  if (/電車|遅延|交通|駅|切符|列車|遅刻/i.test(contextStr)) {
+    return SPARK_SCENARIO_PRIMERS['emergency-train']
+  }
+
+  // 尝试在 VOCAB_BANK 遍历中匹配标题
+  const matchedVocab = VOCAB_BANK.find((v) => contextStr.includes(v.titleZh) || contextStr.includes(v.titleJa))
+  if (matchedVocab && matchedVocab.keyExpressions.length > 0) {
+    return matchedVocab.keyExpressions.slice(0, 3).map((expr) => ({
+      phraseJa: expr,
+      meaningZh: `${matchedVocab.titleZh}核心推荐表达`,
+      timingZh: matchedVocab.challengeZh,
+    }))
+  }
+
+  // 4. 语体通配兜底（分商务/日常）
   const tone = dynamicData?.tone || ''
   const isFormal =
     tone.includes('敬語') ||

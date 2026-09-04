@@ -22,7 +22,8 @@ import { buildSessionReport, createRoundRecord, downloadReport, duration } from 
 import { startSparkPractice } from './lib/spark-practice'
 import { buildPracticeTrend } from './lib/trend'
 import { type MicrophoneReadiness } from './lib/microphone'
-import { requestMicrophoneStream } from './lib/audio-engine'
+import { releaseMicrophoneStream, requestMicrophoneStream, unlockAudio as unlockWebAudio } from './lib/audio-engine'
+import { annotateRuby } from './lib/ruby-annotator'
 import { createMessageId, createSessionId } from './lib/session'
 import { RealtimeSttSession, SttError } from './lib/stt'
 import { CachedTtsPlayer, TtsCancelledError } from './lib/tts'
@@ -161,6 +162,7 @@ function App() {
   const [reviewAudioNotice, setReviewAudioNotice] = useState('')
   const [sparkScenario, setSparkScenario] = useState<VocabScenario>(() => drawRandomScenario())
   const [homeTab, setHomeTab] = useState<'spark' | 'custom'>('spark')
+  const [activeSparkScenario, setActiveSparkScenario] = useState<VocabScenario | null>(null)
   const [customInputZh, setCustomInputZh] = useState('')
   const [clarifications, setClarifications] = useState<Array<{ questionZh: string; answerZh: string }>>([])
   const [pendingClarification, setPendingClarification] = useState<{ questionZh: string; optionsZh: readonly string[] } | null>(null)
@@ -191,8 +193,9 @@ function App() {
       scenario.id,
       scenario.variantId,
       scenario.dynamicData,
+      activeSparkScenario,
     )
-  }, [scenario])
+  }, [scenario, activeSparkScenario])
   const [dockInputMode, setDockInputMode] = useState<'voice' | 'text'>('voice')
   const [dockTextValue, setDockTextValue] = useState('')
   const [expandedAiMessageIds, setExpandedAiMessageIds] = useState<Set<string>>(new Set())
@@ -328,6 +331,11 @@ function App() {
   }, [touchRound])
   const stopActiveResources = useCallback(() => {
     beginOperation()
+    ttsRef.current.stop()
+    sttRef.current.close()
+    releaseMicrophoneStream()
+    ttsActionLockRef.current = false
+    setIsPlayingRescueTts(false)
   }, [beginOperation])
 
   const loadConfig = useCallback(async () => {
@@ -585,8 +593,8 @@ function App() {
         return
       }
       scenarioParam = { scenarioId }
+      setActiveSparkScenario(null)
     }
-
     sessionStartLockRef.current = true
     const operationId = beginOperation()
     setSessionId('')
@@ -701,6 +709,7 @@ function App() {
   }, [clarifications, customInputZh])
   const handleStartSpark = useCallback(async (spark: VocabScenario) => {
     if (isDraftingScenario) return
+    setActiveSparkScenario(spark)
     setIsDraftingScenario(true)
     setUiError(null)
     try {
@@ -758,6 +767,12 @@ function App() {
     if (!config || !online || recordingStartLockRef.current || phaseRef.current === 'recording' || phaseRef.current === 'connecting_stt') return
     recordingStartLockRef.current = true
     const operationId = beginOperation()
+    ttsRef.current.stop()
+    ttsActionLockRef.current = false
+    setIsPlayingRescueTts(false)
+    releaseMicrophoneStream()
+    await unlockAudio().catch(() => undefined)
+    await unlockWebAudio().catch(() => undefined)
     setUiError(null)
     setInlineError('')
     setPartialTranscript('')
@@ -898,7 +913,7 @@ function App() {
       if (requestAbortRef.current === controller) requestAbortRef.current = null
       recordingStartLockRef.current = false
     }
-  }, [beginOperation, config, isCurrentOperation, microphoneReadiness, online, resetTranscript, touchRound, transitionTo])
+  }, [beginOperation, config, isCurrentOperation, microphoneReadiness, online, resetTranscript, touchRound, transitionTo, unlockAudio])
 
   const stopRecording = useCallback(async () => {
     if (phaseRef.current !== 'recording') return
@@ -1246,6 +1261,12 @@ function App() {
       }))
     }
   }, [scenario])
+  const closeRescueDrawer = useCallback(() => {
+    ttsRef.current.stop()
+    ttsActionLockRef.current = false
+    setIsPlayingRescueTts(false)
+    setRescueDrawerState((prev) => ({ ...prev, isOpen: false }))
+  }, [])
 
   const handleRewindTurn = useCallback((targetTurn: number) => {
     if (!scenario) return
@@ -1453,6 +1474,7 @@ function App() {
               onReplayAi={(text) => void playReviewAudio(text)}
               onStopAudio={() => ttsRef.current.stop()}
               audioNotice={reviewAudioNotice}
+              showRuby={showRuby}
             />
           </section>
         )}
@@ -1622,14 +1644,18 @@ function App() {
                             {/* 展开的文本 */}
                             {isExpanded && (
                               <div className="im-expanded-transcript">
-                                <p lang="ja">{message.text}</p>
+                                <p lang="ja">
+                                  <RubyText text={annotateRuby(message.text)} showRuby={showRuby} />
+                                </p>
                               </div>
                             )}
                           </>
                         ) : (
                           <div className="im-user-bubble-wrapper">
                             <div className="im-user-text-bubble">
-                              <p lang="ja">{message.text}</p>
+                              <p lang="ja">
+                                <RubyText text={annotateRuby(message.text)} showRuby={showRuby} />
+                              </p>
                             </div>
                             <button
                               className="im-user-rescue-btn im-user-upgrade-btn"
@@ -1660,7 +1686,16 @@ function App() {
                               ? `停顿中，${silenceCountdownSeconds} 秒后结束`
                               : '正在录音中'}
                           </strong>
-                          <span>{partialTranscript || '请说日语，说完点击结束'}</span>
+                          <span className="im-recording-transcript-row" lang="ja">
+                            {partialTranscript.trim() ? (
+                              <>
+                                <span className="im-transcript-live">{partialTranscript}</span>
+                                <span className="im-streaming-cursor" aria-hidden="true" />
+                              </>
+                            ) : (
+                              <span className="im-transcript-placeholder">请说日语，说完点击结束</span>
+                            )}
+                          </span>
                         </div>
                         <time className="im-recording-time">
                           {formatRecordingTime(recordingSeconds)}
@@ -2070,7 +2105,7 @@ function App() {
             {rescueDrawerState.isOpen && (
               <div
                 className="im-bottom-sheet-backdrop"
-                onClick={() => setRescueDrawerState((prev) => ({ ...prev, isOpen: false }))}
+                onClick={closeRescueDrawer}
               >
                 <div
                   className="im-bottom-sheet im-rescue-sheet"
@@ -2086,7 +2121,7 @@ function App() {
                     <button
                       className="im-sheet-close-btn"
                       type="button"
-                      onClick={() => setRescueDrawerState((prev) => ({ ...prev, isOpen: false }))}
+                      onClick={closeRescueDrawer}
                       aria-label="关闭急救抽屉"
                     >
                       <X size={18} />
@@ -2097,7 +2132,9 @@ function App() {
                     {/* 原发话卡片 */}
                     <div className="im-rescue-user-quote">
                       <span className="im-rescue-label">你的发话：</span>
-                      <p lang="ja">{rescueDrawerState.userFinal}</p>
+                      <p lang="ja">
+                        <RubyText text={annotateRuby(rescueDrawerState.userFinal)} showRuby={showRuby} />
+                      </p>
                     </div>
 
                     {rescueDrawerState.loading && (
@@ -2145,7 +2182,7 @@ function App() {
                           </div>
                           <p className="im-rescue-suggested-ja" lang="ja">
                             <RubyText
-                              text={rescueDrawerState.data.suggestedJaRuby || rescueDrawerState.data.suggestedJa}
+                              text={rescueDrawerState.data.suggestedJaRuby || annotateRuby(rescueDrawerState.data.suggestedJa)}
                               showRuby={showRuby}
                             />
                           </p>
@@ -2178,7 +2215,7 @@ function App() {
                     <button
                       className="primary-button"
                       type="button"
-                      onClick={() => setRescueDrawerState((prev) => ({ ...prev, isOpen: false }))}
+                      onClick={closeRescueDrawer}
                     >
                       关闭
                     </button>
@@ -2471,6 +2508,7 @@ interface SessionCompleteProps {
   onReplayAi: (text: string) => void
   onStopAudio: () => void
   audioNotice: string
+  showRuby?: boolean
 }
 
 function SessionComplete({
@@ -2494,6 +2532,7 @@ function SessionComplete({
   onReplayAi,
   onStopAudio,
   audioNotice,
+  showRuby = true,
 }: SessionCompleteProps): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<'conversation' | 'feedback'>('conversation')
   const [expandedTurns, setExpandedTurns] = useState<Record<number, boolean>>({})
@@ -2670,7 +2709,9 @@ function SessionComplete({
                         <Volume2 size={16} /> 再听
                       </button>
                     </div>
-                    <p className="review-message-text" lang="ja">{message.text}</p>
+                    <p className="review-message-text" lang="ja">
+                      <RubyText text={annotateRuby(message.text)} showRuby={showRuby} />
+                    </p>
                   </li>
                 )
               }
@@ -2697,7 +2738,9 @@ function SessionComplete({
                     </button>
                   </div>
 
-                  <p className="review-message-text" lang="ja">{message.text}</p>
+                  <p className="review-message-text" lang="ja">
+                    <RubyText text={annotateRuby(message.text)} showRuby={showRuby} />
+                  </p>
 
                   {turnImprovements.length > 0 && (
                     <div className="turn-improvements-box">
@@ -2822,11 +2865,11 @@ function SessionComplete({
                 <div className="upgrade-compare">
                   <div className="compare-col original">
                     <span>原表达</span>
-                    <p lang="ja">{feedbackData.masterUpgrade.originalJa}</p>
+                    <p lang="ja"><RubyText text={annotateRuby(feedbackData.masterUpgrade.originalJa)} showRuby={showRuby} /></p>
                   </div>
                   <div className="compare-col upgraded">
                     <span>高阶表达</span>
-                    <p lang="ja">{feedbackData.masterUpgrade.upgradedJa}</p>
+                    <p lang="ja"><RubyText text={annotateRuby(feedbackData.masterUpgrade.upgradedJa)} showRuby={showRuby} /></p>
                   </div>
                 </div>
                 <p className="upgrade-explanation">{feedbackData.masterUpgrade.explanationZh}</p>
@@ -2838,7 +2881,7 @@ function SessionComplete({
                   <p><strong>相手当时问题 (第 {feedbackData.retryTask.turn} 轮)：</strong><span lang="ja">{feedbackData.retryTask.targetAiPromptJa}</span></p>
                   <p><strong>你的第一次回答：</strong><span lang="ja">{feedbackData.retryTask.userOriginalJa}</span></p>
                   <div className="retry-ref-row">
-                    <p><strong>推荐参考句：</strong><span lang="ja">{feedbackData.retryTask.recommendedReferenceJa}</span></p>
+                    <p><strong>推荐参考句：</strong><span lang="ja"><RubyText text={annotateRuby(feedbackData.retryTask.recommendedReferenceJa)} showRuby={showRuby} /></span></p>
                     <button
                       className="text-button play-ref-btn"
                       type="button"
