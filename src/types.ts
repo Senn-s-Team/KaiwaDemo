@@ -1,3 +1,11 @@
+/**
+ * [INPUT]: 依赖浏览器会话编排、动态场景协议、共享听力支架协议与语音续说辅助观测数据
+ * [OUTPUT]: 对外提供前端会话、四级支架、反馈、恢复、指标与报告领域类型
+ * [POS]: src 的前端领域类型总入口，统一动态会话与可序列化消息缓存的数据形状
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
+import type { ListeningScaffoldResponse } from '../shared/listening-scaffold'
+
 export type AppPhase =
   | 'loading_config'
   | 'idle'
@@ -15,11 +23,9 @@ export type AppPhase =
   | 'error'
 
 export type IntegrationMode = 'real' | 'partial' | 'mock'
+export type ListeningScaffoldLevel = 0 | 1 | 2 | 3 | 4
 
-export interface ScenarioCatalogEntry {
-  id: string
-  version: number
-}
+
 
 export interface ScenarioReveal {
   titleZh: string
@@ -42,15 +48,25 @@ export interface DynamicScenarioData {
   tone: string
   firstLine: string
   userGoal: string
-  coreGoals: readonly TrainingGoal[]
-  optionalGoals: readonly TrainingGoal[]
+  coreGoal: TrainingGoal
+  communicationFunction: string
+  initialFacts: readonly string[]
+  partnerPrivateFacts: readonly string[]
+  keyIntents: readonly string[]
+  keyInformation: readonly string[]
+  completionRules: {
+    completed: readonly string[]
+    partial: readonly string[]
+    notCompleted: readonly string[]
+  }
+  closingRules: readonly string[]
+  maxTurns: 5
+  partnerOpeningPlan: string
   worldAnchors: readonly string[]
   followUpPrinciples: readonly string[]
   hintStrategy: string
   feedbackFocus: readonly string[]
   safetyBoundary: string
-  recommendedMinTurns: number
-  recommendedMaxTurns: number
 }
 
 export interface SessionScenario {
@@ -58,14 +74,12 @@ export interface SessionScenario {
   version: number
   variantId: string
   firstLine: string
-  maxTurns: number
+  maxTurns: 5
   reveal: ScenarioReveal
-  scenarioType?: 'catalog' | 'dynamic'
-  sessionToken?: string
-  scenarioToken?: string
-  dynamicData?: DynamicScenarioData
-  recommendedMinTurns?: number
-  recommendedMaxTurns?: number
+  scenarioType: 'dynamic'
+  sessionToken: string
+  scenarioToken: string
+  dynamicData: DynamicScenarioData
 }
 
 export interface ScenarioDraftClarification {
@@ -94,136 +108,84 @@ export interface HintResponse {
   fullExampleJa: string
 }
 
-export interface RescueResponse {
-  interpretedIntentZh: string
-  suggestedJa: string
-  suggestedJaRuby?: string
-  politenessTipZh: string
-}
+export type FeedbackOutcome = 'completed' | 'partial' | 'not_completed' | 'insufficient_evidence'
 
-export interface RescueRequestPayload {
-  scenarioType?: 'catalog' | 'dynamic'
-  scenarioId?: string
-  variantId?: string
-  sessionToken?: string
-  dynamicData?: DynamicScenarioData
+export interface ListeningFinding {
   turn: number
-  aiPrompt: string
-  userFinal: string
-  history: ConversationMessage[]
+  findingZh: string
+  evidenceZh: string
 }
 
-export interface RescueDrawerState {
-  isOpen: boolean
+export interface ExpressionImprovement {
   turn: number
-  aiPrompt: string
-  userFinal: string
-  loading: boolean
-  error: string | null
-  data: RescueResponse | null
-}
-
-export interface CompletedGoal {
-  id: string
-  evidence: string
-}
-
-export interface RemainingGoal {
-  id: string
-  titleZh: string
-}
-
-export interface SessionCheckpointResponse {
-  isGoalCompleted: boolean
-  completedGoals: CompletedGoal[]
-  remainingGoals: RemainingGoal[]
-  factsSummary: string[]
-  nextDirection: string
-  canExtend: boolean
-  nextCap: 14 | 20 | null
-  newSessionToken: string | null
-}
-
-export interface FeedbackStrength {
-  quoteJa: string
-  praiseZh: string
-}
-
-export interface FeedbackImprovement {
-  turn: number
-  type: 'grammar_fix' | 'naturalness_upgrade'
-  originalQuoteJa: string
+  userConfirmedJa: string
   suggestedJa: string
   reasonZh: string
 }
 
-export interface FeedbackReusableExpression {
-  patternJa: string
-  meaningZh: string
-  usageExampleJa: string
-}
-
-export interface FeedbackMasterUpgrade {
+export interface RedoTask {
   turn: number
-  originalJa: string
-  upgradedJa: string
-  explanationZh: string
-}
-
-export interface FeedbackRetryTask {
-  turn: number
-  targetAiPromptJa: string
-  userOriginalJa: string
-  recommendedReferenceJa: string
-  hintZh: string
+  partnerPromptJa: string
+  firstConfirmedJa: string
+  directionZh: string
 }
 
 export interface ConversationFeedbackResponse {
-  isGoalCompleted: boolean
-  goalSummaryZh: string
-  strengths: FeedbackStrength[]
-  improvements: FeedbackImprovement[]
-  reusableExpressions: FeedbackReusableExpression[]
-  masterUpgrade: FeedbackMasterUpgrade
-  retryTask: FeedbackRetryTask
+  outcome: FeedbackOutcome
+  outcomeEvidenceZh: string
+  listeningFinding: ListeningFinding | null
+  expressionImprovement: ExpressionImprovement | null
+  redoTask: RedoTask
 }
 
 export interface FeedbackTranscriptRecord {
   turn: number
-  aiPrompt: string
+  partnerPromptJa: string
   userOriginal: string
   userCleaned: string
-  userFinal: string
+  userConfirmed: string
+  inputMode: 'stt' | 'text'
+  transcriptModified: boolean
+  rerecordCount: number
+  partnerAudioPlayCount: number
+  ttsReplayCount: number
+  transcriptRevealed: boolean
+  listeningScaffoldLevel: ListeningScaffoldLevel
+  expressionScaffoldLevel: 0 | 1 | 2 | 3 | 4
+  failureCount: number
+  retryCount: number
+  textFallback: boolean
+  speechAssistUsed: boolean
 }
 
-export interface CatalogFeedbackRequest {
-  scenarioType: 'catalog'
-  scenarioId: string
-  variantId: string
-  totalTurns: number
-  history: Array<{ role: 'assistant' | 'user'; text: string }>
-  transcriptRecords: FeedbackTranscriptRecord[]
-}
-
-export interface DynamicFeedbackRequest {
+export interface ConversationFeedbackRequest {
   scenarioType: 'dynamic'
   sessionToken: string
-  totalTurns: number
-  history: Array<{ role: 'assistant' | 'user'; text: string }>
-  transcriptRecords: FeedbackTranscriptRecord[]
+  turnRecords: FeedbackTranscriptRecord[]
 }
 
-export type ConversationFeedbackRequest = CatalogFeedbackRequest | DynamicFeedbackRequest
+export interface RedoFeedbackRequest {
+  scenarioType: 'dynamic'
+  sessionToken: string
+  turn: number
+  partnerPromptJa: string
+  firstConfirmedJa: string
+  secondConfirmedJa: string
+  secondInputMode: 'stt' | 'text'
+  secondListeningScaffoldLevel: ListeningScaffoldLevel
+  secondExpressionScaffoldLevel: 0 | 1 | 2 | 3 | 4
+}
+
+export interface RedoFeedbackResponse {
+  comparisonZh: string
+  referenceExpressionJa: string
+}
 
 export type FeedbackLoadingState = 'idle' | 'loading' | 'success' | 'error'
 
-export type RetryTaskAudioState = 'idle' | 'recording' | 'confirming' | 'completed'
-export type SelfAssessment = 'completed' | 'partial' | 'not_completed' | null
-
 export interface PrototypeConfig {
   mode: IntegrationMode
-  limits: { maxTurns: number }
-  scenarioCatalog: ScenarioCatalogEntry[]
+  limits: { maxTurns: 5 }
   elevenlabs: {
     sttAvailable: boolean
     ttsAvailable: boolean
@@ -250,6 +212,7 @@ export interface ConversationMessage {
   role: 'assistant' | 'user'
   text: string
   transcript?: TranscriptText
+  listeningScaffold?: ListeningScaffoldResponse
 }
 
 export interface RoundTiming {
@@ -273,6 +236,18 @@ export interface UsageSummary {
   totalTokens: number | null
 }
 
+export interface SpeechAssistEvent {
+  turn: number
+  requestVersion: number
+  observedTextJa: string
+  cleanedObservedTextJa: string | null
+  continuationSuggestionJa: string | null
+  displayed: boolean
+  latencyMs: number
+  failureReason: 'timeout' | 'aborted' | 'stale_version' | 'network_error' | 'validation_error' | 'server_error' | null
+}
+
+
 export interface RoundRecord {
   turn: number
   aiPrompt: string
@@ -280,7 +255,9 @@ export interface RoundRecord {
   userOriginal: string
   userCleaned: string
   userFinal: string
-  hintLevelUsed: 0 | 1 | 2 | 3 | 4
+  expressionScaffoldLevel: 0 | 1 | 2 | 3 | 4
+  listeningScaffoldLevel: ListeningScaffoldLevel
+  transcriptRevealed: boolean
   transcriptModified: boolean
   transcriptModificationCount: number
   rerecordCount: number
@@ -297,21 +274,34 @@ export interface RoundRecord {
   llmMock: boolean
   usage: UsageSummary
   timing: RoundTiming
+  speechAssistEvents: SpeechAssistEvent[]
+}
+export interface RedoRecord {
+  turn: number
+  partnerPromptJa: string
+  firstConfirmedJa: string
+  secondConfirmedJa: string
+  inputMode: 'stt' | 'text'
+  listeningScaffoldLevel: ListeningScaffoldLevel
+  expressionScaffoldLevel: 0 | 1 | 2 | 3 | 4
+  comparisonZh: string
+  referenceExpressionJa: string
 }
 
+
 export interface SessionReport {
-  schemaVersion: 2
+  schemaVersion: 3
   sessionId: string
   mode: IntegrationMode
   scenarioId: string
   scenarioVersion: number
   variantId: string
   reveal: ScenarioReveal
-  selfAssessment: SelfAssessment
   startedAt: number
   endedAt: number
   durationMilliseconds: number
   rounds: RoundRecord[]
+  redos: RedoRecord[]
   totals: {
     rerecordCount: number
     ttsReplayCount: number
@@ -324,10 +314,22 @@ export interface SessionReport {
     retryCount: number
     inputTokens: number | null
     outputTokens: number | null
-    hintLevelTotal: number
-    hintRoundsCount: number
+    expressionScaffoldLevelTotal: number
+    expressionScaffoldRoundsCount: number
     transcriptModificationCount: number
     avgSpeechStartLatencyMs: number | null
+  }
+  completion: {
+    maxTurns: 5
+    finalTurn: number
+    reason: 'turn_budget'
+    closedNaturally: boolean
+  }
+  recovery: {
+    failureCount: number
+    retryCount: number
+    speechAssistRequestCount: number
+    speechAssistDisplayedCount: number
   }
   costNotes: string[]
 }

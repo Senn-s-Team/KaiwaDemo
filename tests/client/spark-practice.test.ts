@@ -1,39 +1,53 @@
 import { describe, expect, it, vi } from 'vitest'
-import { startSparkPractice } from '../../src/lib/spark-practice'
+import { buildSparkPrompt, prepareSparkPractice } from '../../src/lib/spark-practice'
 import type { VocabScenario } from '../../src/data/vocab-bank'
+import type { DynamicScenarioData } from '../../src/types'
 
-const scenario: VocabScenario = {
+const spark: VocabScenario = {
   id: 'admin-rent',
   domain: 'admin',
   domainZh: '生活手续与契约',
   titleZh: '租房问询',
   titleJa: '賃貸物件の問い合わせ',
   settingZh: '不动产中介店铺',
-  partnerZh: '推销但有帮助的不动产经纪人',
-  challengeZh: '说明预算和需求并询问初期费用',
-  keyExpressions: ['家賃は〜万円以内で', '初期費用はどのくらいですか', '内見は可能ですか'],
+  partnerZh: '不动产经纪人',
+  challengeZh: '说明预算并询问初期费用',
+  keyExpressions: ['家賃は〜万円以内で'],
 }
 
-describe('灵感场景一键开始', () => {
-  it('强制生成完整场景并立即用返回的 token 启动会话', async () => {
-    const draft = vi.fn().mockResolvedValue({ status: 'ready', scenarioToken: 'scenario-token' })
-    const start = vi.fn().mockResolvedValue(undefined)
+const scenario: DynamicScenarioData = {
+  id: 'rent',
+  version: 1,
+  titleZh: '租房问询',
+  summaryZh: '在不动产中介店铺咨询租房。',
+  aiRole: '不动产经纪人',
+  userRole: '租房者',
+  relationship: '初次见面',
+  tone: '礼貌',
+  firstLine: 'どのようなお部屋をお探しですか。',
+  userGoal: '说明预算并询问初期费用',
+  coreGoal: { id: 'goal', titleZh: '确认初期费用', descriptionZh: '说明预算后，问清初期费用。' },
+  worldAnchors: [],
+  followUpPrinciples: [],
+  hintStrategy: '逐级提示',
+  feedbackFocus: [],
+  safetyBoundary: '不提供法律建议',
+}
 
-    await startSparkPractice(scenario, draft, start)
-
-    expect(draft).toHaveBeenCalledWith(
-      '场所：不动产中介店铺。对方：推销但有帮助的不动产经纪人。挑战：说明预算和需求并询问初期费用。参考表达：家賃は〜万円以内で、初期費用はどのくらいですか、内見は可能ですか',
-      [],
-      true,
-    )
-    expect(start).toHaveBeenCalledWith('scenario-token')
+describe('灵感速练预览', () => {
+  it('prompt只携带背景、相手与唯一目标，不泄露参考表达', () => {
+    expect(buildSparkPrompt(spark)).toBe('背景：不动产中介店铺。相手：不动产经纪人。唯一目标：说明预算并询问初期费用。')
+    expect(buildSparkPrompt(spark)).not.toContain('家賃は')
   })
 
-  it('生成服务意外返回追问时不启动空会话', async () => {
-    const draft = vi.fn().mockResolvedValue({ status: 'needs_clarification' })
-    const start = vi.fn().mockResolvedValue(undefined)
+  it('先返回ready场景供确认，不直接启动会话', async () => {
+    const draft = vi.fn().mockResolvedValue({ status: 'ready', scenarioToken: 'scenario-token', scenario })
+    await expect(prepareSparkPractice(spark, draft)).resolves.toEqual({ status: 'ready', scenarioToken: 'scenario-token', scenario })
+    expect(draft).toHaveBeenCalledWith(buildSparkPrompt(spark), [], true)
+  })
 
-    await expect(startSparkPractice(scenario, draft, start)).rejects.toThrow('完整场景')
-    expect(start).not.toHaveBeenCalled()
+  it('意外追问时拒绝产生不完整预览', async () => {
+    const draft = vi.fn().mockResolvedValue({ status: 'needs_clarification', questionZh: '补充？', optionsZh: [] })
+    await expect(prepareSparkPractice(spark, draft)).rejects.toThrow('完整场景')
   })
 })

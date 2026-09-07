@@ -1,33 +1,9 @@
-export type ScenarioId =
-  | 'weekend-chat'
-  | 'order-change'
-  | 'schedule-change'
-  | 'work-progress'
-  | 'conversation-repair'
-
-export interface ScenarioCatalogItem {
-  id: ScenarioId
-  version: number
-}
-
-export interface ScenarioVariantDefinition {
-  id: string
-  titleZh: string
-  summaryZh: string
-  aiRole: string
-  firstLine: string
-  userGoal: string
-  completionCriteria: string
-  followUpStrategy: string
-  worldFacts: string
-  safetyNote: string
-}
-
-export interface ScenarioDefinition {
-  id: ScenarioId
-  version: number
-  variants: readonly ScenarioVariantDefinition[]
-}
+/**
+ * [INPUT]: 依赖 Worker 路由、模型与 token 流程约定的动态场景、四级支架和会话数据形状
+ * [OUTPUT]: 对外提供 Worker 动态场景、会话、反馈与模型交互领域类型
+ * [POS]: worker 的服务端领域协议入口，约束五回合动态场景、L0-L4 支架及请求响应数据形状
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 
 export interface TrainingGoal {
   id: string
@@ -46,15 +22,25 @@ export interface DynamicScenarioDefinition {
   tone: string
   firstLine: string
   userGoal: string
-  coreGoals: readonly TrainingGoal[]
-  optionalGoals: readonly TrainingGoal[]
+  coreGoal: TrainingGoal
+  communicationFunction: string
+  initialFacts: readonly string[]
+  partnerPrivateFacts: readonly string[]
+  keyIntents: readonly string[]
+  keyInformation: readonly string[]
+  completionRules: {
+    completed: readonly string[]
+    partial: readonly string[]
+    notCompleted: readonly string[]
+  }
+  closingRules: readonly string[]
+  maxTurns: 5
+  partnerOpeningPlan: string
   worldAnchors: readonly string[]
   followUpPrinciples: readonly string[]
   hintStrategy: string
   feedbackFocus: readonly string[]
   safetyBoundary: string
-  recommendedMinTurns: number
-  recommendedMaxTurns: number
 }
 
 export interface ScenarioTokenPayload {
@@ -71,7 +57,6 @@ export interface SessionTokenPayload {
   issuedAt: number
   expiresAt: number
   scenario: DynamicScenarioDefinition
-  cap: 10 | 14 | 20
   startedAt: number
 }
 
@@ -104,47 +89,23 @@ export type ScenarioDraftModelResult =
   | ScenarioDraftClarificationResponse
   | Omit<ScenarioDraftReadyResponse, 'scenarioToken'>
 
-export interface CatalogSessionStartRequest {
-  type?: 'catalog'
-  scenarioId: ScenarioId
-}
-
-export interface DynamicSessionStartRequest {
+export interface SessionStartRequest {
   type: 'dynamic'
   scenarioToken: string
 }
 
-export type SessionStartRequest = CatalogSessionStartRequest | DynamicSessionStartRequest
-
-export interface CatalogSessionStartResponse {
-  scenarioType?: 'catalog'
-  scenarioId: ScenarioId
-  scenarioVersion: number
-  variantId: string
-  firstLine: string
-  maxTurns: number
-  reveal: {
-    titleZh: string
-    summaryZh: string
-  }
-}
-
-export interface DynamicSessionStartResponse {
+export interface SessionStartResponse {
   sessionId: string
   scenarioType: 'dynamic'
   sessionToken: string
   scenario: DynamicScenarioDefinition
   firstLine: string
-  maxTurns: number
-  recommendedMinTurns: number
-  recommendedMaxTurns: number
+  maxTurns: 5
   reveal: {
     titleZh: string
     summaryZh: string
   }
 }
-
-export type SessionStartResponse = CatalogSessionStartResponse | DynamicSessionStartResponse
 
 export type ConversationRole = 'assistant' | 'user'
 
@@ -153,19 +114,7 @@ export interface ConversationMessage {
   text: string
 }
 
-export interface CatalogReplyRequest {
-  scenarioType?: 'catalog'
-  sessionId: string
-  scenarioId: ScenarioId
-  scenarioVersion: number
-  variantId: string
-  turn: number
-  model?: string
-  baseUrl?: string
-  history: ConversationMessage[]
-}
-
-export interface DynamicReplyRequest {
+export interface ReplyRequest {
   scenarioType: 'dynamic'
   sessionToken: string
   sessionId: string
@@ -173,86 +122,18 @@ export interface DynamicReplyRequest {
   history: ConversationMessage[]
 }
 
-export type ReplyRequest = CatalogReplyRequest | DynamicReplyRequest
-
-export interface CatalogHintRequest {
-  scenarioType: 'catalog'
-  scenarioId: ScenarioId
-  variantId: string
-  history: ConversationMessage[]
-  lastAssistantText: string
-}
-
-export interface DynamicHintRequest {
+export interface HintRequest {
   scenarioType: 'dynamic'
   sessionToken: string
   history: ConversationMessage[]
   lastAssistantText: string
 }
-
-export type HintRequest = CatalogHintRequest | DynamicHintRequest
 
 export interface HintResponse {
   directionZh: string
   keyPhrasesJa: string[]
   sentenceStarterJa: string
   fullExampleJa: string
-}
-
-export interface CatalogRescueRequest {
-  scenarioType?: 'catalog'
-  scenarioId: ScenarioId
-  variantId: string
-  turn: number
-  aiPrompt: string
-  userFinal: string
-  history: ConversationMessage[]
-}
-
-export interface DynamicRescueRequest {
-  scenarioType: 'dynamic'
-  sessionToken?: string
-  dynamicData?: DynamicScenarioDefinition
-  turn: number
-  aiPrompt: string
-  userFinal: string
-  history: ConversationMessage[]
-}
-
-export type RescueRequest = CatalogRescueRequest | DynamicRescueRequest
-
-export interface RescueResponse {
-  interpretedIntentZh: string
-  suggestedJa: string
-  suggestedJaRuby?: string
-  politenessTipZh: string
-}
-
-export interface SessionCheckpointRequest {
-  sessionToken: string
-  turn: number
-  history: ConversationMessage[]
-}
-
-export interface CompletedGoal {
-  id: string
-  evidence: string
-}
-
-export interface RemainingGoal {
-  id: string
-  titleZh: string
-}
-
-export interface SessionCheckpointResponse {
-  isGoalCompleted: boolean
-  completedGoals: CompletedGoal[]
-  remainingGoals: RemainingGoal[]
-  factsSummary: string[]
-  nextDirection: string
-  canExtend: boolean
-  nextCap: 14 | 20 | null
-  newSessionToken: string | null
 }
 
 export interface TokenRequest {
@@ -278,74 +159,80 @@ export type ReplyStreamEvent =
   | ReplyDoneEvent
   | { type: 'error'; code: string; message: string }
 
-export interface TranscriptRecord {
+export type InputMode = 'stt' | 'text'
+export type ListeningScaffoldLevel = 0 | 1 | 2 | 3 | 4
+export type ExpressionScaffoldLevel = 0 | 1 | 2 | 3 | 4
+
+export interface FeedbackTurnRecord {
   turn: number
-  aiPrompt: string
+  partnerPromptJa: string
   userOriginal: string
   userCleaned: string
-  userFinal: string
+  userConfirmed: string
+  inputMode: InputMode
+  transcriptModified: boolean
+  rerecordCount: number
+  partnerAudioPlayCount: number
+  ttsReplayCount: number
+  transcriptRevealed: boolean
+  listeningScaffoldLevel: ListeningScaffoldLevel
+  expressionScaffoldLevel: ExpressionScaffoldLevel
+  failureCount: number
+  retryCount: number
+  textFallback: boolean
+  speechAssistUsed: boolean
 }
 
-export interface CatalogFeedbackRequest {
-  scenarioType: 'catalog'
-  scenarioId: ScenarioId
-  variantId: string
-  totalTurns: number
-  history: ConversationMessage[]
-  transcriptRecords: TranscriptRecord[]
-}
-
-export interface DynamicFeedbackRequest {
+export interface ConversationFeedbackRequest {
   scenarioType: 'dynamic'
   sessionToken: string
-  totalTurns: number
-  history: ConversationMessage[]
-  transcriptRecords: TranscriptRecord[]
+  turnRecords: FeedbackTurnRecord[]
 }
 
-export type ConversationFeedbackRequest = CatalogFeedbackRequest | DynamicFeedbackRequest
+export type FeedbackOutcome = 'completed' | 'partial' | 'not_completed' | 'insufficient_evidence'
 
-export interface FeedbackStrength {
-  quoteJa: string
-  praiseZh: string
-}
-
-export interface FeedbackImprovement {
+export interface FeedbackListeningFinding {
   turn: number
-  type: 'grammar_fix' | 'naturalness_upgrade'
-  originalQuoteJa: string
+  findingZh: string
+  evidenceZh: string
+}
+
+export interface FeedbackExpressionImprovement {
+  turn: number
+  userConfirmedJa: string
   suggestedJa: string
   reasonZh: string
 }
 
-export interface FeedbackReusableExpression {
-  patternJa: string
-  meaningZh: string
-  usageExampleJa: string
-}
-
-export interface FeedbackMasterUpgrade {
+export interface FeedbackRedoTask {
   turn: number
-  originalJa: string
-  upgradedJa: string
-  explanationZh: string
-}
-
-export interface FeedbackRetryTask {
-  turn: number
-  targetAiPromptJa: string
-  userOriginalJa: string
-  recommendedReferenceJa: string
-  hintZh: string
+  partnerPromptJa: string
+  firstConfirmedJa: string
+  directionZh: string
 }
 
 export interface ConversationFeedbackResponse {
-  isGoalCompleted: boolean
-  goalSummaryZh: string
-  strengths: FeedbackStrength[]
-  improvements: FeedbackImprovement[]
-  reusableExpressions: FeedbackReusableExpression[]
-  masterUpgrade: FeedbackMasterUpgrade
-  retryTask: FeedbackRetryTask
+  outcome: FeedbackOutcome
+  outcomeEvidenceZh: string
+  listeningFinding: FeedbackListeningFinding | null
+  expressionImprovement: FeedbackExpressionImprovement | null
+  redoTask: FeedbackRedoTask
+}
+
+export interface RedoFeedbackRequest {
+  scenarioType: 'dynamic'
+  sessionToken: string
+  turn: number
+  partnerPromptJa: string
+  firstConfirmedJa: string
+  secondConfirmedJa: string
+  secondInputMode: InputMode
+  secondListeningScaffoldLevel: ListeningScaffoldLevel
+  secondExpressionScaffoldLevel: ExpressionScaffoldLevel
+}
+
+export interface RedoFeedbackResponse {
+  comparisonZh: string
+  referenceExpressionJa: string
 }
 

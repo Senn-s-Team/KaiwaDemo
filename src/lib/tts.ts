@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 ./api 的 requestElevenLabsToken 获取临时密钥、HTMLAudioElement 与 Web AudioContext 播放音频
+ * [OUTPUT]: 对外提供 CachedTtsPlayer 类（含 unlock 音频解锁缓存与 speak 流式合成）、TtsCancelledError 与错误解析辅助
+ * [POS]: src/lib 的语音合成播放模块，负责相手语音的流式获取、本地缓存与手势期音频就绪解锁
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { z } from 'zod'
 import { requestElevenLabsToken } from './api'
 
@@ -19,7 +25,7 @@ interface CachedAudio {
   bytes: number
 }
 
-interface SpeakOptions {
+export interface SpeakOptions {
   text: string
   voiceId: string
   modelId: string
@@ -104,8 +110,10 @@ export class CachedTtsPlayer {
   private generationSocket: WebSocket | null = null
   private generationReject: ((error: Error) => void) | null = null
   private operationId = 0
+  private unlocked = false
 
   async unlock(): Promise<void> {
+    if (this.unlocked && (!this.audioContext || this.audioContext.state === 'running')) return
     try {
       if (!this.audio) {
         this.audio = new Audio()
@@ -129,7 +137,7 @@ export class CachedTtsPlayer {
         URL.revokeObjectURL(silentUrl)
       }
 
-      const AudioContextConstructor = window.AudioContext
+      const AudioContextConstructor = typeof window !== 'undefined' ? window.AudioContext : globalThis.AudioContext
       if (AudioContextConstructor && !this.audioContext) {
         this.audioContext = new AudioContextConstructor()
       }
@@ -139,6 +147,7 @@ export class CachedTtsPlayer {
           new Promise((resolve) => setTimeout(resolve, 200)),
         ])
       }
+      this.unlocked = true
     } catch {}
   }
 

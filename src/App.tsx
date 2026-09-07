@@ -1,6 +1,14 @@
-import { ArrowRight, BookOpen, Keyboard, Lightbulb, MessageCircle, Mic, Pencil, RotateCcw, Sparkles, Square, Target, ThumbsUp, TrendingUp, Volume2, Wrench, X, AlertCircle } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+/**
+ * [INPUT]: 依赖 lib/api 接口请求、shared/listening-scaffold 四级听力支架协议、lib/voice-turn-controller 语音回合控制器深模块、lib/ai-turn-controller 相手回合控制器深模块、lib/microphone 权限探测、lib/session 会话状态与显式中断恢复状态机
+ * [OUTPUT]: 对外提供 App 根组件，驱动 KaiwaDemo 动态五回合会话、按消息缓存的 L0-L4 听力支架、实时语音辅助、阶段感知刷新恢复与全生命周期交互
+ * [POS]: src/ 核心入口与主控制器，编排可持久化会话业务状态、四级听力支架、可见语音辅助、phase-aware 安全恢复及 offline/background 中断恢复；不可恢复媒体与网络资源不重放，已提交的业务事实按阶段回滚或推进
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
+import { AlertCircle, ArrowRight, Keyboard, Lightbulb, MessageCircle, Mic, Pencil, Sparkles, Square, Target, Volume2, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
+import type { SpeechAssistAbortReason } from '../shared/speech-assist'
+import type { ListeningScaffoldResponse } from '../shared/listening-scaffold'
 import {
   formatRecordingTime,
   SILENCE_AUTO_STOP_SECONDS,
@@ -8,50 +16,145 @@ import {
 } from './lib/audio-feedback'
 import { cleanTranscript } from './lib/text-cleaner'
 import {
-  checkSessionCheckpoint,
+  ApiError,
   draftScenario,
   fetchConfig,
   fetchHint,
-  fetchRescueAnalysis,
   requestConversationFeedback,
+  requestListeningScaffold,
   requestElevenLabsToken,
+  requestRedoFeedback,
+  requestSpeechAssist,
   startScenarioSession,
-  streamReply,
 } from './lib/api'
-import { buildSessionReport, createRoundRecord, downloadReport, duration } from './lib/metrics'
-import { startSparkPractice } from './lib/spark-practice'
-import { buildPracticeTrend } from './lib/trend'
-import { type MicrophoneReadiness } from './lib/microphone'
-import { releaseMicrophoneStream, requestMicrophoneStream, unlockAudio as unlockWebAudio } from './lib/audio-engine'
-import { annotateRuby } from './lib/ruby-annotator'
-import { createMessageId, createSessionId } from './lib/session'
-import { RealtimeSttSession, SttError } from './lib/stt'
-import { CachedTtsPlayer, TtsCancelledError } from './lib/tts'
-import { formatDuration, toUiError } from './lib/ui'
-import { consumePreparedScenario, prepareNextScenario, scenarioForPractice } from './scenarios/queue'
-import { deriveScenarioReveal } from './scenarios/reveal'
+import { buildSessionReport, createRoundRecord, downloadReport } from './lib/metrics'
+import { buildSparkPrompt } from './lib/spark-practice'
+import { queryMicrophonePermission } from './lib/microphone'
+import { shouldTeardownOnVisibility } from './lib/audio-engine'
+import { createMessageId, createSessionId, decideInterruptionRecovery, decideInterruptionRecoveryAffordances, executeInterruptionRecovery, INITIAL_INTERRUPTION_RECOVERY_STATE, reduceInterruptionRecovery } from './lib/session'
+import { RealtimeSttSession } from './lib/stt'
+import { toUiError } from './lib/ui'
+import { useVoiceTurnController } from './lib/voice-turn-controller'
+import { useAiTurnController } from './lib/ai-turn-controller'
+import { ASSIST_TIMING, shouldDisplaySpeechAssistResult, shouldTriggerSpeechAssist, type ActiveSpeechAssistState } from './lib/speech-assist'
 import { drawRandomScenario, type VocabScenario } from './data/vocab-bank'
-import { RubyText } from './components/RubyText'
 import type {
   AppPhase,
   ConversationFeedbackResponse,
   ConversationMessage,
   DynamicScenarioData,
-  FeedbackImprovement,
   FeedbackLoadingState,
   HintResponse,
+  ListeningScaffoldLevel,
   PrototypeConfig,
-  RescueDrawerState,
+  RedoRecord,
   RoundRecord,
-  SelfAssessment,
-  SessionCheckpointResponse,
   SessionReport,
   SessionScenario,
-  TranscriptText,
+  SpeechAssistEvent,
   UiError,
+  TranscriptText,
 } from './types'
-import { getExpressionPrimers } from './data/expression-primers'
-const BUILD_ID = '2026-09-02-random-blind-practice-1'
+const BUILD_ID = '2026-09-07-listening-scaffold-l4'
+
+const SESSION_SNAPSHOT_KEY = 'kaiwa.current-session.v1'
+const SNAPSHOT_PHASES: readonly AppPhase[] = [
+  'loading_config',
+  'idle',
+  'fetching_token',
+  'connecting_stt',
+  'waiting_user',
+  'recording',
+  'finalizing_transcript',
+  'confirming_transcript',
+  'requesting_llm',
+  'preparing_tts',
+  'playing_ai',
+  'round_complete',
+  'session_complete',
+  'error',
+]
+
+function clearSessionSnapshot(): void {
+  try {
+    window.sessionStorage.removeItem(SESSION_SNAPSHOT_KEY)
+  } catch {
+    return
+  }
+}
+
+
+interface SessionSnapshot {
+  version: 1
+  phase: AppPhase
+  sessionId: string
+  scenario: SessionScenario
+  messages: ConversationMessage[]
+  rounds: RoundRecord[]
+  currentRound: RoundRecord | null
+  turn: number
+  sessionStartedAt: number
+  transcript: TranscriptText
+}
+
+function isSessionSnapshot(value: unknown): value is SessionSnapshot {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Partial<SessionSnapshot>
+  const scenario = candidate.scenario
+  const transcript = candidate.transcript
+  const hasKnownPhase = typeof candidate.phase === 'string' && SNAPSHOT_PHASES.some((phase) => phase === candidate.phase)
+  return candidate.version === 1
+    && hasKnownPhase
+    && typeof candidate.sessionId === 'string'
+    && candidate.sessionId.length > 0
+    && typeof candidate.sessionStartedAt === 'number'
+    && Number.isFinite(candidate.sessionStartedAt)
+    && typeof candidate.turn === 'number'
+    && candidate.turn >= 1
+    && candidate.turn <= 5
+    && Array.isArray(candidate.messages)
+    && Array.isArray(candidate.rounds)
+    && typeof scenario === 'object'
+    && scenario !== null
+    && typeof scenario.id === 'string'
+    && scenario.maxTurns === 5
+    && typeof scenario.dynamicData === 'object'
+    && scenario.dynamicData !== null
+    && typeof transcript === 'object'
+    && transcript !== null
+    && typeof transcript.rawText === 'string'
+    && typeof transcript.cleanedText === 'string'
+    && typeof transcript.finalText === 'string'
+}
+
+function readSessionSnapshot(): SessionSnapshot | null {
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_SNAPSHOT_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (isSessionSnapshot(parsed)) return parsed
+    clearSessionSnapshot()
+    return null
+  } catch {
+    return null
+  }
+}
+
+function removeLastSubmittedUserMessage(messages: ConversationMessage[], turn: number): ConversationMessage[] {
+  const submittedIndex = messages.findLastIndex((message) => message.role === 'user' && message.turn === turn)
+  if (submittedIndex < 0) return messages
+  return messages.filter((_, index) => index !== submittedIndex)
+}
+
+function recoveryStatusText(status: 'idle' | 'interrupted' | 'retrying' | 'recovered' | 'failed'): string {
+  switch (status) {
+    case 'idle': return ''
+    case 'interrupted': return '当前步骤已中断，请选择重试或安全回退。'
+    case 'retrying': return '正在重新建立当前步骤，请稍候。'
+    case 'recovered': return '当前步骤已恢复，可以继续会话。'
+    case 'failed': return '恢复当前步骤失败，请重试或改用文字回答。'
+  }
+}
 
 const STATUS_LABELS: Record<AppPhase, string> = {
   loading_config: '正在准备练习',
@@ -98,11 +201,30 @@ const PHASE_TRANSITIONS: Record<AppPhase, readonly AppPhase[]> = {
   session_complete: ['loading_config', 'idle', 'error'],
   error: ['loading_config', 'idle', 'fetching_token', 'connecting_stt', 'waiting_user', 'recording', 'confirming_transcript', 'requesting_llm', 'preparing_tts', 'session_complete'],
 }
-const EMPTY_TRANSCRIPT: TranscriptText = {
-  rawText: '',
-  cleanedText: '',
-  finalText: '',
+
+interface ListeningRequestState {
+  loading: boolean
+  error: string
 }
+
+const LISTENING_LEVEL_LABELS: Record<ListeningScaffoldLevel, string> = {
+  0: 'L0 未使用支架',
+  1: 'L1 已原速重听',
+  2: 'L2 已显示关键信息',
+  3: 'L3 已显示日语台词',
+  4: 'L4 已显示中文意图',
+}
+
+function nextListeningAction(level: ListeningScaffoldLevel): string | null {
+  switch (level) {
+    case 0: return 'L1 原速重听'
+    case 1: return 'L2 查看关键信息线索'
+    case 2: return 'L3 查看日语台词'
+    case 3: return 'L4 查看中文意图'
+    case 4: return null
+  }
+}
+
 
 
 
@@ -137,110 +259,65 @@ function App() {
   const [sessionEndedAt, setSessionEndedAt] = useState<number | null>(null)
   const [turn, setTurn] = useState(1)
   const [rounds, setRounds] = useState<RoundRecord[]>([])
-  const [, setCurrentRoundView] = useState<RoundRecord | null>(null)
+  const [interruptionRecovery, dispatchInterruptionRecovery] = useReducer(reduceInterruptionRecovery, INITIAL_INTERRUPTION_RECOVERY_STATE)
+  const [currentRoundView, setCurrentRoundView] = useState<RoundRecord | null>(null)
   const [online, setOnline] = useState(navigator.onLine)
-  const [microphoneReadiness, setMicrophoneReadiness] = useState<MicrophoneReadiness>('unknown')
-  const [currentAiText, setCurrentAiText] = useState('')
-  const [aiTextRevealed, setAiTextRevealed] = useState(false)
-  const [partialTranscript, setPartialTranscript] = useState('')
-  const [transcript, setTranscript] = useState<TranscriptText>(EMPTY_TRANSCRIPT)
-  const [manualInput, setManualInput] = useState(false)
-  const [showOriginalTranscript, setShowOriginalTranscript] = useState(false)
-  const [, setMicrophoneLevel] = useState(0)
-  const [microphoneMeterAvailable, setMicrophoneMeterAvailable] = useState(true)
-  const [, setSpeechDetected] = useState(false)
-  const [recordingSeconds, setRecordingSeconds] = useState(0)
-  const [silentSeconds, setSilentSeconds] = useState(0)
-  const [recordingUiStartedAt, setRecordingUiStartedAt] = useState<number | null>(null)
-  const [foregroundNotice, setForegroundNotice] = useState('')
+
+  const [appForegroundNotice, setAppForegroundNotice] = useState('')
+  const [activeAssistState, setActiveAssistState] = useState<ActiveSpeechAssistState | null>(null)
   const [uiError, setUiError] = useState<UiError | null>(null)
   const [inlineError, setInlineError] = useState('')
   const [lastFailedStep, setLastFailedStep] = useState<'config' | 'scenario' | 'token' | 'stt' | 'llm' | 'tts' | null>(null)
+  const pendingAssistEventRef = useRef<SpeechAssistEvent | null>(null)
   const [copyStatus, setCopyStatus] = useState('')
-  const [selfAssessment, setSelfAssessment] = useState<SelfAssessment>(null)
-  const [previousReport, setPreviousReport] = useState<SessionReport | null>(null)
-  const [reviewAudioNotice, setReviewAudioNotice] = useState('')
+  const [pendingHistory, setPendingHistory] = useState<ConversationMessage[]>([])
+  const requestAbortRef = useRef<AbortController | null>(null)
   const [sparkScenario, setSparkScenario] = useState<VocabScenario>(() => drawRandomScenario())
   const [homeTab, setHomeTab] = useState<'spark' | 'custom'>('spark')
-  const [activeSparkScenario, setActiveSparkScenario] = useState<VocabScenario | null>(null)
   const [customInputZh, setCustomInputZh] = useState('')
   const [clarifications, setClarifications] = useState<Array<{ questionZh: string; answerZh: string }>>([])
   const [pendingClarification, setPendingClarification] = useState<{ questionZh: string; optionsZh: readonly string[] } | null>(null)
   const [readyScenarioData, setReadyScenarioData] = useState<{ scenario: DynamicScenarioData; scenarioToken: string } | null>(null)
   const [isDraftingScenario, setIsDraftingScenario] = useState(false)
   const [hintData, setHintData] = useState<HintResponse | null>(null)
-  const [hintLevel, setHintLevel] = useState<number>(0)
+  const [hintLevel, setHintLevel] = useState<0 | 1 | 2 | 3 | 4>(0)
   const [isLoadingHint, setIsLoadingHint] = useState(false)
   const [showHintSheet, setShowHintSheet] = useState(false)
   const [showGoalsSheet, setShowGoalsSheet] = useState(false)
-  const [showTranscriptSheet, setShowTranscriptSheet] = useState(false)
-  const [showPrimerSheet, setShowPrimerSheet] = useState(false)
-  const [rescueDrawerState, setRescueDrawerState] = useState<RescueDrawerState>({
-    isOpen: false,
-    turn: 1,
-    aiPrompt: '',
-    userFinal: '',
-    loading: false,
-    error: null,
-    data: null,
-  })
-  const [isPlayingRescueTts, setIsPlayingRescueTts] = useState(false)
-  const [showRuby, setShowRuby] = useState(true)
-  const rescueAbortRef = useRef<AbortController | null>(null)
-  const currentPrimers = useMemo(() => {
-    if (!scenario) return []
-    return getExpressionPrimers(
-      scenario.id,
-      scenario.variantId,
-      scenario.dynamicData,
-      activeSparkScenario,
-    )
-  }, [scenario, activeSparkScenario])
   const [dockInputMode, setDockInputMode] = useState<'voice' | 'text'>('voice')
   const [dockTextValue, setDockTextValue] = useState('')
-  const [expandedAiMessageIds, setExpandedAiMessageIds] = useState<Set<string>>(new Set())
-  const [activeAiMessageId, setActiveAiMessageId] = useState<string | null>(null)
-  const [playedAiMessageIds, setPlayedAiMessageIds] = useState<Set<string>>(new Set())
-  const [checkpointData, setCheckpointData] = useState<SessionCheckpointResponse | null>(null)
-  const [, setIsCheckingCheckpoint] = useState(false)
+
   const [feedbackData, setFeedbackData] = useState<ConversationFeedbackResponse | null>(null)
   const [feedbackStatus, setFeedbackStatus] = useState<FeedbackLoadingState>('idle')
   const [feedbackErrorMsg, setFeedbackErrorMsg] = useState('')
+  const [redoRecords, setRedoRecords] = useState<RedoRecord[]>([])
   const feedbackFetchedRef = useRef(false)
+  const [listeningLevels, setListeningLevels] = useState<Record<string, ListeningScaffoldLevel>>({})
+  const [listeningRequestStates, setListeningRequestStates] = useState<Record<string, ListeningRequestState>>({})
   const phaseRef = useRef(phase)
   const messagesRef = useRef<ConversationMessage[]>([])
   const roundsRef = useRef<RoundRecord[]>([])
   const currentRoundRef = useRef<RoundRecord | null>(null)
-  const pendingHistoryRef = useRef<ConversationMessage[]>([])
-  const pendingAdvanceReplyRef = useRef<string | null>(null)
-  const requestAbortRef = useRef<AbortController | null>(null)
-  const sttRef = useRef(new RealtimeSttSession())
-  const ttsRef = useRef(new CachedTtsPlayer())
-  const sessionStartLockRef = useRef(false)
-  const recordingStartLockRef = useRef(false)
-  const submitLockRef = useRef(false)
-  const ttsActionLockRef = useRef(false)
-  const operationIdRef = useRef(0)
-  const lastSoundAtRef = useRef<number | null>(null)
-  const silenceStopLockRef = useRef(false)
-  const prefetchedTokenRef = useRef<{ token: string; expiresAt: number } | null>(null)
-  const messageListRef = useRef<HTMLDivElement | null>(null)
-  const chatBottomRef = useRef<HTMLDivElement | null>(null)
 
-  // 后台静默预取下一轮 STT 临时 Token
-  const prefetchSttToken = useCallback(async () => {
-    if (!config?.elevenlabs.sttAvailable || !online) return
-    const now = Date.now()
-    if (prefetchedTokenRef.current && prefetchedTokenRef.current.expiresAt > now + 60_000) {
-      return
-    }
-    try {
-      const token = await requestElevenLabsToken('realtime_scribe')
-      prefetchedTokenRef.current = { token, expiresAt: now + 800_000 } // ~13分钟有效期
-    } catch {
-      // 静默失败，用户点击时会平滑重试
-    }
-  }, [config?.elevenlabs.sttAvailable, online])
+  const sessionStartLockRef = useRef(false)
+  const submitLockRef = useRef(false)
+
+  const operationIdRef = useRef(0)
+  const messageListRef = useRef<HTMLDivElement | null>(null)
+
+  const sessionSnapshotRef = useRef<SessionSnapshot | null>(readSessionSnapshot())
+  const chatBottomRef = useRef<HTMLDivElement | null>(null)
+  const transcriptVersionRef = useRef(0)
+
+  const lastAssistRequestAtRef = useRef(0)
+  const lastAssistedVersionRef = useRef(0)
+  const assistInFlightRef = useRef(false)
+  const assistAbortControllerRef = useRef<AbortController | null>(null)
+  const restoredTranscriptRef = useRef<TranscriptText | null>(null)
+  const flushPendingAssistRef = useRef<(displayed: boolean, failureReason: SpeechAssistEvent['failureReason']) => void>(() => undefined)
+  const listeningRequestsInFlightRef = useRef<Set<string>>(new Set())
+
+
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
     if (chatBottomRef.current) {
       chatBottomRef.current.scrollIntoView({ behavior, block: 'end' })
@@ -262,43 +339,29 @@ function App() {
     operationIdRef.current += 1
     requestAbortRef.current?.abort()
     requestAbortRef.current = null
-    sttRef.current.close()
-    ttsRef.current.stop()
     return operationIdRef.current
   }, [])
 
   const isCurrentOperation = useCallback((operationId: number) => operationId === operationIdRef.current, [])
-  const unlockAudio = useCallback(() => ttsRef.current.unlock(), [])
 
-  useEffect(() => {
-    phaseRef.current = phase
-  }, [phase])
 
-  useEffect(() => {
-    scrollToBottom(messages.length <= 1 ? 'auto' : 'smooth')
-  }, [messages, phase, partialTranscript, hintData, hintLevel, uiError, scrollToBottom])
-
-  useEffect(() => {
-    if (phase !== 'recording' || recordingUiStartedAt === null) return
-    const updateElapsed = () => {
-      const now = Date.now()
-      setRecordingSeconds(Math.floor((now - recordingUiStartedAt) / 1_000))
-      setSilentSeconds(Math.floor((now - (lastSoundAtRef.current ?? recordingUiStartedAt)) / 1_000))
+  const abortSpeechAssist = useCallback((reason: SpeechAssistAbortReason) => {
+    if (assistAbortControllerRef.current) {
+      assistAbortControllerRef.current.abort(reason)
+      assistAbortControllerRef.current = null
+      assistInFlightRef.current = false
     }
-    updateElapsed()
-    const interval = window.setInterval(updateElapsed, 100)
-    return () => window.clearInterval(interval)
-  }, [phase, recordingUiStartedAt])
-  const replaceMessages = useCallback((next: ConversationMessage[]) => {
-    messagesRef.current = next
-    setMessages(next)
+    flushPendingAssistRef.current(false, 'aborted')
+    setActiveAssistState(null)
   }, [])
 
-  const resetTranscript = useCallback(() => {
-    setTranscript({ ...EMPTY_TRANSCRIPT })
-    setShowOriginalTranscript(false)
-  }, [])
-
+  const operationCapability = useMemo(
+    () => ({
+      begin: beginOperation,
+      isCurrent: isCurrentOperation,
+    }),
+    [beginOperation, isCurrentOperation],
+  )
   const appendRound = useCallback((round: RoundRecord) => {
     const next = [...roundsRef.current, structuredClone(round)]
     roundsRef.current = next
@@ -316,27 +379,384 @@ function App() {
     update(activeRound)
     setCurrentRoundView(structuredClone(activeRound))
   }, [])
-
-  const prepareTranscript = useCallback((rawText: string) => {
-    const cleaned = cleanTranscript(rawText)
-    setTranscript({
-      rawText: cleaned.rawText,
-      cleanedText: cleaned.cleanedText,
-      finalText: cleaned.cleanedText,
-    })
+  const flushPendingAssistEvent = useCallback((displayed: boolean, failureReason: SpeechAssistEvent['failureReason']) => {
+    const pendingEvent = pendingAssistEventRef.current
+    if (!pendingEvent) return
+    pendingAssistEventRef.current = null
     touchRound((round) => {
-      round.userCleaned = cleaned.cleanedText.trim()
+      round.speechAssistEvents.push({
+        ...pendingEvent,
+        displayed,
+        failureReason: displayed ? null : failureReason,
+      })
     })
-    setShowOriginalTranscript(false)
   }, [touchRound])
+  useEffect(() => {
+    flushPendingAssistRef.current = flushPendingAssistEvent
+  }, [flushPendingAssistEvent])
+
+  const voiceTurn = useVoiceTurnController({
+    sttAvailable: Boolean(config?.elevenlabs.sttAvailable),
+    sttModel: config?.elevenlabs.sttModel ?? '',
+    online,
+    phase,
+    operation: operationCapability,
+    transitionTo,
+    touchRound,
+    abortSpeechAssist,
+  })
+
+  const {
+    confirmedTranscript,
+    interimTranscript,
+    partialTranscript,
+    transcript,
+    manualInput,
+    showOriginalTranscript,
+    showTranscriptSheet,
+    recordingSeconds,
+    silentSeconds,
+    microphoneMeterAvailable,
+    recordingUiStartedAt,
+    foregroundNotice: voiceForegroundNotice,
+    voiceError,
+  } = voiceTurn.state
+  const {
+    startRecording,
+    stopRecording,
+    enterTextInput,
+    rerecord,
+    updateFinalText,
+    toggleOriginalTranscript,
+    openTranscriptSheet,
+    closeTranscriptSheet,
+    syncMicrophoneReadiness,
+    clearVoiceNotice,
+    resetVoiceTurn,
+    dispose: disposeVoiceTurn,
+    prefetchSttToken,
+  } = voiceTurn.actions
+
+  const commitAssistantMessage = useCallback(
+    (message: ConversationMessage) => {
+      const next = [...messagesRef.current, message]
+      messagesRef.current = next
+      setMessages(next)
+    },
+    [],
+  )
+
+  const aiTurnConfig = useMemo(() => {
+    if (!config) return null
+    return {
+      ttsAvailable: config.elevenlabs.ttsAvailable,
+      voiceId: config.elevenlabs.voiceId,
+      ttsModel: config.elevenlabs.ttsModel,
+    }
+  }, [config])
+
+  const commitCurrentRound = useCallback(() => {
+    const active = currentRoundRef.current
+    if (active) {
+      const next = [...roundsRef.current, structuredClone(active)]
+      roundsRef.current = next
+      setRounds(next)
+    }
+  }, [])
+
+  const aiTurn = useAiTurnController({
+    config: aiTurnConfig,
+    sessionId,
+    scenario,
+    turn,
+    operation: operationCapability,
+    transitionTo,
+    touchRound,
+    commitCurrentRound,
+    replaceCurrentRound,
+    commitAssistantMessage,
+    advanceTurn: (nextTurn) => setTurn(nextTurn),
+    prefetchSttToken,
+    onSessionComplete: () => {
+      setSessionEndedAt(Date.now())
+      transitionTo('session_complete')
+    },
+  })
+
+  const {
+    currentAiText,
+    activeAiMessageId,
+    playedAiMessageIds,
+    reviewAudioNotice,
+    aiError,
+  } = aiTurn.state
+
+  const {
+    generateNextReply,
+    playAiText,
+    stopAiPlayback,
+    skipFailedTts,
+    playReviewAudio,
+    initFirstLine,
+    resetAiTurn,
+    dispose: disposeAiTurn,
+    unlockAudio,
+  } = aiTurn.actions
+
+  useEffect(() => {
+    phaseRef.current = phase
+  }, [phase])
+
+  useEffect(() => {
+    scrollToBottom(messages.length <= 1 ? 'auto' : 'smooth')
+  }, [messages, phase, partialTranscript, hintData, hintLevel, uiError, scrollToBottom])
+
+  const replaceMessages = useCallback((next: ConversationMessage[]) => {
+    messagesRef.current = next
+    setMessages(next)
+  }, [])
+
+
+  useEffect(() => {
+    transcriptVersionRef.current = voiceTurn.meta.transcriptVersion
+  }, [voiceTurn.meta.transcriptVersion])
+
+  const activeAssistIsVisible = activeAssistState !== null
+    && phase === 'recording'
+    && activeAssistState.version === voiceTurn.meta.transcriptVersion
+
+  useEffect(() => {
+    if (!pendingAssistEventRef.current) return
+    flushPendingAssistEvent(activeAssistIsVisible, activeAssistIsVisible ? null : 'stale_version')
+  }, [activeAssistIsVisible, flushPendingAssistEvent])
+
+  useEffect(() => {
+    if (phase !== 'recording' || recordingUiStartedAt === null) return
+    const now = Date.now()
+    const fullTranscript = [confirmedTranscript.trim(), interimTranscript.trim()].filter(Boolean).join(' ') || partialTranscript.trim()
+    const currentVersion = voiceTurn.meta.transcriptVersion
+    const shouldTrigger = shouldTriggerSpeechAssist({
+      isRecording: phaseRef.current === 'recording',
+      transcript: fullTranscript,
+      timeSinceLastSpeechSoundMs: now - (voiceTurn.meta.lastSpeechSoundAt ?? now),
+      timeSinceLastPartialMs: now - (voiceTurn.meta.lastPartialAt ?? now),
+      timeSinceLastRequestMs: now - lastAssistRequestAtRef.current,
+      inFlight: assistInFlightRef.current,
+      currentVersion,
+      lastAssistedVersion: lastAssistedVersionRef.current,
+    })
+
+    if (shouldTrigger && scenario) {
+      lastAssistedVersionRef.current = currentVersion
+      lastAssistRequestAtRef.current = now
+      assistInFlightRef.current = true
+
+      const assistController = new AbortController()
+      assistAbortControllerRef.current = assistController
+      const timeoutId = window.setTimeout(() => {
+        assistController.abort('timeout')
+      }, ASSIST_TIMING.timeoutMs)
+
+      const triggerTurn = turn
+      const requestVersion = currentVersion
+      const observedText = fullTranscript
+      const startTime = Date.now()
+
+      void (async () => {
+        let assistEvent: SpeechAssistEvent | null = null
+        try {
+          const trailingSilenceMs = Math.min(10_000, Math.max(900, now - (voiceTurn.meta.lastSpeechSoundAt ?? now)))
+          const lastAssistantTextJa = currentRoundRef.current?.aiPrompt || scenario.firstLine
+          const res = await requestSpeechAssist({
+            requestId: `sa_${crypto.randomUUID()}`,
+            transcriptVersion: requestVersion,
+            observedTextJa: observedText,
+            lastAssistantTextJa,
+            trailingSilenceMs,
+            sessionToken: scenario.sessionToken,
+            turn: triggerTurn,
+          }, assistController.signal)
+
+          const latencyMs = Date.now() - startTime
+          const shouldDisplay = shouldDisplaySpeechAssistResult({
+            isRecording: phaseRef.current === 'recording',
+            requestVersion,
+            currentVersion: transcriptVersionRef.current,
+            isAborted: assistController.signal.aborted,
+            timeSinceLastSpeechSoundMs: Date.now() - (voiceTurn.meta.lastSpeechSoundAt ?? 0),
+          })
+          assistEvent = {
+            turn: triggerTurn,
+            requestVersion,
+            observedTextJa: observedText,
+            cleanedObservedTextJa: res.cleanedObservedTextJa,
+            continuationSuggestionJa: res.continuationSuggestionJa,
+            displayed: false,
+            latencyMs,
+            failureReason: shouldDisplay ? null : assistController.signal.aborted ? 'aborted' : 'stale_version',
+          }
+
+          if (shouldDisplay) {
+            pendingAssistEventRef.current = assistEvent
+            assistEvent = null
+            setActiveAssistState({
+              version: requestVersion,
+              observedTextJa: observedText,
+              cleanedObservedTextJa: res.cleanedObservedTextJa,
+              continuationSuggestionJa: res.continuationSuggestionJa,
+            })
+          }
+        } catch (err) {
+          const latencyMs = Date.now() - startTime
+          const isTimeout = assistController.signal.aborted && assistController.signal.reason === 'timeout'
+          const isAborted = assistController.signal.aborted && !isTimeout
+          let failureReason: SpeechAssistEvent['failureReason'] = 'network_error'
+          if (isTimeout) failureReason = 'timeout'
+          else if (isAborted) failureReason = 'aborted'
+          else if (err instanceof ApiError && err.status >= 500) failureReason = 'server_error'
+          else if (err instanceof ApiError && err.status >= 400) failureReason = 'validation_error'
+
+          assistEvent = {
+            turn: triggerTurn,
+            requestVersion,
+            observedTextJa: observedText,
+            cleanedObservedTextJa: null,
+            continuationSuggestionJa: null,
+            displayed: false,
+            latencyMs,
+            failureReason,
+          }
+        } finally {
+          window.clearTimeout(timeoutId)
+          if (assistAbortControllerRef.current === assistController) {
+            assistAbortControllerRef.current = null
+            assistInFlightRef.current = false
+          }
+          const completedEvent = assistEvent
+          if (completedEvent) {
+            touchRound((round) => {
+              round.speechAssistEvents.push(completedEvent)
+            })
+          }
+        }
+      })()
+    }
+  }, [confirmedTranscript, interimTranscript, partialTranscript, phase, recordingUiStartedAt, scenario, touchRound, turn, voiceTurn.meta])
+  const updateRoundByTurn = useCallback((targetTurn: number, update: (round: RoundRecord) => void) => {
+    if (currentRoundRef.current?.turn === targetTurn) {
+      touchRound(update)
+      return
+    }
+    const next = roundsRef.current.map((round) => {
+      if (round.turn !== targetTurn) return round
+      const updated = structuredClone(round)
+      update(updated)
+      return updated
+    })
+    roundsRef.current = next
+    setRounds(next)
+  }, [touchRound])
+
+  const setListeningLevelAtLeast = useCallback((messageId: string, level: ListeningScaffoldLevel) => {
+    setListeningLevels((current) => {
+      const existing = current[messageId] ?? 0
+      return existing >= level ? current : { ...current, [messageId]: level }
+    })
+  }, [])
+
+  const updateRoundListeningLevel = useCallback((targetTurn: number, level: ListeningScaffoldLevel, transcriptRevealed = false) => {
+    updateRoundByTurn(targetTurn, (round) => {
+      if (round.listeningScaffoldLevel < level) round.listeningScaffoldLevel = level
+      if (transcriptRevealed) round.transcriptRevealed = true
+    })
+  }, [updateRoundByTurn])
+
+  const cacheListeningScaffold = useCallback((messageId: string, scaffold: ListeningScaffoldResponse) => {
+    const next = messagesRef.current.map((message) => message.id === messageId
+      ? { ...message, listeningScaffold: scaffold }
+      : message)
+    replaceMessages(next)
+  }, [replaceMessages])
+
+  const getListeningLevel = useCallback((message: ConversationMessage): ListeningScaffoldLevel => {
+    const tracked = listeningLevels[message.id] ?? 0
+    const round = currentRoundView?.turn === message.turn
+      ? currentRoundView
+      : rounds.find((item) => item.turn === message.turn)
+    const recorded = round?.listeningScaffoldLevel ?? 0
+    const cached: ListeningScaffoldLevel = message.listeningScaffold ? 2 : 0
+    let level = tracked
+    if (recorded > level) level = recorded
+    if (cached > level) level = cached
+    return level
+  }, [currentRoundView, listeningLevels, rounds])
+
+  const replayPartnerMessage = useCallback((message: ConversationMessage) => {
+    if (aiTurn.meta.isTtsActionLocked) return
+    setListeningLevelAtLeast(message.id, 1)
+    updateRoundByTurn(message.turn, (round) => {
+      round.ttsReplayCount += 1
+      if (round.listeningScaffoldLevel < 1) round.listeningScaffoldLevel = 1
+    })
+    void playAiText(message.text, false, undefined, message.id)
+  }, [aiTurn.meta.isTtsActionLocked, playAiText, setListeningLevelAtLeast, updateRoundByTurn])
+
+  const advanceListeningScaffold = useCallback(async (message: ConversationMessage) => {
+    const level = getListeningLevel(message)
+    if (level === 0) {
+      replayPartnerMessage(message)
+      return
+    }
+    if (level === 1) {
+      if (message.listeningScaffold) {
+        setListeningLevelAtLeast(message.id, 2)
+        updateRoundListeningLevel(message.turn, 2)
+        return
+      }
+      if (!scenario || listeningRequestsInFlightRef.current.has(message.id)) return
+      listeningRequestsInFlightRef.current.add(message.id)
+      setListeningRequestStates((current) => ({ ...current, [message.id]: { loading: true, error: '' } }))
+      try {
+        const scaffold = await requestListeningScaffold({
+          scenarioType: 'dynamic',
+          sessionToken: scenario.sessionToken,
+          turn: message.turn,
+          partnerPromptJa: message.text,
+        })
+        cacheListeningScaffold(message.id, scaffold)
+        setListeningLevelAtLeast(message.id, 2)
+        updateRoundListeningLevel(message.turn, 2)
+        setListeningRequestStates((current) => ({ ...current, [message.id]: { loading: false, error: '' } }))
+      } catch (error) {
+        setListeningRequestStates((current) => ({
+          ...current,
+          [message.id]: {
+            loading: false,
+            error: error instanceof Error ? error.message : '关键信息获取失败，请重试。',
+          },
+        }))
+      } finally {
+        listeningRequestsInFlightRef.current.delete(message.id)
+      }
+      return
+    }
+    if (level === 2) {
+      setListeningLevelAtLeast(message.id, 3)
+      updateRoundListeningLevel(message.turn, 3, true)
+      return
+    }
+    if (level === 3) {
+      setListeningLevelAtLeast(message.id, 4)
+      updateRoundListeningLevel(message.turn, 4)
+    }
+  }, [cacheListeningScaffold, getListeningLevel, replayPartnerMessage, scenario, setListeningLevelAtLeast, updateRoundListeningLevel])
+
   const stopActiveResources = useCallback(() => {
     beginOperation()
-    ttsRef.current.stop()
-    sttRef.current.close()
-    releaseMicrophoneStream()
-    ttsActionLockRef.current = false
-    setIsPlayingRescueTts(false)
-  }, [beginOperation])
+    disposeVoiceTurn()
+    disposeAiTurn()
+    abortSpeechAssist('stopped')
+  }, [abortSpeechAssist, beginOperation, disposeAiTurn, disposeVoiceTurn])
 
   const loadConfig = useCallback(async () => {
     const operationId = beginOperation()
@@ -348,7 +768,63 @@ function App() {
       const nextConfig = await fetchConfig(controller.signal)
       if (!isCurrentOperation(operationId)) return
       setConfig(nextConfig)
-      transitionTo('idle')
+      const snapshot = sessionSnapshotRef.current
+      sessionSnapshotRef.current = null
+      if (snapshot) {
+        let restoredMessages = structuredClone(snapshot.messages)
+        let restoredRounds = structuredClone(snapshot.rounds)
+        let restoredRound = snapshot.currentRound ? structuredClone(snapshot.currentRound) : null
+        let restoredTurn = snapshot.turn
+        let restoredPhase: AppPhase = 'waiting_user'
+        let restoredEndedAt: number | null = null
+        let restoredTranscript: TranscriptText | null = null
+
+        if (snapshot.phase === 'confirming_transcript' && snapshot.transcript.finalText.trim()) {
+          restoredPhase = 'confirming_transcript'
+          restoredTranscript = structuredClone(snapshot.transcript)
+        } else if (snapshot.phase === 'requesting_llm' && snapshot.transcript.finalText.trim()) {
+          restoredMessages = removeLastSubmittedUserMessage(restoredMessages, snapshot.turn)
+          restoredPhase = 'confirming_transcript'
+          restoredTranscript = structuredClone(snapshot.transcript)
+        } else if ((snapshot.phase === 'preparing_tts' || snapshot.phase === 'playing_ai') && restoredRound?.userFinal.trim()) {
+          if (!restoredRounds.some((round) => round.turn === restoredRound?.turn)) {
+            restoredRounds = [...restoredRounds, structuredClone(restoredRound)]
+          }
+          if (snapshot.turn >= snapshot.scenario.maxTurns) {
+            restoredRound = null
+            restoredPhase = 'session_complete'
+            restoredEndedAt = Date.now()
+          } else {
+            const nextTurn = snapshot.turn + 1
+            const nextPrompt = restoredMessages.findLast((message) => message.role === 'assistant' && message.turn === nextTurn)?.text
+              ?? restoredRound.nextAiReply
+              ?? snapshot.scenario.firstLine
+            restoredTurn = nextTurn
+            restoredRound = createRoundRecord(nextTurn, nextPrompt, 0)
+          }
+        }
+
+        setSessionId(snapshot.sessionId)
+        setScenario(structuredClone(snapshot.scenario))
+        setSessionStartedAt(snapshot.sessionStartedAt)
+        setSessionEndedAt(restoredEndedAt)
+        setTurn(restoredTurn)
+        replaceMessages(restoredMessages)
+        roundsRef.current = restoredRounds
+        setRounds(restoredRounds)
+        replaceCurrentRound(restoredRound)
+        setPendingHistory(restoredMessages)
+        updateFinalText(restoredTranscript?.finalText ?? '')
+        restoredTranscriptRef.current = restoredTranscript
+        if (restoredPhase === 'confirming_transcript') openTranscriptSheet()
+        phaseRef.current = restoredPhase
+        setPhase(restoredPhase)
+        setAppForegroundNotice(restoredPhase === 'session_complete'
+          ? '已恢复并完成上一轮。未重放网络请求或语音。'
+          : '已从本次标签页的会话快照安全恢复。未重放录音、网络请求或语音。')
+      } else {
+        transitionTo('idle')
+      }
       setLastFailedStep(null)
     } catch (error) {
       if (controller.signal.aborted || !isCurrentOperation(operationId)) return
@@ -358,7 +834,7 @@ function App() {
     } finally {
       if (requestAbortRef.current === controller) requestAbortRef.current = null
     }
-  }, [beginOperation, isCurrentOperation, transitionTo])
+  }, [beginOperation, isCurrentOperation, openTranscriptSheet, replaceCurrentRound, replaceMessages, transitionTo, updateFinalText])
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadConfig(), 0)
@@ -366,45 +842,74 @@ function App() {
   }, [loadConfig])
 
   useEffect(() => {
-    const tts = ttsRef.current
-    const handleOnline = () => {
-      setOnline(true)
-      setForegroundNotice('网络已恢复，可以继续。')
+    if (sessionSnapshotRef.current) return
+    if (!sessionId || !scenario || sessionStartedAt === null || sessionEndedAt !== null) {
+      clearSessionSnapshot()
+      return
     }
-    const handleOffline = () => {
-      setOnline(false)
-      stopActiveResources()
-      if (!ACTIVE_SESSION_PHASES.includes(phaseRef.current)) return
+    const snapshot: SessionSnapshot = {
+      version: 1,
+      phase,
+      sessionId,
+      scenario,
+      messages,
+      rounds,
+      currentRound: currentRoundView,
+      turn,
+      sessionStartedAt,
+      transcript,
+    }
+    try {
+      window.sessionStorage.setItem(SESSION_SNAPSHOT_KEY, JSON.stringify(snapshot))
+    } catch {
+      // sessionStorage 可能被浏览器策略或容量限制禁用；会话本身继续运行。
+    }
+  }, [currentRoundView, messages, phase, rounds, scenario, sessionEndedAt, sessionId, sessionStartedAt, transcript, turn])
+  useEffect(() => {
+    const interruptActiveSession = (code: 'offline' | 'background_interruption') => {
+      const interruptedPhase = phaseRef.current
+      const recoveryTarget = decideInterruptionRecovery(interruptedPhase)
+      if (!recoveryTarget) return
+
+      beginOperation()
+      abortSpeechAssist(code === 'offline' ? 'offline' : 'background')
+      if (recoveryTarget === 'llm' || recoveryTarget === 'tts') {
+        aiTurn.actions.interruptPlaybackForBackground()
+      }
+      if (recoveryTarget === 'stt') {
+        disposeVoiceTurn()
+      }
+
+      dispatchInterruptionRecovery({ type: 'interrupted', target: recoveryTarget })
       touchRound((round) => {
         round.failureCount += 1
       })
       setUiError({
-        code: 'offline',
-        title: '网络连接已中断',
-        message: '当前步骤已停止。网络恢复后重试，或改用文字回答。',
-        recovery: phaseRef.current === 'recording' ? 'text_input' : 'retry',
+        code,
+        title: code === 'offline' ? '网络连接已中断' : '连接已在后台停止',
+        message: code === 'offline' ? '当前步骤已停止。网络恢复后重试，或改用文字回答。' : '返回页面后请恢复当前步骤。',
+        recovery: interruptedPhase === 'recording' ? 'text_input' : 'retry',
       })
       transitionTo('error')
     }
+
+    const handleOnline = () => {
+      setOnline(true)
+      setAppForegroundNotice('网络已恢复，可以继续。')
+    }
+    const handleOffline = () => {
+      setOnline(false)
+      interruptActiveSession('offline')
+    }
     const handleVisibility = () => {
       if (document.visibilityState === 'hidden' && ACTIVE_SESSION_PHASES.includes(phaseRef.current)) {
-        const interruptedPhase = phaseRef.current
-        stopActiveResources()
-        touchRound((round) => {
-          round.failureCount += 1
-        })
-        setLastFailedStep(
-          interruptedPhase === 'requesting_llm' ? 'llm' : interruptedPhase === 'preparing_tts' || interruptedPhase === 'playing_ai' ? 'tts' : 'stt',
-        )
-        setUiError({
-          code: 'background_interruption',
-          title: '连接已在后台停止',
-          message: '返回页面后请恢复当前步骤。',
-          recovery: interruptedPhase === 'recording' ? 'text_input' : 'retry',
-        })
-        transitionTo('error')
+        // 如果正在等待用户麦克风系统权限弹窗，切出属于正常系统弹窗遮挡/切换行为，不能误杀刚获取的流或判定失败
+        if (!shouldTeardownOnVisibility(document.hidden)) {
+          return
+        }
+        interruptActiveSession('background_interruption')
       } else if (document.visibilityState === 'visible') {
-        setForegroundNotice('已回到页面，请确认当前状态后继续。')
+        setAppForegroundNotice('已回到页面，请确认当前状态后继续。')
       }
     }
 
@@ -418,185 +923,19 @@ function App() {
       document.removeEventListener('visibilitychange', handleVisibility)
       window.removeEventListener('pagehide', stopActiveResources)
       stopActiveResources()
-      tts.dispose()
     }
-  }, [stopActiveResources, touchRound, transitionTo])
+  }, [abortSpeechAssist, aiTurn.actions, beginOperation, disposeVoiceTurn, stopActiveResources, touchRound, transitionTo])
 
-  const finalizeAndAdvance = useCallback((reply: string) => {
-    const activeRound = currentRoundRef.current
-    if (activeRound) appendRound(activeRound)
-    const nextTurn = turn + 1
-    replaceCurrentRound(createRoundRecord(nextTurn, reply, 0))
-    pendingAdvanceReplyRef.current = null
-    setTurn(nextTurn)
-    transitionTo('waiting_user')
-    setUiError(null)
-    setLastFailedStep(null)
-  }, [appendRound, replaceCurrentRound, transitionTo, turn])
 
-  const playAiText = useCallback(async (
-    text: string,
-    replay: boolean,
-    advanceAfterPlayback: boolean,
-    existingOperationId?: number,
-    messageId?: string,
-  ) => {
-    if (!config || ttsActionLockRef.current) return
-    const operationId = existingOperationId ?? beginOperation()
-    if (!isCurrentOperation(operationId)) return
-    ttsActionLockRef.current = true
-    setActiveAiMessageId(messageId ?? null)
-    sttRef.current.close()
-    setUiError(null)
-    setInlineError('')
-    if (replay) {
-      touchRound((round) => {
-        round.ttsReplayCount += 1
-      })
-    }
-    if (!config.elevenlabs.ttsAvailable || !config.elevenlabs.voiceId) {
-      pendingAdvanceReplyRef.current = advanceAfterPlayback ? text : null
-      setUiError({
-        code: 'tts_unconfigured',
-        title: '相手语音暂不可用',
-        message: '暂时无法播放相手语音。可以显示文字继续。',
-        recovery: 'skip_tts',
-      })
-      setLastFailedStep('tts')
-      transitionTo('error')
-      ttsActionLockRef.current = false
-      setActiveAiMessageId(null)
-      return
-    }
-
-    transitionTo('preparing_tts')
-    try {
-      await ttsRef.current.speak({
-        text,
-        voiceId: config.elevenlabs.voiceId,
-        modelId: config.elevenlabs.ttsModel,
-        onGenerationStarted: () => {
-          if (!isCurrentOperation(operationId)) return
-          touchRound((round) => {
-            round.timing.ttsStartedAt = Date.now()
-          })
-        },
-        onFirstAudio: () => {
-          if (!isCurrentOperation(operationId)) return
-          touchRound((round) => {
-            round.timing.ttsFirstAudioAt = Date.now()
-          })
-        },
-        onAudioStarted: () => {
-          if (!isCurrentOperation(operationId)) return
-          touchRound((round) => {
-            round.timing.audioStartedAt = Date.now()
-          })
-          transitionTo('playing_ai')
-          void prefetchSttToken() // AI 开始发话时，后台静默预取下一轮 Token
-        },
-        onAudioEnded: () => {
-          if (!isCurrentOperation(operationId)) return
-          touchRound((round) => {
-            round.timing.audioCompletedAt = Date.now()
-          })
-          if (messageId) {
-            setPlayedAiMessageIds((previous) => {
-              if (previous.has(messageId)) return previous
-              const next = new Set(previous)
-              next.add(messageId)
-              return next
-            })
-          }
-        },
-        onTtsRequest: (characters) => {
-          if (!isCurrentOperation(operationId)) return
-          touchRound((round) => {
-            round.ttsRequestCount += 1
-            round.ttsCharacterCount += characters
-          })
-        },
-      })
-      if (!isCurrentOperation(operationId)) return
-      if (advanceAfterPlayback) finalizeAndAdvance(text)
-      else transitionTo('waiting_user')
-    } catch (error) {
-      if (error instanceof TtsCancelledError || !isCurrentOperation(operationId)) return
-      touchRound((round) => {
-        round.failureCount += 1
-      })
-      pendingAdvanceReplyRef.current = advanceAfterPlayback ? text : null
-      setUiError(toUiError(error))
-      setLastFailedStep('tts')
-      transitionTo('error')
-    } finally {
-      ttsActionLockRef.current = false
-      setActiveAiMessageId(null)
-    }
-  }, [beginOperation, config, finalizeAndAdvance, isCurrentOperation, touchRound, transitionTo])
-  const playReviewAudio = useCallback(async (text: string) => {
-    if (!config?.elevenlabs.ttsAvailable || !config.elevenlabs.voiceId || ttsActionLockRef.current) return
-    ttsActionLockRef.current = true
-    setReviewAudioNotice('')
-    try {
-      await ttsRef.current.speak({
-        text,
-        voiceId: config.elevenlabs.voiceId,
-        modelId: config.elevenlabs.ttsModel,
-        onGenerationStarted: () => {},
-        onFirstAudio: () => {},
-        onAudioStarted: () => {},
-        onAudioEnded: () => {},
-        onTtsRequest: () => {},
-      })
-    } catch (error) {
-      if (!(error instanceof TtsCancelledError)) {
-        setReviewAudioNotice('参考语音暂时无法播放，请直接阅读文字。')
-      }
-    } finally {
-      ttsActionLockRef.current = false
-    }
-  }, [config])
-
-  const stopAiPlayback = useCallback(() => {
-    if (phaseRef.current !== 'playing_ai' && phaseRef.current !== 'preparing_tts') return
-    const pendingReply = pendingAdvanceReplyRef.current
-    stopActiveResources()
-    touchRound((round) => {
-      if (round.timing.audioStartedAt !== null) round.timing.audioCompletedAt = Date.now()
-    })
-    if (pendingReply) finalizeAndAdvance(pendingReply)
-    else transitionTo('waiting_user')
-  }, [finalizeAndAdvance, stopActiveResources, touchRound, transitionTo])
-
-  const startSession = useCallback(async (practiceTarget?: string | { scenarioToken: string } | null) => {
+  const startSession = useCallback(async (scenarioToken: string) => {
     if (!config || !online || sessionStartLockRef.current) return
-
-    let scenarioParam: { scenarioId: string } | { scenarioToken: string }
-    let isDynamic = false
-    if (practiceTarget && typeof practiceTarget === 'object' && 'scenarioToken' in practiceTarget) {
-      scenarioParam = { scenarioToken: practiceTarget.scenarioToken }
-      isDynamic = true
-    } else {
-      const scenarioId = scenarioForPractice(
-        typeof practiceTarget === 'string' ? practiceTarget : null,
-        prepareNextScenario(config.scenarioCatalog, sessionStorage),
-      )
-      if (!scenarioId) {
-        setUiError({
-          code: 'scenario_unavailable',
-          title: '暂时无法开始',
-          message: '练习场景还没有准备好，请稍后重试。',
-          recovery: 'retry',
-        })
-        transitionTo('error')
-        return
-      }
-      scenarioParam = { scenarioId }
-      setActiveSparkScenario(null)
-    }
+    dispatchInterruptionRecovery({ type: 'reset' })
+    clearSessionSnapshot()
     sessionStartLockRef.current = true
     const operationId = beginOperation()
+    setHintData(null)
+    setHintLevel(0)
+    setShowHintSheet(false)
     setSessionId('')
     setScenario(null)
     setSessionStartedAt(null)
@@ -605,27 +944,16 @@ function App() {
     replaceMessages([])
     roundsRef.current = []
     setRounds([])
+    setRedoRecords([])
+    setListeningLevels({})
+    setListeningRequestStates({})
     replaceCurrentRound(null)
-    pendingHistoryRef.current = []
-    pendingAdvanceReplyRef.current = null
-    setCurrentAiText('')
-    setAiTextRevealed(false)
-    setActiveAiMessageId(null)
-    setPlayedAiMessageIds(new Set())
-    setExpandedAiMessageIds(new Set())
-    setPartialTranscript('')
-    resetTranscript()
-    setManualInput(false)
-    setMicrophoneLevel(0)
-    setRecordingSeconds(0)
-    setSilentSeconds(0)
-    lastSoundAtRef.current = null
+    setPendingHistory([])
+    resetVoiceTurn()
+    resetAiTurn()
     setUiError(null)
     setInlineError('')
     setCopyStatus('')
-    setCheckpointData(null)
-    setShowGoalsSheet(false)
-    setShowPrimerSheet(false)
     setFeedbackData(null)
     setFeedbackStatus('idle')
     setFeedbackErrorMsg('')
@@ -633,20 +961,19 @@ function App() {
     const controller = new AbortController()
     requestAbortRef.current = controller
     transitionTo('loading_config')
-    setMicrophoneReadiness(config.elevenlabs.sttAvailable ? 'unknown' : 'unavailable')
-
-    // 音频预热与麦克风探测非阻塞后台运行，绝不卡死场景初始化
+    if (!config.elevenlabs.sttAvailable) {
+      syncMicrophoneReadiness('unavailable')
+    } else {
+      void queryMicrophonePermission().then((status) => {
+        if (isCurrentOperation(operationId)) {
+          syncMicrophoneReadiness(status)
+        }
+      }).catch(() => undefined)
+    }
     void unlockAudio().catch(() => undefined)
-    const scenarioRequest = startScenarioSession(scenarioParam, controller.signal)
-
     try {
-      const nextScenario = await scenarioRequest
+      const nextScenario = await startScenarioSession(scenarioToken, controller.signal)
       if (controller.signal.aborted || !isCurrentOperation(operationId)) return
-      setMicrophoneReadiness(config.elevenlabs.sttAvailable ? 'unknown' : 'unavailable')
-      if (!isDynamic && 'scenarioId' in scenarioParam && typeof practiceTarget !== 'string') {
-        consumePreparedScenario(config.scenarioCatalog, sessionStorage, scenarioParam.scenarioId)
-      }
-
       const id = createSessionId()
       const startedAt = Date.now()
       const firstMessage: ConversationMessage = {
@@ -655,37 +982,24 @@ function App() {
         role: 'assistant',
         text: nextScenario.firstLine,
       }
-
       setScenario(nextScenario)
       setSessionId(id)
       setSessionStartedAt(startedAt)
-      setSessionEndedAt(null)
       setTurn(1)
       replaceMessages([firstMessage])
-      roundsRef.current = []
-      setRounds([])
       replaceCurrentRound(createRoundRecord(1, nextScenario.firstLine, 0))
-      pendingHistoryRef.current = []
-      pendingAdvanceReplyRef.current = null
-      setAiTextRevealed(false)
-      setCurrentAiText(nextScenario.firstLine)
-      setPartialTranscript('')
-      resetTranscript()
-      setManualInput(false)
-      setSelfAssessment(null)
-      setUiError(null)
-      setForegroundNotice('')
-      await playAiText(nextScenario.firstLine, false, false, operationId, firstMessage.id)
+      setAppForegroundNotice('')
+      clearVoiceNotice()
+      await initFirstLine(nextScenario.firstLine, operationId, firstMessage.id)
     } catch (error) {
       if (controller.signal.aborted || !isCurrentOperation(operationId)) return
       setUiError(toUiError(error))
-      setLastFailedStep('config')
-      transitionTo('error')
+      setLastFailedStep('scenario')
     } finally {
       if (requestAbortRef.current === controller) requestAbortRef.current = null
       sessionStartLockRef.current = false
     }
-  }, [beginOperation, config, isCurrentOperation, online, playAiText, replaceCurrentRound, replaceMessages, resetTranscript, transitionTo, unlockAudio])
+  }, [beginOperation, clearVoiceNotice, config, initFirstLine, isCurrentOperation, online, replaceCurrentRound, replaceMessages, resetAiTurn, resetVoiceTurn, syncMicrophoneReadiness, transitionTo, unlockAudio])
   const handleDraftScenario = useCallback(async (customPrompt?: string, clarificationsList?: Array<{ questionZh: string; answerZh: string }>, forceGen?: boolean) => {
     const text = customPrompt ?? customInputZh
     if (!text.trim()) return
@@ -703,357 +1017,60 @@ function App() {
       }
     } catch (error) {
       setUiError(toUiError(error))
+      setLastFailedStep('scenario')
     } finally {
       setIsDraftingScenario(false)
     }
   }, [clarifications, customInputZh])
-  const handleStartSpark = useCallback(async (spark: VocabScenario) => {
-    if (isDraftingScenario) return
-    setActiveSparkScenario(spark)
-    setIsDraftingScenario(true)
-    setUiError(null)
-    try {
-      await startSparkPractice(
-        spark,
-        (prompt, clars, force) => draftScenario(prompt, clars, force, AbortSignal.timeout(25_000)),
-        (scenarioToken) => startSession({ scenarioToken }),
-      )
-    } catch (error) {
-      setUiError(toUiError(error))
-    } finally {
-      setIsDraftingScenario(false)
-    }
-  }, [isDraftingScenario, startSession])
 
 
-  const handleAnswerClarification = useCallback((answer: string) => {
+  const handleAnswerClarification = useCallback((answerZh: string) => {
     if (!pendingClarification) return
-    const updated = [...clarifications, { questionZh: pendingClarification.questionZh, answerZh: answer.trim() }]
-    setClarifications(updated)
+    const next = [...clarifications, { questionZh: pendingClarification.questionZh, answerZh }]
+    setClarifications(next)
     setPendingClarification(null)
-    void handleDraftScenario(customInputZh, updated)
-  }, [clarifications, customInputZh, handleDraftScenario, pendingClarification])
+    void handleDraftScenario(undefined, next, false)
+  }, [clarifications, handleDraftScenario, pendingClarification])
+
+  const handlePrepareSpark = useCallback(async (spark: VocabScenario) => {
+    const prompt = buildSparkPrompt(spark)
+    await handleDraftScenario(prompt, [], true)
+  }, [handleDraftScenario])
 
   const handleRequestHint = useCallback(async () => {
-    if (!scenario || isLoadingHint) return
+    const nextLevel = Math.min(4, hintLevel + 1) as 0 | 1 | 2 | 3 | 4
     if (hintData) {
-      const nextLevel = Math.min(4, hintLevel + 1) as 1 | 2 | 3 | 4
       setHintLevel(nextLevel)
       touchRound((round) => {
-        if (nextLevel > round.hintLevelUsed) {
-          round.hintLevelUsed = nextLevel
+        if (nextLevel > round.expressionScaffoldLevel) {
+          round.expressionScaffoldLevel = nextLevel
         }
       })
       return
     }
     setIsLoadingHint(true)
     try {
+      if (!scenario) return
       const res = await fetchHint(scenario, currentAiText, messagesRef.current)
       setHintData(res)
       setHintLevel(1)
       touchRound((round) => {
-        if (round.hintLevelUsed < 1) {
-          round.hintLevelUsed = 1
+        if (round.expressionScaffoldLevel < 1) {
+          round.expressionScaffoldLevel = 1
         }
       })
     } catch {
-      setForegroundNotice('获取提示暂时失败，可继续自行回答。')
+      setAppForegroundNotice('获取提示暂时失败，可继续自行回答。')
     } finally {
       setIsLoadingHint(false)
     }
-  }, [currentAiText, hintData, hintLevel, isLoadingHint, scenario, touchRound])
-
-  const startRecording = useCallback(async () => {
-    if (!config || !online || recordingStartLockRef.current || phaseRef.current === 'recording' || phaseRef.current === 'connecting_stt') return
-    recordingStartLockRef.current = true
-    const operationId = beginOperation()
-    ttsRef.current.stop()
-    ttsActionLockRef.current = false
-    setIsPlayingRescueTts(false)
-    releaseMicrophoneStream()
-    await unlockAudio().catch(() => undefined)
-    await unlockWebAudio().catch(() => undefined)
-    setUiError(null)
-    setInlineError('')
-    setPartialTranscript('')
-    resetTranscript()
-    setManualInput(false)
-    setMicrophoneLevel(0)
-    setMicrophoneMeterAvailable(true)
-    setSpeechDetected(false)
-    setRecordingSeconds(0)
-    setSilentSeconds(0)
-    setRecordingUiStartedAt(null)
-    lastSoundAtRef.current = null
-    silenceStopLockRef.current = false
-
-    const recordingStartedAt = Date.now()
-    touchRound((round) => {
-      round.inputMode = 'stt'
-      round.timing.recordingStartedAt = recordingStartedAt
-      round.timing.recordingStoppedAt = null
-      round.timing.transcriptFinalizedAt = null
-      round.timing.transcriptConfirmedAt = null
-    })
-
-    if (!config.elevenlabs.sttAvailable || microphoneReadiness === 'denied') {
-      setManualInput(true)
-      touchRound((round) => {
-        round.inputMode = 'text'
-        round.timing.recordingStoppedAt = recordingStartedAt
-        round.timing.transcriptFinalizedAt = recordingStartedAt
-      })
-      setShowTranscriptSheet(true)
-      transitionTo('confirming_transcript')
-      recordingStartLockRef.current = false
-      return
-    }
-
-    const controller = new AbortController()
-    requestAbortRef.current = controller
-
-    try {
-      transitionTo('connecting_stt')
-      await requestMicrophoneStream()
-      if (controller.signal.aborted || !isCurrentOperation(operationId)) return
-      setMicrophoneReadiness('granted')
-
-      // 2. 硬件流就绪后，正式切入录音状态与计时
-      const connectedAt = Date.now()
-      lastSoundAtRef.current = connectedAt
-      setRecordingUiStartedAt(connectedAt)
-      transitionTo('recording')
-
-      // 3. 优先复用后台预取的鲜活 Token，若无则快速获取
-      let token = prefetchedTokenRef.current?.token
-      const isTokenFresh = prefetchedTokenRef.current && prefetchedTokenRef.current.expiresAt > Date.now()
-      if (!token || !isTokenFresh) {
-        token = await requestElevenLabsToken('realtime_scribe', controller.signal)
-      } else {
-        prefetchedTokenRef.current = null
-      }
-
-      if (controller.signal.aborted || !isCurrentOperation(operationId)) return
-      await sttRef.current.start(token, config.elevenlabs.sttModel, {
-        onPartial: (text) => {
-          if (!isCurrentOperation(operationId)) return
-          setPartialTranscript(text)
-          if (text.trim()) {
-            const now = Date.now()
-            lastSoundAtRef.current = now
-            setSilentSeconds(0)
-            setSpeechDetected(true)
-            silenceStopLockRef.current = false
-            touchRound((round) => {
-              if (round.timing.firstSpeechAt === null) {
-                round.timing.firstSpeechAt = now
-              }
-            })
-          }
-        },
-        onConnectionState: (state) => {
-          if (!isCurrentOperation(operationId)) return
-          if (state === 'connected') {
-            const now = Date.now()
-            lastSoundAtRef.current = now
-          }
-        },
-        onAudioLevel: (level) => {
-          if (!isCurrentOperation(operationId)) return
-          if (level < 0) {
-            setMicrophoneMeterAvailable(false)
-            setMicrophoneLevel(0)
-            return
-          }
-          setMicrophoneMeterAvailable(true)
-          setMicrophoneLevel(level)
-          if (level >= 0.12) {
-            const now = Date.now()
-            lastSoundAtRef.current = now
-            setSilentSeconds(0)
-            setSpeechDetected(true)
-            silenceStopLockRef.current = false
-            touchRound((round) => {
-              if (round.timing.firstSpeechAt === null) {
-                round.timing.firstSpeechAt = now
-              }
-            })
-          }
-        },
-      })
-      if (!isCurrentOperation(operationId)) return
-      touchRound((round) => {
-        round.sttSessionCount += 1
-      })
-      setLastFailedStep(null)
-    } catch (error) {
-      if (controller.signal.aborted || !isCurrentOperation(operationId)) return
-      sttRef.current.close()
-      touchRound((round) => {
-        round.failureCount += 1
-      })
-      if (error instanceof SttError && (error.code === 'permission_denied' || error.code === 'device_missing')) {
-        const now = Date.now()
-        setMicrophoneReadiness(error.code === 'permission_denied' ? 'denied' : 'unavailable')
-        setManualInput(true)
-        touchRound((round) => {
-          round.inputMode = 'text'
-          round.timing.recordingStoppedAt = now
-          round.timing.transcriptFinalizedAt = now
-        })
-        setForegroundNotice(error.code === 'permission_denied' ? '麦克风权限未开启，已切换到文字回答。' : '没有可用麦克风，已切换到文字回答。')
-        setLastFailedStep(null)
-        transitionTo('confirming_transcript')
-        return
-      }
-      setUiError(toUiError(error))
-      setLastFailedStep('stt')
-      transitionTo('error')
-    } finally {
-      if (requestAbortRef.current === controller) requestAbortRef.current = null
-      recordingStartLockRef.current = false
-    }
-  }, [beginOperation, config, isCurrentOperation, microphoneReadiness, online, resetTranscript, touchRound, transitionTo, unlockAudio])
-
-  const stopRecording = useCallback(async () => {
-    if (phaseRef.current !== 'recording') return
-    const operationId = operationIdRef.current
-    const stoppedAt = Date.now()
-    setMicrophoneLevel(0)
-    setSilentSeconds(0)
-    setRecordingUiStartedAt(null)
-    transitionTo('finalizing_transcript')
-    touchRound((round) => {
-      round.timing.recordingStoppedAt = stoppedAt
-      const startedAt = round.timing.recordingStartedAt
-      if (startedAt !== null) round.sttAudioMilliseconds += Math.max(0, stoppedAt - startedAt)
-    })
-
-    try {
-      const finalText = await sttRef.current.stop()
-      if (!isCurrentOperation(operationId)) return
-      const finalizedAt = Date.now()
-      setPartialTranscript('')
-      prepareTranscript(finalText)
-      touchRound((round) => {
-        round.timing.transcriptFinalizedAt = finalizedAt
-      })
-      transitionTo('confirming_transcript')
-    } catch (error) {
-      if (!isCurrentOperation(operationId)) return
-      touchRound((round) => {
-        round.failureCount += 1
-      })
-      setUiError(toUiError(error))
-      setLastFailedStep('stt')
-      transitionTo('error')
-    }
-  }, [isCurrentOperation, prepareTranscript, touchRound, transitionTo])
-
-  const enterTextInput = useCallback(() => {
-    const now = Date.now()
-    beginOperation()
-    setMicrophoneLevel(0)
-    setSilentSeconds(0)
-    setRecordingUiStartedAt(null)
-    setManualInput(true)
-    prepareTranscript(partialTranscript.trim())
-    touchRound((round) => {
-      round.inputMode = 'text'
-      if (round.timing.recordingStartedAt === null) round.timing.recordingStartedAt = now
-      if (round.timing.recordingStoppedAt === null) round.timing.recordingStoppedAt = now
-      if (round.timing.transcriptFinalizedAt === null) round.timing.transcriptFinalizedAt = now
-    })
-    setUiError(null)
-    setLastFailedStep(null)
-    transitionTo('confirming_transcript')
-  }, [beginOperation, partialTranscript, prepareTranscript, touchRound, transitionTo])
-
-  const rerecord = useCallback(async () => {
-    touchRound((round) => {
-      round.rerecordCount += 1
-      round.retryCount += 1
-    })
-    setPartialTranscript('')
-    resetTranscript()
-    setUiError(null)
-    transitionTo('waiting_user')
-    await startRecording()
-  }, [resetTranscript, startRecording, touchRound, transitionTo])
-
-  const generateNextReply = useCallback(async (history: ConversationMessage[], retry: boolean) => {
-    if (!config || !scenario) return
-    const operationId = beginOperation()
-    setUiError(null)
-    setLastFailedStep(null)
-    setHintData(null)
-    setHintLevel(0)
-    pendingHistoryRef.current = history
-    transitionTo('requesting_llm')
-    touchRound((round) => {
-      round.llmRequestCount += 1
-      if (retry) round.retryCount += 1
-      round.timing.llmStartedAt = Date.now()
-      round.timing.llmFirstTextAt = null
-      round.timing.llmCompletedAt = null
-    })
-
-    const controller = new AbortController()
-    requestAbortRef.current = controller
-    try {
-      const result = await streamReply(
-        sessionId,
-        turn,
-        history,
-        scenario,
-        () => {
-          if (!isCurrentOperation(operationId)) return
-          touchRound((round) => {
-            if (round.timing.llmFirstTextAt === null) round.timing.llmFirstTextAt = Date.now()
-          })
-        },
-        controller.signal,
-      )
-      if (controller.signal.aborted || !isCurrentOperation(operationId)) return
-
-      touchRound((round) => {
-        round.timing.llmCompletedAt = Date.now()
-        round.nextAiReply = result.text
-        round.llmModel = result.model
-        round.llmMock = result.mock
-        round.usage = result.usage
-      })
-      const assistantMessage: ConversationMessage = {
-        id: createMessageId(turn + 1, 'assistant'),
-        turn: turn + 1,
-        role: 'assistant',
-        text: result.text,
-      }
-      replaceMessages([...history, assistantMessage])
-      setAiTextRevealed(false)
-      setCurrentAiText(result.text)
-      pendingAdvanceReplyRef.current = result.text
-
-      await playAiText(result.text, false, true, operationId, assistantMessage.id)
-    } catch (error) {
-      if (controller.signal.aborted || !isCurrentOperation(operationId)) return
-      touchRound((round) => {
-        round.failureCount += 1
-      })
-      setUiError(toUiError(error))
-      setLastFailedStep('llm')
-      transitionTo('error')
-    } finally {
-      if (requestAbortRef.current === controller) requestAbortRef.current = null
-    }
-  }, [beginOperation, config, isCurrentOperation, playAiText, replaceMessages, scenario, sessionId, touchRound, transitionTo, turn])
+  }, [currentAiText, hintData, hintLevel, scenario, touchRound])
 
   const endSession = useCallback((includeConfirmedCurrent: boolean) => {
     stopActiveResources()
     const activeRound = currentRoundRef.current
     if (includeConfirmedCurrent && activeRound?.userFinal) appendRound(activeRound)
     replaceCurrentRound(null)
-    pendingAdvanceReplyRef.current = null
     setSessionEndedAt(Date.now())
     setUiError(null)
     transitionTo('session_complete')
@@ -1064,7 +1081,7 @@ function App() {
     setFeedbackStatus('loading')
     setFeedbackErrorMsg('')
     try {
-      const res = await requestConversationFeedback(scenario, messagesRef.current, roundsRef.current)
+      const res = await requestConversationFeedback(scenario, roundsRef.current)
       setFeedbackData(res)
       setFeedbackStatus('success')
     } catch (error) {
@@ -1080,15 +1097,6 @@ function App() {
     }
   }, [fetchFeedback, phase, scenario])
 
-  const handleExtendSession = useCallback(async (newCap: number, newSessionToken: string) => {
-    if (!scenario) return
-    const updatedScenario = { ...scenario, maxTurns: newCap, sessionToken: newSessionToken }
-    setScenario(updatedScenario)
-    setCheckpointData(null)
-    setForegroundNotice(`练习已延长至 ${newCap} 轮，继续加油！`)
-    const history = pendingHistoryRef.current.length > 0 ? pendingHistoryRef.current : messagesRef.current
-    await generateNextReply(history, false)
-  }, [generateNextReply, scenario])
 
   const confirmTranscript = useCallback(async () => {
     const finalText = transcript.finalText.trim()
@@ -1101,10 +1109,11 @@ function App() {
 
     setInlineError('')
     const confirmedAt = Date.now()
+    const transcriptSource = restoredTranscriptRef.current ?? transcript
     touchRound((round) => {
-      round.userOriginal = transcript.rawText.trim()
+      round.userOriginal = transcriptSource.rawText.trim()
       round.userFinal = finalText
-      round.transcriptModified = round.inputMode === 'stt' && finalText !== transcript.cleanedText.trim()
+      round.transcriptModified = round.inputMode === 'stt' && finalText !== transcriptSource.cleanedText.trim()
       round.transcriptModificationCount = round.transcriptModified ? 1 : 0
       round.timing.transcriptConfirmedAt = confirmedAt
     })
@@ -1115,289 +1124,160 @@ function App() {
       role: 'user',
       text: finalText,
       transcript: {
-        rawText: transcript.rawText,
-        cleanedText: transcript.cleanedText,
+        rawText: transcriptSource.rawText,
+        cleanedText: transcriptSource.cleanedText,
         finalText,
       },
     }
     const history = [...messagesRef.current, userMessage]
-    pendingHistoryRef.current = history
+    setPendingHistory(history)
     replaceMessages(history)
-
-    const isDynamic = scenario?.scenarioType === 'dynamic' && Boolean(scenario.sessionToken)
-    const isCapTurn = isDynamic && (turn === 10 || turn === 14)
-
-    if (isCapTurn && scenario?.sessionToken) {
-      const activeRound = currentRoundRef.current
-      if (activeRound) appendRound(activeRound)
-      replaceCurrentRound(null)
-      setIsCheckingCheckpoint(true)
-      try {
-        const checkpointRes = await checkSessionCheckpoint(scenario.sessionToken, turn, history)
-        setCheckpointData(checkpointRes)
-        if (checkpointRes.isGoalCompleted) {
-          submitLockRef.current = false
-          endSession(false)
-          return
-        }
-        if (checkpointRes.canExtend && checkpointRes.newSessionToken && checkpointRes.nextCap) {
-          submitLockRef.current = false
-          return
-        }
-        submitLockRef.current = false
-        endSession(false)
-        return
-      } catch {
-        setCheckpointData({
-          isGoalCompleted: false,
-          completedGoals: [],
-          remainingGoals: [],
-          factsSummary: [],
-          nextDirection: '检查点评估暂时不可用，可选择直接结算。',
-          canExtend: false,
-          nextCap: null,
-          newSessionToken: null,
-        })
-        submitLockRef.current = false
-        return
-      } finally {
-        setIsCheckingCheckpoint(false)
-      }
-    }
-
-    if (turn >= (scenario?.maxTurns ?? config?.limits.maxTurns ?? 5)) {
-      const activeRound = currentRoundRef.current
-      if (activeRound) appendRound(activeRound)
-      replaceCurrentRound(null)
-      submitLockRef.current = false
-      endSession(false)
-      return
-    }
+    restoredTranscriptRef.current = null
 
     await generateNextReply(history, false)
     submitLockRef.current = false
-  }, [appendRound, config?.limits.maxTurns, endSession, generateNextReply, replaceCurrentRound, replaceMessages, scenario, touchRound, transcript, turn])
+  }, [generateNextReply, replaceMessages, touchRound, transcript, turn])
+  const activeError = uiError ?? voiceError ?? aiError
+  const activeFailedStep = lastFailedStep ?? voiceTurn.state.lastFailedStep ?? aiTurn.state.lastFailedStep
+  const recoveryTarget = interruptionRecovery.target
+  const recoveryCanAct = interruptionRecovery.status === 'interrupted' || interruptionRecovery.status === 'failed'
+  const interruptionRecoveryAffordances = decideInterruptionRecoveryAffordances(recoveryCanAct ? recoveryTarget : null)
+
   const retryFailedStep = useCallback(async () => {
     setUiError(null)
-    if (lastFailedStep === 'config') {
-      if (config) await startSession()
-      else await loadConfig()
+    voiceTurn.actions.clearVoiceError()
+    aiTurn.actions.clearAiError()
+
+    const interruptedTarget = interruptionRecovery.target
+    if (interruptedTarget && (interruptionRecovery.status === 'interrupted' || interruptionRecovery.status === 'failed')) {
+      dispatchInterruptionRecovery({ type: 'retry_started' })
+      try {
+        await executeInterruptionRecovery(interruptedTarget, {
+          waitingUser: () => transitionTo('waiting_user'),
+          confirmingTranscript: () => transitionTo('confirming_transcript'),
+          stt: startRecording,
+          llm: () => generateNextReply(pendingHistory, true),
+          tts: async () => {
+            touchRound((round) => {
+              round.retryCount += 1
+            })
+            const reply = aiTurn.meta.pendingAdvanceReply
+            const latestAssistantId = messagesRef.current.findLast((message) => message.role === 'assistant')?.id
+            await playAiText(reply ?? currentAiText, Boolean(reply), undefined, latestAssistantId)
+          },
+        })
+        dispatchInterruptionRecovery({ type: phaseRef.current === 'error' ? 'recovery_failed' : 'recovery_succeeded' })
+      } catch (error) {
+        dispatchInterruptionRecovery({ type: 'recovery_failed' })
+        setUiError(toUiError(error))
+        transitionTo('error')
+      }
       return
     }
-    if (lastFailedStep === 'stt') {
+
+    if (activeFailedStep === 'stt') {
       await startRecording()
       return
     }
-    if (lastFailedStep === 'llm') {
-      await generateNextReply(pendingHistoryRef.current, true)
+    if (activeFailedStep === 'llm') {
+      await generateNextReply(pendingHistory, true)
       return
     }
-    if (lastFailedStep === 'tts') {
+    if (activeFailedStep === 'tts') {
       touchRound((round) => {
         round.retryCount += 1
       })
-      const reply = pendingAdvanceReplyRef.current
+      const reply = aiTurn.meta.pendingAdvanceReply
       const latestAssistantId = messagesRef.current.findLast((message) => message.role === 'assistant')?.id
-      await playAiText(reply ?? currentAiText, false, Boolean(reply), undefined, latestAssistantId)
+      await playAiText(reply ?? currentAiText, Boolean(reply), undefined, latestAssistantId)
+      return
     }
-  }, [config, currentAiText, generateNextReply, lastFailedStep, loadConfig, playAiText, startRecording, startSession, touchRound])
+    if (activeFailedStep === 'config' || activeFailedStep === 'scenario') {
+      if (readyScenarioData) await startSession(readyScenarioData.scenarioToken)
+      else await loadConfig()
+    }
+  }, [activeFailedStep, aiTurn.actions, aiTurn.meta.pendingAdvanceReply, currentAiText, generateNextReply, interruptionRecovery, loadConfig, playAiText, pendingHistory, readyScenarioData, startRecording, startSession, touchRound, transitionTo, voiceTurn.actions])
 
-  const skipFailedTts = useCallback(() => {
-    const pendingReply = pendingAdvanceReplyRef.current
-    stopActiveResources()
-    setAiTextRevealed(true)
+  const enterLifecycleTextInput = useCallback(() => {
     setUiError(null)
-    if (pendingReply) finalizeAndAdvance(pendingReply)
-    else transitionTo('waiting_user')
-  }, [finalizeAndAdvance, stopActiveResources, transitionTo])
-
-  const openRescueDrawer = useCallback(async (userMessage: ConversationMessage, msgIndex: number) => {
-    if (!scenario) return
-    const currentMessages = messagesRef.current
-    const promptText =
-      currentMessages
-        .slice(0, msgIndex)
-        .filter((m) => m.role === 'assistant')
-        .pop()?.text || scenario.firstLine
-
-    const historySlice = currentMessages.slice(0, msgIndex)
-
-    rescueAbortRef.current?.abort()
-    const controller = new AbortController()
-    rescueAbortRef.current = controller
-
-    setRescueDrawerState({
-      isOpen: true,
-      turn: userMessage.turn,
-      aiPrompt: promptText,
-      userFinal: userMessage.text,
-      loading: true,
-      error: null,
-      data: null,
-    })
-
-    try {
-      const data = await fetchRescueAnalysis(
-        scenario,
-        userMessage.turn,
-        promptText,
-        userMessage.text,
-        historySlice,
-        controller.signal,
-      )
-      if (controller.signal.aborted) return
-      setRescueDrawerState((prev) => ({
-        ...prev,
-        loading: false,
-        data,
-      }))
-    } catch (err) {
-      if (controller.signal.aborted) return
-      const message = err instanceof Error ? err.message : '分析获取失败'
-      setRescueDrawerState((prev) => ({
-        ...prev,
-        loading: false,
-        error: message,
-      }))
-    }
-  }, [scenario])
-  const closeRescueDrawer = useCallback(() => {
-    ttsRef.current.stop()
-    ttsActionLockRef.current = false
-    setIsPlayingRescueTts(false)
-    setRescueDrawerState((prev) => ({ ...prev, isOpen: false }))
-  }, [])
-
-  const handleRewindTurn = useCallback((targetTurn: number) => {
-    if (!scenario) return
-    stopActiveResources()
-    setRescueDrawerState((prev) => ({ ...prev, isOpen: false }))
-
-    const currentMessages = messagesRef.current
-    const revertedMessages = currentMessages.filter(
-      (m) => m.turn < targetTurn || (m.turn === targetTurn && m.role === 'assistant'),
-    )
-    replaceMessages(revertedMessages)
-
-    const revertedRounds = roundsRef.current.filter((r) => r.turn < targetTurn)
-    roundsRef.current = revertedRounds
-    setRounds(revertedRounds)
-
-    setTurn(targetTurn)
-    const targetAiPrompt =
-      revertedMessages.findLast((m) => m.role === 'assistant')?.text || scenario.firstLine
-    replaceCurrentRound(createRoundRecord(targetTurn, targetAiPrompt, 0))
-
-    resetTranscript()
-    setPartialTranscript('')
-    setManualInput(false)
-    submitLockRef.current = false
-    setUiError(null)
-    setInlineError('')
-    setHintData(null)
-    setHintLevel(0)
-    pendingAdvanceReplyRef.current = null
-    pendingHistoryRef.current = revertedMessages
-    transitionTo('waiting_user')
-    setForegroundNotice(`已撤回第 ${targetTurn} 轮发话，请重新作答。`)
-  }, [replaceCurrentRound, replaceMessages, resetTranscript, scenario, stopActiveResources, transitionTo])
-
-  const playRescueAudio = useCallback(async (text: string) => {
-    if (!config?.elevenlabs.ttsAvailable || !config.elevenlabs.voiceId || ttsActionLockRef.current) return
-    ttsActionLockRef.current = true
-    setIsPlayingRescueTts(true)
-    try {
-      await ttsRef.current.speak({
-        text,
-        voiceId: config.elevenlabs.voiceId,
-        modelId: config.elevenlabs.ttsModel,
-        onGenerationStarted: () => {},
-        onFirstAudio: () => {},
-        onAudioStarted: () => {},
-        onAudioEnded: () => {},
-        onTtsRequest: () => {},
-      })
-    } catch (error) {
-      if (!(error instanceof TtsCancelledError)) {
-        setForegroundNotice('参考语音暂时无法播放，请直接阅读文字。')
-      }
-    } finally {
-      ttsActionLockRef.current = false
-      setIsPlayingRescueTts(false)
-    }
-  }, [config])
+    voiceTurn.actions.clearVoiceError()
+    aiTurn.actions.clearAiError()
+    dispatchInterruptionRecovery({ type: 'retry_started' })
+    enterTextInput()
+    dispatchInterruptionRecovery({ type: 'recovery_succeeded' })
+  }, [aiTurn.actions, enterTextInput, voiceTurn.actions])
 
   const resetSession = useCallback(() => {
     stopActiveResources()
+    dispatchInterruptionRecovery({ type: 'reset' })
+    clearSessionSnapshot()
     setSessionId('')
     setScenario(null)
+    restoredTranscriptRef.current = null
     setSessionStartedAt(null)
     setSessionEndedAt(null)
     setTurn(1)
     replaceMessages([])
     roundsRef.current = []
     setRounds([])
-    setMicrophoneReadiness('unknown')
+    resetVoiceTurn()
+    if (config?.elevenlabs.sttAvailable) {
+      void queryMicrophonePermission().then((status) => {
+        syncMicrophoneReadiness(status)
+      }).catch(() => undefined)
+    } else {
+      syncMicrophoneReadiness('unavailable')
+    }
+    resetAiTurn()
     replaceCurrentRound(null)
-    pendingHistoryRef.current = []
-    pendingAdvanceReplyRef.current = null
-    setCurrentAiText('')
-    setMicrophoneLevel(0)
-    setMicrophoneMeterAvailable(true)
-    setSpeechDetected(false)
-    setRecordingSeconds(0)
-    setSilentSeconds(0)
-    setRecordingUiStartedAt(null)
-    lastSoundAtRef.current = null
-    setAiTextRevealed(false)
-    setActiveAiMessageId(null)
-    setPlayedAiMessageIds(new Set())
-    setExpandedAiMessageIds(new Set())
-    setPartialTranscript('')
-    resetTranscript()
-    setManualInput(false)
-    setUiError(null)
     setInlineError('')
     setCopyStatus('')
-    setShowPrimerSheet(false)
-    setSelfAssessment(null)
+    setRedoRecords([])
+    setListeningLevels({})
+    setListeningRequestStates({})
+    setReadyScenarioData(null)
+    setClarifications([])
+    setPendingClarification(null)
+    setHintData(null)
+    setHintLevel(0)
+    setShowHintSheet(false)
+    setShowGoalsSheet(false)
     sessionStartLockRef.current = false
-    recordingStartLockRef.current = false
     submitLockRef.current = false
-    ttsActionLockRef.current = false
-    silenceStopLockRef.current = false
     transitionTo(config ? 'idle' : 'loading_config')
-  }, [config, replaceCurrentRound, replaceMessages, resetTranscript, stopActiveResources, transitionTo])
+  }, [config, replaceCurrentRound, replaceMessages, resetAiTurn, resetVoiceTurn, stopActiveResources, syncMicrophoneReadiness, transitionTo])
 
   const report: SessionReport | null = useMemo(() => {
     if (!config || !scenario || !sessionId || sessionStartedAt === null || sessionEndedAt === null) return null
-    return buildSessionReport(sessionId, config.mode, scenario, selfAssessment, sessionStartedAt, sessionEndedAt, rounds)
-  }, [config, rounds, scenario, selfAssessment, sessionEndedAt, sessionId, sessionStartedAt])
+    return buildSessionReport(sessionId, config.mode, scenario, sessionStartedAt, sessionEndedAt, rounds, redoRecords)
+  }, [config, redoRecords, rounds, scenario, sessionEndedAt, sessionId, sessionStartedAt])
 
   const copyReport = useCallback(async () => {
     if (!report) return
     await navigator.clipboard.writeText(JSON.stringify(report, null, 2))
     setCopyStatus('JSON 已复制')
   }, [report])
+  const sessionCoreGoal = scenario?.dynamicData.coreGoal ?? null
+  const recoveryMessage = recoveryStatusText(interruptionRecovery.status)
 
   const isSessionActive = sessionStartedAt !== null && sessionEndedAt === null
   const controlsLocked = ['fetching_token', 'connecting_stt', 'finalizing_transcript', 'requesting_llm', 'preparing_tts'].includes(phase)
-  const reveal = deriveScenarioReveal(phase, scenario)
+  const reveal = phase === 'session_complete' ? scenario?.reveal ?? null : null
+
   const canConfirmTranscript = transcript.finalText.trim().length > 0
   const silenceCountdownSeconds = phase === 'recording'
     && microphoneMeterAvailable
     && silentSeconds >= SILENCE_COUNTDOWN_START_SECONDS
     ? Math.max(1, SILENCE_AUTO_STOP_SECONDS - silentSeconds)
     : null
+  const effectiveForegroundNotice = voiceForegroundNotice.trim() || appForegroundNotice.trim()
 
   useEffect(() => {
     if (
       phase !== 'recording'
       || !microphoneMeterAvailable
       || silentSeconds < SILENCE_AUTO_STOP_SECONDS
-      || silenceStopLockRef.current
     ) return
-    silenceStopLockRef.current = true
     void stopRecording()
   }, [microphoneMeterAvailable, phase, silentSeconds, stopRecording])
 
@@ -1426,7 +1306,7 @@ function App() {
               setHomeTab={setHomeTab}
               sparkScenario={sparkScenario}
               setSparkScenario={setSparkScenario}
-              onStartSpark={(spark) => void handleStartSpark(spark)}
+              onPrepareSpark={(spark) => void handlePrepareSpark(spark)}
               customInputZh={customInputZh}
               setCustomInputZh={setCustomInputZh}
               clarifications={clarifications}
@@ -1435,46 +1315,36 @@ function App() {
               isDraftingScenario={isDraftingScenario}
               onDraftScenario={handleDraftScenario}
               onAnswerClarification={handleAnswerClarification}
-              onStartDynamic={(tok) => void startSession({ scenarioToken: tok })}
+              onStartDynamic={(token) => void startSession(token)}
               onResetCustom={() => { setClarifications([]); setPendingClarification(null); setReadyScenarioData(null) }}
             />
           </section>
         )}
 
-        {phase === 'session_complete' && report && reveal && (
+        {phase === 'session_complete' && report && reveal && scenario && (
           <section className="conversation-panel" aria-labelledby="conversation-heading">
             <SessionComplete
               messages={messages}
               rounds={rounds}
               report={report}
-              previousReport={previousReport}
+              scenario={scenario}
               reveal={reveal}
               config={config}
-              selfAssessment={selfAssessment}
               feedbackData={feedbackData}
               feedbackStatus={feedbackStatus}
               feedbackErrorMsg={feedbackErrorMsg}
               onRetryFeedback={() => void fetchFeedback()}
               copyStatus={copyStatus}
-              onAssess={setSelfAssessment}
-              onNext={() => {
-                setPreviousReport(null)
-                void startSession()
-              }}
-              onPractice={() => {
-                setPreviousReport(report)
-                if (scenario?.scenarioType === 'dynamic' && scenario.scenarioToken) {
-                  void startSession({ scenarioToken: scenario.scenarioToken })
-                } else {
-                  void startSession(scenario?.id ?? null)
-                }
-              }}
               onCopy={() => void copyReport()}
               onDownload={() => downloadReport(report)}
               onReplayAi={(text) => void playReviewAudio(text)}
-              onStopAudio={() => ttsRef.current.stop()}
+              onStopAudio={stopAiPlayback}
+              onSaveRedo={(record) => setRedoRecords((current) => [...current.filter((item) => item.turn !== record.turn), record])}
+              onRequestRedo={requestRedoFeedback}
+              onRequestListeningScaffold={requestListeningScaffold}
+              onCacheListeningScaffold={cacheListeningScaffold}
+              onNewScenario={resetSession}
               audioNotice={reviewAudioNotice}
-              showRuby={showRuby}
             />
           </section>
         )}
@@ -1484,12 +1354,10 @@ function App() {
             {/* 顶部极简 IM 导航栏 */}
             <header className="im-top-bar">
               <div className="im-top-info">
-                <div className="im-top-avatar" aria-hidden="true">
-                  {scenario?.dynamicData ? <MessageCircle size={18} /> : <MessageCircle size={18} />}
-                </div>
+                <div className="im-top-avatar" aria-hidden="true"><MessageCircle size={18} /></div>
                 <div className="im-top-meta">
-                  <h2 className="im-top-name" title={scenario?.dynamicData?.aiRole || '相手'}>
-                    {scenario?.dynamicData ? '相手 (発注・相談担当)' : '日本同事'}
+                  <h2 className="im-top-name" title={scenario?.dynamicData.aiRole ?? '相手'}>
+                    {scenario?.dynamicData.aiRole ?? '相手'}
                   </h2>
                   <span className="im-top-status" aria-live="polite">
                     {STATUS_LABELS[phase]} · 第 {turn}/{scenario?.maxTurns ?? 5} 轮
@@ -1497,39 +1365,14 @@ function App() {
                 </div>
               </div>
               <div className="im-top-actions">
-                {scenario?.dynamicData && (
-                  <button
-                    className={`im-icon-pill-btn ${showGoalsSheet ? 'is-active' : ''}`}
-                    type="button"
-                    onClick={() => setShowGoalsSheet((show) => !show)}
-                    aria-label="查看训练目标"
-                  >
-                    <Target size={15} />
-                    <span className="im-btn-text-full">目标</span>
-                  </button>
-                )}
-                {currentPrimers.length > 0 && (
-                  <button
-                    className={`im-icon-pill-btn ${showPrimerSheet ? 'is-active' : ''}`}
-                    type="button"
-                    onClick={() => setShowPrimerSheet((show) => !show)}
-                    aria-label="表达武器库"
-                    title="本场高频表达武器库"
-                  >
-                    <Sparkles size={14} style={{ color: '#D4A346' }} />
-                    <span className="im-btn-text-full">武器库</span>
-                    <span className="im-btn-text-compact">武器</span>
-                  </button>
-                )}
                 <button
-                  className={`im-icon-pill-btn ${showRuby ? 'is-active' : ''}`}
+                  className={`im-icon-pill-btn ${showGoalsSheet ? 'is-active' : ''}`}
                   type="button"
-                  onClick={() => setShowRuby((prev) => !prev)}
-                  aria-label={showRuby ? '关闭振假名' : '开启振假名'}
-                  title={showRuby ? '点击隐藏振假名（ルビ）' : '点击显示振假名（ルビ）'}
+                  onClick={() => setShowGoalsSheet((show) => !show)}
+                  aria-label={sessionCoreGoal ? `查看会话目标：${sessionCoreGoal.titleZh}` : '查看会话目标'}
                 >
-                  <span className="im-btn-text-full">振仮名 {showRuby ? '开' : '关'}</span>
-                  <span className="im-btn-text-compact">ルビ</span>
+                  <Target size={15} />
+                  <span className="im-btn-text-full">目标</span>
                 </button>
                 <button
                   className="im-finish-pill-btn"
@@ -1537,53 +1380,44 @@ function App() {
                   onClick={() => endSession(true)}
                   disabled={controlsLocked}
                 >
-                  {turn >= 6 ? '完成' : '退出'}
+                  提前复盘
                 </button>
               </div>
             </header>
 
             {/* 消息滚动主视口（自顶向下自然排列） */}
             <div className="im-message-viewport" ref={messageListRef}>
-              {!online && <p className="im-notice-banner warning" role="status">网络已断开。恢复连接后可以继续。</p>}
-              {foregroundNotice && (
-                <div className="im-notice-banner info" role="status">
-                  <span>{foregroundNotice}</span>
-                  <button className="text-button" type="button" onClick={() => setForegroundNotice('')}>关闭</button>
+              {recoveryMessage && (
+                <div className={`im-recovery-banner is-${interruptionRecovery.status}`} role="status" aria-live="polite">
+                  <span>{recoveryMessage}</span>
+                  {(interruptionRecovery.status === 'recovered' || interruptionRecovery.status === 'failed') && (
+                    <button className="text-button" type="button" onClick={() => dispatchInterruptionRecovery({ type: 'reset' })}>关闭</button>
+                  )}
                 </div>
               )}
-              {currentPrimers.length > 0 && (
-                <div className="im-primer-micro-bar">
+              {!online && <p className="im-notice-banner warning" role="status">网络已断开。恢复连接后可以继续。</p>}
+              {effectiveForegroundNotice && (
+                <div className="im-notice-banner info" role="status">
+                  <span>{effectiveForegroundNotice}</span>
                   <button
+                    className="text-button"
                     type="button"
-                    className="im-primer-micro-chip"
-                    onClick={() => setShowPrimerSheet(true)}
-                    aria-label={`查看本场高频武器，共 ${currentPrimers.length} 组`}
+                    onClick={() => {
+                      setAppForegroundNotice('')
+                      clearVoiceNotice()
+                    }}
                   >
-                    <Sparkles size={13} style={{ color: '#D4A346' }} />
-                    <span>查看本场高频武器（{currentPrimers.length}组）</span>
+                    关闭
                   </button>
                 </div>
               )}
 
-              {checkpointData && checkpointData.canExtend && checkpointData.newSessionToken && checkpointData.nextCap && (
-                <div className="im-checkpoint-card">
-                  <p><strong><Target size={16} /> 阶段目标检查：</strong>还有 {checkpointData.remainingGoals.length} 项小目标未完成，要延长 4 轮吗？</p>
-                  <div className="im-checkpoint-btns">
-                    <button className="primary-button" type="button" onClick={() => handleExtendSession(checkpointData.nextCap!, checkpointData.newSessionToken!)}>
-                      继续 4 轮 (至 {checkpointData.nextCap} 轮)
-                    </button>
-                    <button className="text-button" type="button" onClick={() => endSession(true)}>
-                      直接结算
-                    </button>
-                  </div>
-                </div>
-              )}
-
               <div className="im-messages-list">
-                {messages.map((message, index) => {
+                {messages.map((message) => {
                   const isAssistant = message.role === 'assistant'
-                  const isLatestAi = isAssistant && index === messages.length - 1
-                  const isExpanded = expandedAiMessageIds.has(message.id) || (isLatestAi && aiTextRevealed)
+                  const listeningLevel = isAssistant ? getListeningLevel(message) : 0
+                  const nextAction = isAssistant ? nextListeningAction(listeningLevel) : null
+                  const requestState = listeningRequestStates[message.id]
                   const isActiveAudio = activeAiMessageId === message.id
                   const isPlayingThisAi = phase === 'playing_ai' && isActiveAudio
                   const isPreparingThisAi = phase === 'preparing_tts' && isActiveAudio
@@ -1601,9 +1435,9 @@ function App() {
                           <>
                             {/* 微信风格相手语音条 */}
                             <button
-                              className={`im-voice-bubble ${isPlayingThisAi ? 'is-playing' : ''} ${isPreparingThisAi ? 'is-preparing' : ''} ${hasPlayed ? 'is-played' : 'is-unplayed'} ${isExpanded ? 'is-expanded' : ''}`}
+                              className={`im-voice-bubble ${isPlayingThisAi ? 'is-playing' : ''} ${isPreparingThisAi ? 'is-preparing' : ''} ${hasPlayed ? 'is-played' : 'is-unplayed'}`}
                               type="button"
-                              onClick={() => void playAiText(message.text, true, false, undefined, message.id)}
+                              onClick={() => replayPartnerMessage(message)}
                               aria-label={isPlayingThisAi ? '相手语音正在播放' : hasPlayed ? '重播相手语音' : '播放相手语音'}
                             >
                               <span className="im-voice-unread-dot" aria-hidden="true" />
@@ -1620,53 +1454,48 @@ function App() {
                               </span>
                             </button>
 
-                            {/* 切换台词展开 */}
-                            <button
-                              className="im-voice-expand-toggle"
-                              type="button"
-                              aria-expanded={isExpanded}
-                              onClick={() => {
-                                if (isLatestAi) {
-                                  setAiTextRevealed((revealed) => !revealed)
-                                }
-                                setExpandedAiMessageIds((previous) => {
-                                  const next = new Set(previous)
-                                  if (next.has(message.id)) next.delete(message.id)
-                                  else next.add(message.id)
-                                  return next
-                                })
-                              }}
-                            >
-                              <span aria-hidden="true">{isExpanded ? '−' : '+'}</span>
-                              {isExpanded ? '收起台词' : '查看台词'}
-                            </button>
-
-                            {/* 展开的文本 */}
-                            {isExpanded && (
+                            <div className="im-listening-controls" aria-live="polite">
+                              <span className="im-listening-level">{LISTENING_LEVEL_LABELS[listeningLevel]}</span>
+                              {nextAction && (
+                                <button
+                                  className="im-voice-expand-toggle"
+                                  type="button"
+                                  disabled={requestState?.loading}
+                                  onClick={() => void advanceListeningScaffold(message)}
+                                >
+                                  <span aria-hidden="true">+</span>
+                                  {requestState?.loading ? '正在获取 L2 线索...' : nextAction}
+                                </button>
+                              )}
+                            </div>
+                            {requestState?.error && (
+                              <p className="im-listening-error" role="alert">
+                                {requestState.error} 未升级层级，可点击 L2 重试。
+                              </p>
+                            )}
+                            {listeningLevel >= 2 && message.listeningScaffold && (
+                              <div className="im-listening-scaffold is-hint">
+                                <strong>L2 关键信息线索</strong>
+                                <p>{message.listeningScaffold.keyInformationHintZh}</p>
+                                <p className="im-listening-key-phrases" lang="ja">原文线索：{message.listeningScaffold.keyPhrasesJa.join(' / ')}</p>
+                              </div>
+                            )}
+                            {listeningLevel >= 3 && (
                               <div className="im-expanded-transcript">
-                                <p lang="ja">
-                                  <RubyText text={annotateRuby(message.text)} showRuby={showRuby} />
-                                </p>
+                                <strong>L3 日语台词</strong>
+                                <p lang="ja">{message.text}</p>
+                              </div>
+                            )}
+                            {listeningLevel >= 4 && message.listeningScaffold && (
+                              <div className="im-listening-scaffold is-intent">
+                                <strong>L4 一句中文意图</strong>
+                                <p>{message.listeningScaffold.intentSummaryZh}</p>
                               </div>
                             )}
                           </>
                         ) : (
-                          <div className="im-user-bubble-wrapper">
-                            <div className="im-user-text-bubble">
-                              <p lang="ja">
-                                <RubyText text={annotateRuby(message.text)} showRuby={showRuby} />
-                              </p>
-                            </div>
-                            <button
-                              className="im-user-rescue-btn im-user-upgrade-btn"
-                              type="button"
-                              onClick={() => void openRescueDrawer(message, index)}
-                              aria-label={`第 ${message.turn} 轮：地道表达升级`}
-                              title="查看母语级表达升级"
-                            >
-                              <Sparkles size={12} aria-hidden="true" />
-                              <span>地道升级</span>
-                            </button>
+                          <div className="im-user-text-bubble">
+                            <p lang="ja">{message.text}</p>
                           </div>
                         )}
                       </div>
@@ -1675,21 +1504,56 @@ function App() {
                 })}
 
                 {/* 正在录音中的气泡 */}
-                {!uiError && phase === 'recording' && (
+                {!activeError && phase === 'recording' && (
                   <div className="im-message-item is-user">
                     <div className="im-msg-column">
                       <div className={`im-recording-bubble ${silenceCountdownSeconds !== null ? 'is-counting-down' : ''}`}>
                         <span className="im-recording-pulse-dot" aria-hidden="true" />
-                        <div className="im-recording-info" aria-live="polite">
-                          <strong>
+                        <div className="im-recording-info">
+                          <strong aria-live="polite">
                             {silenceCountdownSeconds !== null
                               ? `停顿中，${silenceCountdownSeconds} 秒后结束`
                               : '正在录音中'}
                           </strong>
                           <span className="im-recording-transcript-row" lang="ja">
-                            {partialTranscript.trim() ? (
+                            {activeAssistIsVisible && activeAssistState ? (
+                              <span className="im-speech-assist-container">
+                                <span className="im-assist-block im-assist-block-heard">
+                                  <span className="im-assist-source-badge" aria-hidden="true">你的转写</span>
+                                  <span className="im-transcript-live" aria-live="polite">
+                                    {activeAssistState.cleanedObservedTextJa}
+                                  </span>
+                                  <span className="im-streaming-cursor" aria-hidden="true" />
+                                </span>
+                                {activeAssistState.continuationSuggestionJa && (
+                                  <span className="im-assist-block im-assist-block-suggestion">
+                                    <span className="im-assist-source-badge is-suggestion" aria-hidden="true">续说建议</span>
+                                    <span
+                                      className="im-speech-assist-suggestion"
+                                      aria-label="续说建议"
+                                    >
+                                      {activeAssistState.continuationSuggestionJa}
+                                    </span>
+                                  </span>
+                                )}
+                              </span>
+                            ) : confirmedTranscript.trim() || interimTranscript.trim() || partialTranscript.trim() ? (
                               <>
-                                <span className="im-transcript-live">{partialTranscript}</span>
+                                {confirmedTranscript.trim() && (
+                                  <span className="im-transcript-live" aria-live="polite">
+                                    {confirmedTranscript}
+                                  </span>
+                                )}
+                                {confirmedTranscript.trim() && interimTranscript.trim() && ' '}
+                                {interimTranscript.trim() ? (
+                                  <span className="transcript-interim" aria-hidden="true">
+                                    {interimTranscript}
+                                  </span>
+                                ) : !confirmedTranscript.trim() && partialTranscript.trim() ? (
+                                  <span className="transcript-interim" aria-hidden="true">
+                                    {partialTranscript}
+                                  </span>
+                                ) : null}
                                 <span className="im-streaming-cursor" aria-hidden="true" />
                               </>
                             ) : (
@@ -1706,10 +1570,10 @@ function App() {
                 )}
 
                 {/* 错误提示卡片 */}
-                {uiError && (
+                {activeError && (
                   <div className="im-error-card" role="alert">
-                    <strong><AlertCircle size={16} /> {uiError.title}</strong>
-                    <p>{uiError.message}</p>
+                    <strong><AlertCircle size={16} /> {activeError.title}</strong>
+                    <p>{activeError.message}</p>
                   </div>
                 )}
                 <div ref={chatBottomRef} style={{ height: '1px' }} />
@@ -1718,11 +1582,11 @@ function App() {
 
             {/* 单行极简 IM 底部控制栏 */}
             <footer className="im-bottom-dock" aria-label="操作栏">
-              {uiError ? (
+              {activeError ? (
                 <div className="im-action-row" style={{ width: '100%' }}>
-                  {uiError.recovery === 'text_input' && <button className="secondary-button" type="button" onClick={enterTextInput}>改用文字</button>}
-                  {uiError.recovery === 'skip_tts' && <button className="secondary-button" type="button" onClick={skipFailedTts}>显示文字继续</button>}
-                  {(uiError.recovery === 'retry' || lastFailedStep) && online && <button className="primary-button" type="button" onClick={() => void retryFailedStep()}>重试</button>}
+                  {(activeError.recovery === 'text_input' || interruptionRecoveryAffordances.textInput) && <button className="secondary-button" type="button" onClick={recoveryTarget === 'stt' ? enterLifecycleTextInput : enterTextInput}>改用文字</button>}
+                  {activeError.recovery === 'skip_tts' && <button className="secondary-button" type="button" onClick={skipFailedTts}>显示文字继续</button>}
+                  {(activeError.recovery === 'retry' || activeFailedStep || interruptionRecoveryAffordances.retry) && online && <button className="primary-button" type="button" onClick={() => void retryFailedStep()}>重试</button>}
                   <button className="text-button" type="button" onClick={resetSession}>返回首页</button>
                 </div>
               ) : (phase === 'waiting_user' || phase === 'round_complete') ? (
@@ -1753,15 +1617,10 @@ function App() {
                       onSubmit={(e) => {
                         e.preventDefault()
                         if (!dockTextValue.trim()) return
-                        setTranscript({
-                          rawText: dockTextValue.trim(),
-                          cleanedText: dockTextValue.trim(),
-                          finalText: dockTextValue.trim(),
-                        })
+                        updateFinalText(dockTextValue.trim())
                         setDockTextValue('')
-                        setShowTranscriptSheet(true)
-                        setManualInput(true)
-                        transitionTo('confirming_transcript')
+                        openTranscriptSheet()
+                        enterTextInput()
                       }}
                     >
                       <input
@@ -1804,10 +1663,7 @@ function App() {
                   <button
                     className={`im-dock-main-btn is-recording ${silenceCountdownSeconds !== null ? 'is-counting-down' : ''}`}
                     type="button"
-                    onClick={async () => {
-                      await stopRecording()
-                      setShowTranscriptSheet(true)
-                    }}
+                    onClick={() => void stopRecording()}
                   >
                     <span className="im-dock-recording-indicator" aria-hidden="true">
                       {silenceCountdownSeconds ?? <Square size={14} fill="currentColor" />}
@@ -1831,7 +1687,7 @@ function App() {
                     className="im-dock-main-btn"
                     type="button"
                     style={{ background: 'var(--butter)' }}
-                    onClick={() => setShowTranscriptSheet(true)}
+                    onClick={openTranscriptSheet}
                   >
                     <Pencil size={16} /> 检查/修改回答内容 <ArrowRight size={14} />
                   </button>
@@ -1845,9 +1701,6 @@ function App() {
                   {(phase === 'preparing_tts' || phase === 'playing_ai') && (
                     <div className="im-working-actions-mini">
                       <button type="button" onClick={stopAiPlayback}>停止</button>
-                      <button type="button" onClick={() => setAiTextRevealed((r) => !r)}>
-                        {aiTextRevealed ? '隐藏' : '显示'}
-                      </button>
                     </div>
                   )}
                   {(phase === 'fetching_token' || phase === 'connecting_stt') && (
@@ -1863,12 +1716,12 @@ function App() {
                 Bottom Sheet 1: 转写确认与编辑弹窗 (Bottom Sheet)
                 ================================================================ */}
             {(showTranscriptSheet || phase === 'confirming_transcript') && (
-              <div className="im-bottom-sheet-backdrop" onClick={() => setShowTranscriptSheet(false)}>
+              <div className="im-bottom-sheet-backdrop" onClick={closeTranscriptSheet}>
                 <div className="im-bottom-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className="im-sheet-drag-handle" />
                   <div className="im-sheet-header">
                     <h3 className="im-sheet-title">{manualInput ? '确认文字回答' : <><Mic size={18} /> 确认语音转写</>}</h3>
-                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowTranscriptSheet(false)}><X size={18} /></button>
+                    <button className="im-sheet-close-btn" type="button" onClick={closeTranscriptSheet}><X size={18} /></button>
                   </div>
                   <div className="im-sheet-content">
                     <label htmlFor="transcript-sheet-input" style={{ fontSize: '0.85rem', fontWeight: 700, display: 'block', marginBottom: '6px' }}>
@@ -1882,7 +1735,7 @@ function App() {
                       maxLength={600}
                       value={transcript.finalText}
                       onChange={(e) => {
-                        setTranscript((cur: TranscriptText) => ({ ...cur, finalText: e.target.value }))
+                        updateFinalText(e.target.value)
                         setInlineError('')
                       }}
                       placeholder="ここに日本語で入力してください..."
@@ -1894,7 +1747,7 @@ function App() {
                         <button
                           className="im-raw-toggle-btn"
                           type="button"
-                          onClick={() => setShowOriginalTranscript((s) => !s)}
+                          onClick={toggleOriginalTranscript}
                         >
                           {showOriginalTranscript ? '隐藏识别原句' : '查看原识别'}
                         </button>
@@ -1912,7 +1765,7 @@ function App() {
                       className="secondary-button"
                       type="button"
                       onClick={() => {
-                        setShowTranscriptSheet(false)
+                        closeTranscriptSheet()
                         void rerecord()
                       }}
                     >
@@ -1923,7 +1776,7 @@ function App() {
                       type="button"
                       disabled={!canConfirmTranscript}
                       onClick={() => {
-                        setShowTranscriptSheet(false)
+                        closeTranscriptSheet()
                         void confirmTranscript()
                       }}
                     >
@@ -1981,7 +1834,7 @@ function App() {
                       <button
                         className="secondary-button"
                         type="button"
-                        onClick={() => setHintLevel((l) => Math.min(4, l + 1))}
+                        onClick={() => void handleRequestHint()}
                       >
                         进阶下一级提示 <ArrowRight size={14} />
                       </button>
@@ -2001,7 +1854,7 @@ function App() {
             {/* ================================================================
                 Bottom Sheet 3: 训练目标弹窗 (Bottom Sheet)
                 ================================================================ */}
-            {showGoalsSheet && scenario?.dynamicData && (
+            {showGoalsSheet && scenario && sessionCoreGoal && (
               <div className="im-bottom-sheet-backdrop" onClick={() => setShowGoalsSheet(false)}>
                 <div className="im-bottom-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className="im-sheet-drag-handle" />
@@ -2014,25 +1867,12 @@ function App() {
                       {scenario.dynamicData.summaryZh}
                     </p>
                     <div style={{ marginTop: '12px' }}>
-                      <h4 style={{ fontSize: '0.85rem', color: 'var(--ink)', marginBottom: '8px' }}>核心交流任务：</h4>
-                      {scenario.dynamicData.coreGoals.map((g) => (
-                        <div key={g.id} className="im-goals-sheet-item is-core">
-                          <h4>[核心] {g.titleZh}</h4>
-                          <p>{g.descriptionZh}</p>
-                        </div>
-                      ))}
-                    </div>
-                    {scenario.dynamicData.optionalGoals.length > 0 && (
-                      <div style={{ marginTop: '12px' }}>
-                        <h4 style={{ fontSize: '0.85rem', color: 'var(--muted)', marginBottom: '8px' }}>进阶挑战（可选）：</h4>
-                        {scenario.dynamicData.optionalGoals.map((g) => (
-                          <div key={g.id} className="im-goals-sheet-item is-optional">
-                            <h4>[可选] {g.titleZh}</h4>
-                            <p>{g.descriptionZh}</p>
-                          </div>
-                        ))}
+                      <h4 style={{ fontSize: '0.85rem', color: 'var(--ink)', marginBottom: '8px' }}>唯一目标：</h4>
+                      <div className="im-goals-sheet-item is-core">
+                        <h4>{sessionCoreGoal.titleZh}</h4>
+                        <p>{sessionCoreGoal.descriptionZh}</p>
                       </div>
-                    )}
+                    </div>
                   </div>
                   <div className="im-sheet-footer">
                     <button className="primary-button" type="button" onClick={() => setShowGoalsSheet(false)}>
@@ -2043,186 +1883,6 @@ function App() {
               </div>
             )}
 
-            {/* ================================================================
-                Bottom Sheet 3.5: 本场高频表达武器库 (Primer Bottom Sheet)
-                ================================================================ */}
-            {showPrimerSheet && currentPrimers.length > 0 && (
-              <div className="im-bottom-sheet-backdrop" onClick={() => setShowPrimerSheet(false)}>
-                <div className="im-bottom-sheet im-primer-sheet" onClick={(e) => e.stopPropagation()}>
-                  <div className="im-sheet-drag-handle" />
-                  <div className="im-sheet-header">
-                    <h3 className="im-sheet-title">
-                      <Sparkles size={18} style={{ color: '#D4A346' }} /> 本场高频表达武器库
-                    </h3>
-                    <button
-                      className="im-sheet-close-btn"
-                      type="button"
-                      onClick={() => setShowPrimerSheet(false)}
-                      aria-label="关闭武器库"
-                    >
-                      <X size={18} />
-                    </button>
-                  </div>
-                  <div className="im-sheet-content">
-                    <div className="im-primer-sheet-list">
-                      {currentPrimers.map((primer, idx) => (
-                        <div key={idx} className="im-primer-sheet-item">
-                          <div className="im-primer-sheet-item-header">
-                            <span className="im-primer-sheet-phrase" lang="ja">
-                              <RubyText text={primer.phraseRuby || primer.phraseJa} showRuby={showRuby} />
-                            </span>
-                            <button
-                              className="im-primer-play-btn"
-                              type="button"
-                              onClick={() => void playRescueAudio(primer.phraseJa)}
-                              disabled={isPlayingRescueTts || !config?.elevenlabs.ttsAvailable}
-                              aria-label={`试听第 ${idx + 1} 组发音`}
-                              title="试听发音"
-                            >
-                              <Volume2 size={14} />
-                            </button>
-                          </div>
-                          <div className="im-primer-sheet-meta">
-                            <span className="im-primer-sheet-meaning">{primer.meaningZh}</span>
-                            <span className="im-primer-sheet-timing">💡 {primer.timingZh}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="im-sheet-footer">
-                    <button className="primary-button" type="button" onClick={() => setShowPrimerSheet(false)}>
-                      收起武器库
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* ================================================================
-                Bottom Sheet 4: 按需单句对齐与急救抽屉 (Rescue Bottom Sheet)
-                ================================================================ */}
-            {rescueDrawerState.isOpen && (
-              <div
-                className="im-bottom-sheet-backdrop"
-                onClick={closeRescueDrawer}
-              >
-                <div
-                  className="im-bottom-sheet im-rescue-sheet"
-                  onClick={(e) => e.stopPropagation()}
-                  role="dialog"
-                  aria-label="这句说得对吗"
-                >
-                  <div className="im-sheet-drag-handle" />
-                  <div className="im-sheet-header">
-                    <h3 className="im-sheet-title">
-                      <Sparkles size={18} aria-hidden="true" style={{ color: '#D4A346' }} /> 地道表达升级 (第 {rescueDrawerState.turn} 轮)
-                    </h3>
-                    <button
-                      className="im-sheet-close-btn"
-                      type="button"
-                      onClick={closeRescueDrawer}
-                      aria-label="关闭急救抽屉"
-                    >
-                      <X size={18} />
-                    </button>
-                  </div>
-
-                  <div className="im-sheet-content im-rescue-sheet-content">
-                    {/* 原发话卡片 */}
-                    <div className="im-rescue-user-quote">
-                      <span className="im-rescue-label">你的发话：</span>
-                      <p lang="ja">
-                        <RubyText text={annotateRuby(rescueDrawerState.userFinal)} showRuby={showRuby} />
-                      </p>
-                    </div>
-
-                    {rescueDrawerState.loading && (
-                      <div className="im-rescue-loading">
-                        <span className="pulse-dot" aria-hidden="true" />
-                        <p>相手正在分析意图并生成母语级地道升级...</p>
-                      </div>
-                    )}
-
-                    {rescueDrawerState.error && (
-                      <div className="im-rescue-error" role="alert">
-                        <AlertCircle size={16} />
-                        <p>{rescueDrawerState.error}</p>
-                      </div>
-                    )}
-
-                    {rescueDrawerState.data && (
-                      <div className="im-rescue-modules">
-                        {/* 模块 1: 相手理解的意图 */}
-                        <div className="im-rescue-card intent-card">
-                          <div className="im-rescue-card-title">
-                            <MessageCircle size={15} /> 相手理解的意图
-                          </div>
-                          <p className="im-rescue-intent-text">
-                            {rescueDrawerState.data.interpretedIntentZh}
-                          </p>
-                        </div>
-
-                        {/* 模块 2: 地道升级参考 */}
-                        <div className="im-rescue-card suggestion-card">
-                          <div className="im-rescue-card-header">
-                            <span className="im-rescue-card-title">
-                              <Sparkles size={15} /> 地道升级参考
-                            </span>
-                            <button
-                              className={`im-rescue-listen-btn ${isPlayingRescueTts ? 'is-playing' : ''}`}
-                              type="button"
-                              onClick={() => void playRescueAudio(rescueDrawerState.data?.suggestedJa || '')}
-                              disabled={isPlayingRescueTts || !config?.elevenlabs.ttsAvailable}
-                              aria-label="试听地道推荐表达"
-                            >
-                              <Volume2 size={14} />
-                              <span>{isPlayingRescueTts ? '播放中...' : '试听'}</span>
-                            </button>
-                          </div>
-                          <p className="im-rescue-suggested-ja" lang="ja">
-                            <RubyText
-                              text={rescueDrawerState.data.suggestedJaRuby || annotateRuby(rescueDrawerState.data.suggestedJa)}
-                              showRuby={showRuby}
-                            />
-                          </p>
-                          <p className="im-rescue-politeness-tip">
-                            <span className="im-rescue-badge">点拨</span> {rescueDrawerState.data.politenessTipZh}
-                          </p>
-                        </div>
-
-                        {/* 模块 3: 换用升级句重说本轮 */}
-                        <div className="im-rescue-card rewind-card">
-                          <div className="im-rescue-card-title">
-                            <RotateCcw size={15} /> 肌肉记忆强化
-                          </div>
-                          <p className="im-rescue-rewind-desc">
-                            觉得上面这句表达更地道？撤回并重新录音，趁热打铁把高级句式读出来。
-                          </p>
-                          <button
-                            className="primary-button im-rescue-rewind-btn"
-                            type="button"
-                            onClick={() => handleRewindTurn(rescueDrawerState.turn)}
-                          >
-                            <RotateCcw size={14} /> 换用升级句重说本轮
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="im-sheet-footer">
-                    <button
-                      className="primary-button"
-                      type="button"
-                      onClick={closeRescueDrawer}
-                    >
-                      关闭
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
           </section>
         )}
       </main>
@@ -2239,15 +1899,15 @@ interface HomeProps {
   setHomeTab: (tab: 'spark' | 'custom') => void
   sparkScenario: VocabScenario
   setSparkScenario: React.Dispatch<React.SetStateAction<VocabScenario>>
-  onStartSpark: (scenario: VocabScenario) => void
+  onPrepareSpark: (scenario: VocabScenario) => void
   customInputZh: string
-  setCustomInputZh: (val: string) => void
+  setCustomInputZh: (value: string) => void
   clarifications: Array<{ questionZh: string; answerZh: string }>
   pendingClarification: { questionZh: string; optionsZh: readonly string[] } | null
   readyScenarioData: { scenario: DynamicScenarioData; scenarioToken: string } | null
   isDraftingScenario: boolean
-  onDraftScenario: (prompt?: string, clarList?: Array<{ questionZh: string; answerZh: string }>, force?: boolean) => void
-  onAnswerClarification: (ans: string) => void
+  onDraftScenario: (prompt?: string, clarifications?: Array<{ questionZh: string; answerZh: string }>, force?: boolean) => void
+  onAnswerClarification: (answer: string) => void
   onStartDynamic: (scenarioToken: string) => void
   onResetCustom: () => void
 }
@@ -2261,7 +1921,7 @@ function Home({
   setHomeTab,
   sparkScenario,
   setSparkScenario,
-  onStartSpark,
+  onPrepareSpark,
   customInputZh,
   setCustomInputZh,
   clarifications,
@@ -2273,215 +1933,70 @@ function Home({
   onStartDynamic,
   onResetCustom,
 }: HomeProps): React.JSX.Element {
-  const [customClarifyInput, setCustomClarifyInput] = useState('')
+  const [clarificationInput, setClarificationInput] = useState('')
 
   return (
     <div className="intro-block home-dual-layout">
       <header className="home-header">
         <h1 id="conversation-heading">日语语音会话</h1>
-        <p className="home-subtitle">听懂对方，完成这段交流。</p>
+        <p className="home-subtitle">先确认场景与唯一目标，再开始五轮以内的会话。</p>
       </header>
-      <div className="home-tabs-container">
-        <div className="home-tabs" role="tablist" aria-label="场景选择模式">
-          <button
-            role="tab"
-            aria-selected={homeTab === 'spark'}
-            className={`home-tab ${homeTab === 'spark' ? 'is-active' : ''}`}
-            type="button"
-            onClick={() => { setHomeTab('spark'); onResetCustom() }}
-          >
-            灵感速练
-          </button>
-          <button
-            role="tab"
-            aria-selected={homeTab === 'custom'}
-            className={`home-tab ${homeTab === 'custom' ? 'is-active' : ''}`}
-            type="button"
-            onClick={() => setHomeTab('custom')}
-          >
-            自定义场景
-          </button>
-        </div>
+      <div className="home-tabs" role="tablist" aria-label="练习入口">
+        <button className={`home-tab ${homeTab === 'spark' ? 'is-active' : ''}`} type="button" role="tab" aria-selected={homeTab === 'spark'} onClick={() => { onResetCustom(); setHomeTab('spark') }}>灵感速练</button>
+        <button className={`home-tab ${homeTab === 'custom' ? 'is-active' : ''}`} type="button" role="tab" aria-selected={homeTab === 'custom'} onClick={() => { onResetCustom(); setHomeTab('custom') }}>自定义</button>
       </div>
-      <div className="home-main-grid">
 
-      {homeTab === 'spark' && (
+      {error && <div className="error-panel" role="alert"><div><p className="error-title">{error.title}</p><p>{error.message}</p></div></div>}
+
+      {readyScenarioData ? (
+        <div className="ready-scenario-card">
+          <p className="ready-badge"><Sparkles size={16} /> 场景已就绪</p>
+          <h2>{readyScenarioData.scenario.titleZh}</h2>
+          <p className="ready-desc"><strong>背景：</strong>{readyScenarioData.scenario.summaryZh}</p>
+          <div className="ready-meta">
+            <p><strong>相手角色：</strong>{readyScenarioData.scenario.aiRole}</p>
+            <p><strong>你的角色：</strong>{readyScenarioData.scenario.userRole}</p>
+          </div>
+          <p className="session-length">最多五轮，也可随时提前复盘。</p>
+          <div className="ready-actions">
+            <button className="primary-button" type="button" onClick={() => onStartDynamic(readyScenarioData.scenarioToken)} disabled={loading || !online}>开始会话</button>
+            <button className="text-button" type="button" onClick={onResetCustom}>重新选择</button>
+          </div>
+        </div>
+      ) : homeTab === 'spark' ? (
         <div className="spark-card">
           <span className="spark-card-domain">{sparkScenario.domainZh}</span>
-          <h2 className="spark-card-title">{sparkScenario.titleZh} <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: '0.9rem' }}>({sparkScenario.titleJa})</span></h2>
-          <div className="spark-card-row">
-            <span className="spark-card-label">场所环境：</span>
-            <span>{sparkScenario.settingZh}</span>
-          </div>
-          <div className="spark-card-row">
-            <span className="spark-card-label">对方角色：</span>
-            <span>{sparkScenario.partnerZh}</span>
-          </div>
-          <div className="spark-card-row">
-            <span className="spark-card-label">核心挑战：</span>
-            <span>{sparkScenario.challengeZh}</span>
-          </div>
-          <div style={{ marginTop: '10px' }}>
-            <span className="spark-card-label" style={{ display: 'block', marginBottom: '4px' }}>必备表达 (N2)：</span>
-            <div className="spark-expressions">
-              {sparkScenario.keyExpressions.map((exp) => (
-                <span key={exp} className="spark-expression-tag" lang="ja">
-                  {exp}
-                </span>
-              ))}
-            </div>
-          </div>
-
-          {error && (
-            <div className="error-panel" role="alert" style={{ marginTop: '14px' }}>
-              <div>
-                <p className="error-title">{error.title}</p>
-                <p>{error.message}</p>
-              </div>
-              <div className="error-actions">
-                {online && (
-                  <button className="primary-button" type="button" onClick={() => onStartSpark(sparkScenario)}>
-                    重试
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
+          <h2 className="spark-card-title">{sparkScenario.titleZh}</h2>
+          <div className="spark-card-row"><span className="spark-card-label">背景：</span><span>{sparkScenario.settingZh}</span></div>
+          <div className="spark-card-row"><span className="spark-card-label">相手：</span><span>{sparkScenario.partnerZh}</span></div>
+          <div className="spark-card-row"><span className="spark-card-label">目标：</span><span>{sparkScenario.challengeZh}</span></div>
           <div className="spark-actions">
-            <button
-              className="spark-shuffle-btn"
-              type="button"
-              onClick={() => setSparkScenario(drawRandomScenario(sparkScenario.id))}
-              disabled={isDraftingScenario}
-            >
-              换一组灵感
-            </button>
-            <button
-              className="spark-start-btn"
-              type="button"
-              onClick={() => onStartSpark(sparkScenario)}
-              disabled={loading || !ready || isDraftingScenario || !online}
-            >
-              {isDraftingScenario ? '正在设计场景...' : '开始此场景对练'}
-            </button>
+            <button className="spark-shuffle-btn" type="button" onClick={() => setSparkScenario(drawRandomScenario(sparkScenario.id))} disabled={isDraftingScenario}>换一组灵感</button>
+            <button className="spark-start-btn" type="button" onClick={() => onPrepareSpark(sparkScenario)} disabled={loading || !ready || isDraftingScenario || !online}>{isDraftingScenario ? '正在生成场景...' : '生成练习说明'}</button>
           </div>
         </div>
-      )}
-
-      {homeTab === 'custom' && (
+      ) : (
         <div className="custom-scenario-box">
-          {error && (
-            <div className="error-panel" role="alert">
-              <div>
-                <p className="error-title">{error.title}</p>
-                <p>{error.message}</p>
-              </div>
-              <div className="error-actions">
-                {online && (
-                  <button className="primary-button" type="button" onClick={() => onDraftScenario()}>
-                    重试生成
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {!pendingClarification && !readyScenarioData && (
+          {!pendingClarification ? (
             <>
-              <label htmlFor="custom-topic-input"><strong>想练习什么场景？</strong>（中文描述，如：我想在日本理发店说明想要的发型）</label>
-              <textarea
-                id="custom-topic-input"
-                className="custom-textarea"
-                rows={3}
-                maxLength={300}
-                placeholder="例如：我马上要去日本银行开户，想询问需要哪些证件和流程"
-                value={customInputZh}
-                onChange={(e) => setCustomInputZh(e.target.value)}
-              />
+              <label htmlFor="custom-topic-input"><strong>想练习什么场景？</strong></label>
+              <textarea id="custom-topic-input" className="custom-textarea" rows={3} maxLength={300} placeholder="例如：在日本银行开户，询问所需证件和流程" value={customInputZh} onChange={(event) => setCustomInputZh(event.target.value)} />
               <div className="char-count">{customInputZh.length} / 300</div>
-              <button
-                className="primary-button start-button"
-                type="button"
-                onClick={() => onDraftScenario()}
-                disabled={!customInputZh.trim() || isDraftingScenario || !online}
-              >
-                {isDraftingScenario ? '正在设计场景...' : '生成定制练习'}
-              </button>
+              <button className="primary-button start-button" type="button" onClick={() => onDraftScenario()} disabled={!customInputZh.trim() || isDraftingScenario || !online}>{isDraftingScenario ? '正在生成场景...' : '生成练习说明'}</button>
             </>
-          )}
-
-          {pendingClarification && (
+          ) : (
             <div className="clarification-panel">
-              <p className="clarification-question"><strong>确认意图：</strong>{pendingClarification.questionZh}</p>
-              <div className="clarification-options">
-                {pendingClarification.optionsZh.map((opt) => (
-                  <button key={opt} className="secondary-button clarify-opt-btn" type="button" onClick={() => onAnswerClarification(opt)}>
-                    {opt}
-                  </button>
-                ))}
-              </div>
+              <p className="clarification-question"><strong>补充一次信息：</strong>{pendingClarification.questionZh}</p>
+              <div className="clarification-options">{pendingClarification.optionsZh.map((option) => <button key={option} className="secondary-button clarify-opt-btn" type="button" onClick={() => onAnswerClarification(option)}>{option}</button>)}</div>
               <div className="clarify-custom-row">
-                <input
-                  type="text"
-                  className="clarify-input"
-                  placeholder="或者自己输入说明..."
-                  value={customClarifyInput}
-                  onChange={(e) => setCustomClarifyInput(e.target.value)}
-                />
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={() => { if (customClarifyInput.trim()) { onAnswerClarification(customClarifyInput); setCustomClarifyInput('') } }}
-                  disabled={!customClarifyInput.trim()}
-                >
-                  回答
-                </button>
+                <input className="clarify-input" value={clarificationInput} onChange={(event) => setClarificationInput(event.target.value)} placeholder="或者自己补充" />
+                <button className="secondary-button" type="button" disabled={!clarificationInput.trim()} onClick={() => { onAnswerClarification(clarificationInput); setClarificationInput('') }}>提交</button>
               </div>
-              <button className="text-button skip-clarify-btn" type="button" onClick={() => onDraftScenario(customInputZh, clarifications, true)}>
-                跳过追问，直接生成 <ArrowRight size={14} />
-              </button>
-            </div>
-          )}
-
-          {readyScenarioData && (
-            <div className="ready-scenario-card">
-              <p className="ready-badge"><Sparkles size={16} /> 定制场景已就绪</p>
-              <h3>{readyScenarioData.scenario.titleZh}</h3>
-              <p className="ready-desc">{readyScenarioData.scenario.summaryZh}</p>
-              <div className="ready-meta">
-                <p><strong>相手身份：</strong>{readyScenarioData.scenario.aiRole}</p>
-                <p><strong>你的角色：</strong>{readyScenarioData.scenario.userRole}</p>
-              </div>
-              <div className="ready-goals">
-                <strong><Target size={16} /> 训练目标 (6~8 轮自适应)：</strong>
-                <ul>
-                  {readyScenarioData.scenario.coreGoals.map((g) => (
-                    <li key={g.id}><strong>[核心]</strong> {g.titleZh}: {g.descriptionZh}</li>
-                  ))}
-                  {readyScenarioData.scenario.optionalGoals.map((g) => (
-                    <li key={g.id}><span>[可选]</span> {g.titleZh}: {g.descriptionZh}</li>
-                  ))}
-                </ul>
-              </div>
-              <div className="ready-actions">
-                <button
-                  className="primary-button"
-                  type="button"
-                  onClick={() => onStartDynamic(readyScenarioData.scenarioToken)}
-                  disabled={loading || !online}
-                >
-                  开始对练 (相手先发话)
-                </button>
-                <button className="text-button" type="button" onClick={onResetCustom}>
-                  修改描述
-                </button>
-              </div>
+              <button className="text-button skip-clarify-btn" type="button" onClick={() => onDraftScenario(customInputZh, clarifications, true)}>跳过，直接生成</button>
             </div>
           )}
         </div>
       )}
-      </div>
     </div>
   )
 }
@@ -2491,551 +2006,284 @@ interface SessionCompleteProps {
   messages: ConversationMessage[]
   rounds: RoundRecord[]
   report: SessionReport
-  previousReport: SessionReport | null
+  scenario: SessionScenario
   reveal: SessionScenario['reveal']
   config: PrototypeConfig | null
-  selfAssessment: SelfAssessment
   feedbackData: ConversationFeedbackResponse | null
   feedbackStatus: FeedbackLoadingState
   feedbackErrorMsg: string
   onRetryFeedback: () => void
   copyStatus: string
-  onAssess: (assessment: SelfAssessment) => void
-  onNext: () => void
-  onPractice: () => void
   onCopy: () => void
   onDownload: () => void
   onReplayAi: (text: string) => void
   onStopAudio: () => void
+  onSaveRedo: (record: RedoRecord) => void
+  onRequestRedo: typeof requestRedoFeedback
+  onRequestListeningScaffold: typeof requestListeningScaffold
+  onCacheListeningScaffold: (messageId: string, scaffold: ListeningScaffoldResponse) => void
+  onNewScenario: () => void
   audioNotice: string
-  showRuby?: boolean
 }
 
 function SessionComplete({
   messages,
   rounds,
   report,
-  previousReport,
+  scenario,
   reveal,
   config,
-  selfAssessment,
   feedbackData,
   feedbackStatus,
   feedbackErrorMsg,
   onRetryFeedback,
   copyStatus,
-  onAssess,
-  onNext,
-  onPractice,
   onCopy,
   onDownload,
   onReplayAi,
   onStopAudio,
+  onSaveRedo,
+  onRequestRedo,
+  onRequestListeningScaffold,
+  onCacheListeningScaffold,
+  onNewScenario,
   audioNotice,
-  showRuby = true,
 }: SessionCompleteProps): React.JSX.Element {
-  const [activeTab, setActiveTab] = useState<'conversation' | 'feedback'>('conversation')
-  const [expandedTurns, setExpandedTurns] = useState<Record<number, boolean>>({})
-  const [expandedSuggestions, setExpandedSuggestions] = useState<Record<string, boolean>>({})
+  const [redoState, setRedoState] = useState<'idle' | 'ready' | 'recording' | 'confirming' | 'loading' | 'complete'>('idle')
+  const [redoTranscript, setRedoTranscript] = useState('')
+  const [redoInputMode, setRedoInputMode] = useState<'stt' | 'text'>('stt')
+  const [redoListeningLevel, setRedoListeningLevel] = useState<ListeningScaffoldLevel>(0)
+  const [redoExpressionLevel, setRedoExpressionLevel] = useState<0 | 1 | 2 | 3 | 4>(0)
+  const [redoResult, setRedoResult] = useState<{ comparisonZh: string; referenceExpressionJa: string } | null>(null)
+  const [redoError, setRedoError] = useState('')
+  const [redoScaffold, setRedoScaffold] = useState<ListeningScaffoldResponse | null>(null)
+  const [redoScaffoldLoading, setRedoScaffoldLoading] = useState(false)
+  const [redoScaffoldError, setRedoScaffoldError] = useState('')
+  const redoSttRef = useRef<RealtimeSttSession | null>(null)
+  const redoScaffoldRequestInFlightRef = useRef(false)
 
-  // Retry Task state
-  const [retryAudioState, setRetryAudioState] = useState<'idle' | 'recording' | 'confirming' | 'completed'>('idle')
-  const [retryTranscript, setRetryTranscript] = useState('')
-  const [, setRetryInputMode] = useState<'stt' | 'text'>('stt')
-  const [retryFinalText, setRetryFinalText] = useState('')
-  const [retryErrorMsg, setRetryErrorMsg] = useState('')
-  const retrySttRef = useRef<RealtimeSttSession | null>(null)
-  useEffect(() => () => {
-    retrySttRef.current?.close()
-    retrySttRef.current = null
-  }, [])
+  useEffect(() => () => redoSttRef.current?.close(), [])
+  const redoAssistantMessage = feedbackData
+    ? messages.find((message) => message.role === 'assistant' && message.turn === feedbackData.redoTask.turn)
+    : undefined
+  const effectiveRedoScaffold = redoScaffold ?? redoAssistantMessage?.listeningScaffold ?? null
 
-  const practiceTrend = useMemo(() => buildPracticeTrend(previousReport, report), [previousReport, report])
 
-  const handleStartRetryRecord = async () => {
+  const startRedo = () => {
+    if (!feedbackData) return
     onStopAudio()
-    setRetryErrorMsg('')
+    redoSttRef.current?.close()
+    setRedoState('ready')
+    setRedoInputMode('stt')
+    setRedoListeningLevel(1)
+    setRedoExpressionLevel(0)
+    setRedoResult(null)
+    setRedoError('')
+    setRedoScaffold(redoAssistantMessage?.listeningScaffold ?? null)
+    setRedoScaffoldLoading(false)
+    setRedoScaffoldError('')
+    onReplayAi(feedbackData.redoTask.partnerPromptJa)
+  }
+
+  const advanceRedoListeningScaffold = async () => {
+    if (!feedbackData || redoScaffoldRequestInFlightRef.current) return
+    if (redoListeningLevel === 0) {
+      setRedoListeningLevel(1)
+      onReplayAi(feedbackData.redoTask.partnerPromptJa)
+      return
+    }
+    if (redoListeningLevel === 1) {
+      if (effectiveRedoScaffold) {
+        setRedoListeningLevel(2)
+        setRedoScaffoldError('')
+        return
+      }
+      setRedoScaffoldLoading(true)
+      setRedoScaffoldError('')
+      redoScaffoldRequestInFlightRef.current = true
+      try {
+        const scaffold = await onRequestListeningScaffold({
+          scenarioType: 'dynamic',
+          sessionToken: scenario.sessionToken,
+          turn: feedbackData.redoTask.turn,
+          partnerPromptJa: feedbackData.redoTask.partnerPromptJa,
+        })
+        setRedoScaffold(scaffold)
+        setRedoListeningLevel(2)
+        if (redoAssistantMessage) onCacheListeningScaffold(redoAssistantMessage.id, scaffold)
+      } catch (error) {
+        setRedoScaffoldError(error instanceof Error ? error.message : '关键信息获取失败，请重试。')
+      } finally {
+        redoScaffoldRequestInFlightRef.current = false
+        setRedoScaffoldLoading(false)
+      }
+      return
+    }
+    if (redoListeningLevel === 2) {
+      setRedoListeningLevel(3)
+      return
+    }
+    if (redoListeningLevel === 3) setRedoListeningLevel(4)
+   }
+
+  const startRedoRecording = async () => {
+    setRedoError('')
     if (!config?.elevenlabs.sttAvailable) {
-      setRetryInputMode('text')
-      setRetryAudioState('confirming')
+      setRedoInputMode('text')
+      setRedoState('confirming')
       return
     }
     try {
-      setRetryAudioState('recording')
-      setRetryTranscript('')
       const token = await requestElevenLabsToken('realtime_scribe')
       const session = new RealtimeSttSession()
-      retrySttRef.current = session
+      redoSttRef.current = session
+      setRedoTranscript('')
+      setRedoState('recording')
       await session.start(token, config.elevenlabs.sttModel, {
-        onPartial: (text) => {
-          setRetryTranscript(text)
-        },
+        onPartial: setRedoTranscript,
         onConnectionState: () => {},
         onAudioLevel: () => {},
       })
-    } catch (err) {
-      retrySttRef.current?.close()
-      retrySttRef.current = null
-      setRetryInputMode('text')
-      setRetryAudioState('confirming')
-      setRetryErrorMsg(err instanceof Error ? err.message : '麦克风启动失败，已切换为文字重说。')
+    } catch (error) {
+      redoSttRef.current?.close()
+      redoSttRef.current = null
+      setRedoInputMode('text')
+      setRedoState('confirming')
+      setRedoError(error instanceof Error ? error.message : '麦克风不可用，已切换为文字输入。')
     }
   }
 
-  const handleStopRetryRecord = async () => {
-    if (!retrySttRef.current) return
+  const stopRedoRecording = async () => {
+    const session = redoSttRef.current
+    if (!session) return
     try {
-      setRetryAudioState('confirming')
-      const finalRaw = await retrySttRef.current.stop()
-      retrySttRef.current.close()
-      retrySttRef.current = null
-      const cleaned = cleanTranscript(finalRaw)
-      setRetryTranscript(cleaned.cleanedText)
-    } catch {
-      retrySttRef.current?.close()
-      retrySttRef.current = null
-      setRetryAudioState('confirming')
+      const rawText = await session.stop()
+      setRedoTranscript(cleanTranscript(rawText).cleanedText)
+    } finally {
+      session.close()
+      if (redoSttRef.current === session) redoSttRef.current = null
+      setRedoState('confirming')
     }
   }
 
-  const handleConfirmRetry = (confirmedText: string) => {
-    if (!confirmedText.trim()) {
-      setRetryErrorMsg('重说内容不能为空。')
+  const confirmRedo = async () => {
+    if (!feedbackData || !redoTranscript.trim()) {
+      setRedoError('第二稿不能为空，请修改或重新录制。')
       return
     }
-    setRetryFinalText(confirmedText.trim())
-    setRetryAudioState('completed')
-    setRetryErrorMsg('')
+    setRedoState('loading')
+    setRedoError('')
+    try {
+      const result = await onRequestRedo({
+        scenarioType: 'dynamic',
+        sessionToken: scenario.sessionToken,
+        turn: feedbackData.redoTask.turn,
+        partnerPromptJa: feedbackData.redoTask.partnerPromptJa,
+        firstConfirmedJa: feedbackData.redoTask.firstConfirmedJa,
+        secondConfirmedJa: redoTranscript.trim(),
+        secondInputMode: redoInputMode,
+        secondListeningScaffoldLevel: redoListeningLevel,
+        secondExpressionScaffoldLevel: redoExpressionLevel,
+      })
+      setRedoResult(result)
+      setRedoState('complete')
+      onSaveRedo({
+        turn: feedbackData.redoTask.turn,
+        partnerPromptJa: feedbackData.redoTask.partnerPromptJa,
+        firstConfirmedJa: feedbackData.redoTask.firstConfirmedJa,
+        secondConfirmedJa: redoTranscript.trim(),
+        inputMode: redoInputMode,
+        listeningScaffoldLevel: redoListeningLevel,
+        expressionScaffoldLevel: redoExpressionLevel,
+        comparisonZh: result.comparisonZh,
+        referenceExpressionJa: result.referenceExpressionJa,
+      })
+    } catch (error) {
+      setRedoState('confirming')
+      setRedoError(error instanceof Error ? error.message : '重做反馈生成失败，请重试。')
+    }
   }
 
-  const improvementsByTurn = useMemo(() => {
-    if (!feedbackData?.improvements) return {}
-    const map: Record<number, FeedbackImprovement[]> = {}
-    for (const item of feedbackData.improvements) {
-      if (!map[item.turn]) map[item.turn] = []
-      map[item.turn].push(item)
-    }
-    return map
-  }, [feedbackData])
-  const roundsByTurn = useMemo(() => {
-    const map: Record<number, RoundRecord> = {}
-    for (const r of rounds) {
-      map[r.turn] = r
-    }
-    return map
-  }, [rounds])
+  const outcomeLabel: Record<ConversationFeedbackResponse['outcome'], string> = {
+    completed: '目标完成',
+    partial: '部分完成',
+    not_completed: '目标未完成',
+    insufficient_evidence: '证据不足',
+  }
 
   return (
     <div className="complete-view">
-      <p className="brand-mark">完成</p>
+      <p className="brand-mark">复盘</p>
       <h1 id="conversation-heading">{reveal.titleZh}</h1>
       <p className="reveal-summary">{reveal.summaryZh}</p>
       {audioNotice && <p className="network-notice" role="status">{audioNotice}</p>}
 
-      <div className="review-tabs">
-        <button
-          className={`review-tab ${activeTab === 'conversation' ? 'is-active' : ''}`}
-          type="button"
-          onClick={() => setActiveTab('conversation')}
-        >
-          <MessageCircle size={18} /> 完整对话
-        </button>
-        <button
-          className={`review-tab ${activeTab === 'feedback' ? 'is-active' : ''}`}
-          type="button"
-          onClick={() => setActiveTab('feedback')}
-        >
-          <Sparkles size={18} /> 反馈重点
-          {feedbackStatus === 'loading' && <span className="tab-badge">生成中</span>}
-          {feedbackStatus === 'success' && <span className="tab-badge is-ready">就绪</span>}
-          {feedbackStatus === 'error' && <span className="tab-badge is-error">失败</span>}
-        </button>
-      </div>
-
-      {activeTab === 'conversation' && (
-        <div className="review-conversation-tab">
-          {practiceTrend.hasPrevious && (
-            <section className="practice-trend-card" aria-labelledby="trend-heading">
-              <h2 id="trend-heading"><TrendingUp size={18} /> 同场景二刷趋势对比</h2>
-              <p className="trend-narrative">{practiceTrend.narrativeZh}</p>
-              <div className="trend-grid">
-                {practiceTrend.metrics.map((m, idx) => (
-                  <div key={idx} className={`trend-item is-${m.direction}`}>
-                    <span className="trend-metric-label">{m.labelZh}</span>
-                    <div className="trend-metric-values">
-                      <span>上次：{m.previousDisplay}</span>
-                      <span>本次：{m.currentDisplay}</span>
-                    </div>
-                    <strong className="trend-metric-delta">变化：{m.deltaDisplay}</strong>
+      {feedbackStatus === 'loading' && <div className="feedback-loading-card"><span className="pulse-dot" /><p>正在整理本场反馈...</p></div>}
+      {feedbackStatus === 'error' && <div className="feedback-error-card" role="alert"><p>{feedbackErrorMsg}</p><button className="primary-button" type="button" onClick={onRetryFeedback}>重新生成</button></div>}
+      {feedbackStatus === 'success' && feedbackData && (
+        <div className="feedback-content">
+          <section className="feedback-section goal-summary-card"><h2>1. 目标结果</h2><p><strong>{outcomeLabel[feedbackData.outcome]}</strong></p></section>
+          <section className="feedback-section"><h2>2. 结果依据</h2><p>{feedbackData.outcomeEvidenceZh}</p></section>
+          <section className="feedback-section"><h2>3. 听力发现</h2>{feedbackData.listeningFinding ? <><p>第 {feedbackData.listeningFinding.turn} 轮：{feedbackData.listeningFinding.findingZh}</p><p>{feedbackData.listeningFinding.evidenceZh}</p></> : <p>本场没有足够证据形成听力发现。</p>}</section>
+          <section className="feedback-section"><h2>4. 表达改进</h2>{feedbackData.expressionImprovement ? <><p lang="ja">{feedbackData.expressionImprovement.userConfirmedJa}</p><p lang="ja">建议：{feedbackData.expressionImprovement.suggestedJa}</p><p>{feedbackData.expressionImprovement.reasonZh}</p></> : <p>本场没有必须改写的表达。</p>}</section>
+          <section className="feedback-section retry-task-card">
+            <h2>5. 完整回合重做</h2>
+            <p lang="ja"><strong>第一次确认稿：</strong>{feedbackData.redoTask.firstConfirmedJa}</p>
+            {redoState === 'idle' && <div className="retry-actions"><button className="primary-button" type="button" onClick={startRedo}><Volume2 size={16} /> 开始完整回合重做</button></div>}
+            {redoState === 'ready' && <div className="retry-actions"><button className="primary-button" type="button" onClick={() => void startRedoRecording()}><Mic size={16} /> 开始第二稿</button><button className="text-button" type="button" onClick={() => { setRedoInputMode('text'); setRedoState('confirming') }}>改用文字</button></div>}
+            {(redoState === 'ready' || redoState === 'recording' || redoState === 'confirming') && (
+              <div className="retry-scaffold" aria-live="polite">
+                <div className="retry-scaffold-status">
+                  <strong>{LISTENING_LEVEL_LABELS[redoListeningLevel]}</strong>
+                  <span>{nextListeningAction(redoListeningLevel) ? `下一步：${nextListeningAction(redoListeningLevel)}` : '四级听力支架已完成'}</span>
+                </div>
+                <div className="retry-actions">
+                  <button className="text-button" type="button" onClick={() => { onReplayAi(feedbackData.redoTask.partnerPromptJa); setRedoListeningLevel((level) => level < 1 ? 1 : level) }}>再听原相手语音</button>
+                  {nextListeningAction(redoListeningLevel) && redoListeningLevel > 0 && (
+                    <button className="secondary-button" type="button" disabled={redoScaffoldLoading} onClick={() => void advanceRedoListeningScaffold()}>
+                      {redoScaffoldLoading ? '正在获取 L2 线索...' : nextListeningAction(redoListeningLevel)}
+                    </button>
+                  )}
+                  <button className="text-button" type="button" onClick={() => setRedoExpressionLevel((level) => level === 4 ? 4 : (level + 1) as 1 | 2 | 3 | 4)}>展开表达支架 L{Math.min(4, redoExpressionLevel + 1)}</button>
+                </div>
+                {redoScaffoldError && <p className="im-listening-error" role="alert">{redoScaffoldError} 未升级层级，可重试。</p>}
+                {redoListeningLevel >= 2 && effectiveRedoScaffold && (
+                  <div className="retry-scaffold-reveal is-hint">
+                    <strong>L2 关键信息线索</strong>
+                    <p>{effectiveRedoScaffold.keyInformationHintZh}</p>
+                    <p lang="ja">原文线索：{effectiveRedoScaffold.keyPhrasesJa.join(' / ')}</p>
                   </div>
-                ))}
+                )}
+                {redoListeningLevel >= 3 && (
+                  <div className="retry-scaffold-reveal">
+                    <strong>L3 日语台词</strong>
+                    <p lang="ja">{feedbackData.redoTask.partnerPromptJa}</p>
+                  </div>
+                )}
+                {redoListeningLevel >= 4 && effectiveRedoScaffold && (
+                  <div className="retry-scaffold-reveal is-intent">
+                    <strong>L4 一句中文意图</strong>
+                    <p>{effectiveRedoScaffold.intentSummaryZh}</p>
+                  </div>
+                )}
               </div>
-            </section>
-          )}
-
-          <section className="self-assessment" aria-labelledby="assessment-heading">
-            <h2 id="assessment-heading">这段交流完成得怎么样？</h2>
-            <div>
-              {([
-                ['completed', '完成了'],
-                ['partial', '部分完成'],
-                ['not_completed', '没完成'],
-              ] as const).map(([value, label]) => (
-                <button
-                  className={`assessment-button ${selfAssessment === value ? 'is-selected' : ''}`}
-                  type="button"
-                  key={value}
-                  onClick={() => onAssess(value)}
-                  aria-pressed={selfAssessment === value}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            )}
+            {redoState === 'recording' && <div className="retry-recording-panel"><p lang="ja">{redoTranscript || '请开始说话'}</p><button className="primary-button" type="button" onClick={() => void stopRedoRecording()}>说完了，确认转写</button></div>}
+            {redoExpressionLevel > 0 && redoState !== 'complete' && <p><strong>表达方向：</strong>{feedbackData.redoTask.directionZh}</p>}
+            {redoState === 'confirming' && <div className="retry-confirming-panel"><label htmlFor="redo-confirmed"><strong>确认第二稿：</strong></label><textarea id="redo-confirmed" className="retry-textarea" lang="ja" value={redoTranscript} onChange={(event) => setRedoTranscript(event.target.value)} /><div className="retry-confirm-buttons"><button className="secondary-button" type="button" onClick={() => void startRedoRecording()}>重新录音</button><button className="primary-button" type="button" onClick={() => void confirmRedo()}>确认第二稿并查看比较</button></div></div>}
+            {redoState === 'loading' && <p>正在比较两次确认稿...</p>}
+            {redoError && <p className="inline-error" role="alert">{redoError}</p>}
+            {redoState === 'complete' && redoResult && <div className="retry-completed-panel"><p>{redoResult.comparisonZh}</p><p lang="ja"><strong>参考表达：</strong>{redoResult.referenceExpressionJa}</p><button className="text-button" type="button" onClick={startRedo}>再做一次</button></div>}
           </section>
-
-          <ol className="review-transcript-list" aria-label="完整对话回顾">
-            {messages.map((message) => {
-              if (message.role === 'assistant') {
-                return (
-                  <li key={message.id} className="review-message assistant">
-                    <div className="review-message-header">
-                      <span className="speaker-tag">相手 (第 {message.turn} 轮)</span>
-                      <button
-                        className="text-button replay-button"
-                        type="button"
-                        onClick={() => onReplayAi(message.text)}
-                      >
-                        <Volume2 size={16} /> 再听
-                      </button>
-                    </div>
-                    <p className="review-message-text" lang="ja">
-                      <RubyText text={annotateRuby(message.text)} showRuby={showRuby} />
-                    </p>
-                  </li>
-                )
-              }
-
-              const turnRecord = roundsByTurn[message.turn]
-              const isTurnExpanded = Boolean(expandedTurns[message.turn])
-              const turnImprovements = improvementsByTurn[message.turn] ?? []
-
-              return (
-                <li key={message.id} className="review-message user">
-                  <div className="review-message-header">
-                    <span className="speaker-tag">你 (第 {message.turn} 轮)</span>
-                    <button
-                      className="text-button toggle-details-btn"
-                      type="button"
-                      onClick={() =>
-                        setExpandedTurns((prev) => ({
-                          ...prev,
-                          [message.turn]: !prev[message.turn],
-                        }))
-                      }
-                    >
-                      {isTurnExpanded ? '收起详情' : '展开详情'}
-                    </button>
-                  </div>
-
-                  <p className="review-message-text" lang="ja">
-                    <RubyText text={annotateRuby(message.text)} showRuby={showRuby} />
-                  </p>
-
-                  {turnImprovements.length > 0 && (
-                    <div className="turn-improvements-box">
-                      {turnImprovements.map((imp, idx) => {
-                        const sugKey = `${message.turn}-${idx}`
-                        const isSugOpen = Boolean(expandedSuggestions[sugKey])
-                        return (
-                          <div key={sugKey} className="improvement-chip-block">
-                            <button
-                              className="improvement-chip"
-                              type="button"
-                              onClick={() =>
-                                setExpandedSuggestions((prev) => ({
-                                  ...prev,
-                                  [sugKey]: !prev[sugKey],
-                                }))
-                              }
-                            >
-                              <Lightbulb size={18} /> 建议 {idx + 1}：{imp.type === 'grammar_fix' ? '语法修正' : '地道表达'} {isSugOpen ? '▲' : '▼'}
-                            </button>
-                            {isSugOpen && (
-                              <div className="improvement-dropdown">
-                                <p><strong>原句：</strong><span lang="ja">{imp.originalQuoteJa}</span></p>
-                                <p><strong>建议：</strong><span lang="ja">{imp.suggestedJa}</span></p>
-                                <p><strong>原因：</strong>{imp.reasonZh}</p>
-                              </div>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-
-                  {isTurnExpanded && (
-                    <div className="transcript-details-panel">
-                      <p><strong>STT 识别原文：</strong><span lang="ja">{turnRecord?.userOriginal || message.transcript?.rawText || '（无）'}</span></p>
-                      <p><strong>系统整理稿：</strong><span lang="ja">{turnRecord?.userCleaned || message.transcript?.cleanedText || '（无）'}</span></p>
-                      <p><strong>最终提交稿：</strong><span lang="ja">{message.text}</span></p>
-                      <p><strong>是否手动修改：</strong>{turnRecord?.transcriptModified ? '是（手动调整过）' : '否（直接确认）'}</p>
-                      <p><strong>使用提示等级：</strong>{turnRecord?.hintLevelUsed ? `第 ${turnRecord.hintLevelUsed} 级` : '未用提示'}</p>
-                    </div>
-                  )}
-                </li>
-              )
-            })}
-          </ol>
-        </div>
-      )}
-
-      {activeTab === 'feedback' && (
-        <div className="review-feedback-tab">
-          {feedbackStatus === 'loading' && (
-            <div className="feedback-loading-card">
-              <span className="pulse-dot" />
-              <p>AI 教练正在分析这段对话并生成针对性反馈...</p>
-            </div>
-          )}
-
-          {feedbackStatus === 'error' && (
-            <div className="feedback-error-card" role="alert">
-              <p><strong>反馈获取失败：</strong>{feedbackErrorMsg || '网络波动或服务繁忙。'}</p>
-              <button className="primary-button" type="button" onClick={onRetryFeedback}>
-                重新生成反馈
-              </button>
-            </div>
-          )}
-
-          {feedbackStatus === 'success' && feedbackData && (
-            <div className="feedback-content">
-              <section className="feedback-section goal-summary-card">
-                <h2><Target size={16} /> 交流目标达成总结</h2>
-                <p>{feedbackData.goalSummaryZh}</p>
-              </section>
-
-              <section className="feedback-section strengths-card">
-                <h2><ThumbsUp size={18} /> 表现出色的两处（Strengths）</h2>
-                <ul className="feedback-list">
-                  {feedbackData.strengths.map((item, idx) => (
-                    <li key={idx}>
-                      <p className="feedback-quote" lang="ja">「{item.quoteJa}」</p>
-                      <p className="feedback-desc">{item.praiseZh}</p>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-
-              <section className="feedback-section improvements-card">
-                <h2><Wrench size={18} /> 改进与地道表达建议（Improvements）</h2>
-                <ul className="feedback-list">
-                  {feedbackData.improvements.map((item, idx) => (
-                    <li key={idx}>
-                      <div className="improvement-tag-row">
-                        <span className="improvement-turn-tag">第 {item.turn} 轮</span>
-                        <span className="improvement-type-tag">
-                          {item.type === 'grammar_fix' ? '语法修正' : '地道表达'}
-                        </span>
-                      </div>
-                      <p className="feedback-quote" lang="ja">原句：{item.originalQuoteJa}</p>
-                      <p className="feedback-suggestion" lang="ja"><ArrowRight size={16} /> 推荐：{item.suggestedJa}</p>
-                      <p className="feedback-desc">原因：{item.reasonZh}</p>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-
-              <section className="feedback-section expressions-card">
-                <h2><BookOpen size={18} /> 值得复用的句型表达（Reusable Expressions）</h2>
-                <div className="expressions-grid">
-                  {feedbackData.reusableExpressions.map((item, idx) => (
-                    <div key={idx} className="expression-item">
-                      <p className="expression-pattern" lang="ja"><strong>{item.patternJa}</strong></p>
-                      <p className="expression-meaning">{item.meaningZh}</p>
-                      <p className="expression-example" lang="ja">例：{item.usageExampleJa}</p>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="feedback-section master-upgrade-card">
-                <h2>⭐ 整体升级回答（Master Upgrade）</h2>
-                <p className="upgrade-meta">基于第 {feedbackData.masterUpgrade.turn} 轮回答的高阶进阶版本：</p>
-                <div className="upgrade-compare">
-                  <div className="compare-col original">
-                    <span>原表达</span>
-                    <p lang="ja"><RubyText text={annotateRuby(feedbackData.masterUpgrade.originalJa)} showRuby={showRuby} /></p>
-                  </div>
-                  <div className="compare-col upgraded">
-                    <span>高阶表达</span>
-                    <p lang="ja"><RubyText text={annotateRuby(feedbackData.masterUpgrade.upgradedJa)} showRuby={showRuby} /></p>
-                  </div>
-                </div>
-                <p className="upgrade-explanation">{feedbackData.masterUpgrade.explanationZh}</p>
-              </section>
-
-              <section className="feedback-section retry-task-card">
-                <h2><Target size={16} /> 针对性单句重说（Targeted Retry）</h2>
-                <div className="retry-task-context">
-                  <p><strong>相手当时问题 (第 {feedbackData.retryTask.turn} 轮)：</strong><span lang="ja">{feedbackData.retryTask.targetAiPromptJa}</span></p>
-                  <p><strong>你的第一次回答：</strong><span lang="ja">{feedbackData.retryTask.userOriginalJa}</span></p>
-                  <div className="retry-ref-row">
-                    <p><strong>推荐参考句：</strong><span lang="ja"><RubyText text={annotateRuby(feedbackData.retryTask.recommendedReferenceJa)} showRuby={showRuby} /></span></p>
-                    <button
-                      className="text-button play-ref-btn"
-                      type="button"
-                      onClick={() => onReplayAi(feedbackData.retryTask.recommendedReferenceJa)}
-                    >
-                      <Volume2 size={16} /> 听参考表达
-                    </button>
-                  </div>
-                  <p className="retry-hint"><Lightbulb size={18} /> 中文思路提示：{feedbackData.retryTask.hintZh}</p>
-                </div>
-
-                {retryErrorMsg && <p className="inline-error" role="alert">{retryErrorMsg}</p>}
-
-                {retryAudioState === 'idle' && (
-                  <div className="retry-actions">
-                    <button className="primary-button retry-mic-btn" type="button" onClick={() => void handleStartRetryRecord()}>
-                      <Mic size={18} /> 开始重说 (录音)
-                    </button>
-                    <button
-                      className="text-button retry-text-toggle"
-                      type="button"
-                      onClick={() => {
-                        setRetryInputMode('text')
-                        setRetryAudioState('confirming')
-                        setRetryTranscript('')
-                      }}
-                    >
-                      改用文字重说
-                    </button>
-                  </div>
-                )}
-
-                {retryAudioState === 'recording' && (
-                  <div className="retry-recording-panel">
-                    <div className="recording-label">
-                      <span />
-                      <strong>正在听你重说...</strong>
-                    </div>
-                    <p className="live-transcript" lang="ja">{retryTranscript || '（请开口说话）'}</p>
-                    <button className="primary-button finish-button" type="button" onClick={() => void handleStopRetryRecord()}>
-                      说完了，确认转写
-                    </button>
-                  </div>
-                )}
-
-                {retryAudioState === 'confirming' && (
-                  <div className="retry-confirming-panel">
-                    <label htmlFor="retry-text-input"><strong>确认重说内容：</strong></label>
-                    <textarea
-                      id="retry-text-input"
-                      className="retry-textarea"
-                      value={retryTranscript}
-                      onChange={(e) => setRetryTranscript(e.target.value)}
-                      lang="ja"
-                      rows={3}
-                    />
-                    <div className="retry-confirm-buttons">
-                      <button className="secondary-button" type="button" onClick={() => void handleStartRetryRecord()}>
-                        重新录音
-                      </button>
-                      <button className="primary-button" type="button" onClick={() => handleConfirmRetry(retryTranscript)}>
-                        确认完成重说
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {retryAudioState === 'completed' && (
-                  <div className="retry-completed-panel">
-                    <h3><Sparkles size={18} /> 第一次 vs 这次重说 文本对比</h3>
-                    <div className="retry-comparison-grid">
-                      <div className="retry-comp-col original">
-                        <span>第一次回答</span>
-                        <p lang="ja">{feedbackData.retryTask.userOriginalJa}</p>
-                      </div>
-                      <div className="retry-comp-col retried">
-                        <span>重说回答</span>
-                        <p lang="ja">{retryFinalText}</p>
-                      </div>
-                    </div>
-                    <div className="retry-re-actions">
-                      <button
-                        className="text-button"
-                        type="button"
-                        onClick={() => {
-                          setRetryAudioState('idle')
-                          setRetryFinalText('')
-                          setRetryTranscript('')
-                        }}
-                      >
-                        再重说一次
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </section>
-            </div>
-          )}
         </div>
       )}
 
       <details className="developer-disclosure">
         <summary>开发信息</summary>
-        <div className="completion-totals">
-          <div><span>总时长</span><strong>{formatDuration(report.durationMilliseconds)}</strong></div>
-          <div><span>重录</span><strong>{report.totals.rerecordCount}</strong></div>
-          <div><span>失败 / 重试</span><strong>{report.totals.failureCount} / {report.totals.retryCount}</strong></div>
-        </div>
-        <div className="round-table-wrap">
-          <table className="round-table">
-            <thead>
-              <tr>
-                <th>轮次</th>
-                <th>说完→转写</th>
-                <th>提交→首字</th>
-                <th>回复→播放</th>
-                <th>修改</th>
-                <th>重录</th>
-                <th>提示</th>
-              </tr>
-            </thead>
-            <tbody>
-              {report.rounds.map((round) => (
-                <tr key={round.turn}>
-                  <td>{round.turn}</td>
-                  <td>{formatDuration(duration(round.timing.recordingStoppedAt, round.timing.transcriptFinalizedAt))}</td>
-                  <td>{formatDuration(duration(round.timing.transcriptConfirmedAt, round.timing.llmFirstTextAt))}</td>
-                  <td>{formatDuration(duration(round.timing.llmCompletedAt, round.timing.audioStartedAt))}</td>
-                  <td>{round.transcriptModified ? '是' : '否'}</td>
-                  <td>{round.rerecordCount}</td>
-                  <td>{round.hintLevelUsed > 0 ? `L${round.hintLevelUsed}` : '-'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <dl className="usage-list">
-          <div><dt>输入 token</dt><dd>{report.totals.inputTokens ?? '未返回'}</dd></div>
-          <div><dt>输出 token</dt><dd>{report.totals.outputTokens ?? '未返回'}</dd></div>
-          <div><dt>录音会话 / 音频</dt><dd>{report.totals.sttSessionCount} / {formatDuration(report.totals.sttAudioMilliseconds)}</dd></div>
-          <div><dt>语音请求 / 字符</dt><dd>{report.totals.ttsRequestCount} / {report.totals.ttsCharacterCount}</dd></div>
-        </dl>
-        <div className="developer-actions">
-          <button className="secondary-button" type="button" onClick={onCopy}>复制 JSON</button>
-          <button className="text-button" type="button" onClick={onDownload}>下载 JSON</button>
-          {copyStatus && <span role="status">{copyStatus}</span>}
-        </div>
-        <div className="data-note"><p>对话记录和用量只用于本次开发观察。</p></div>
+        <p>会话 {messages.length} 条消息，{rounds.length} 个原始回合，{report.redos.length} 个重做记录。</p>
+        <div className="developer-actions"><button className="secondary-button" type="button" onClick={onCopy}>复制 JSON</button><button className="text-button" type="button" onClick={onDownload}>下载 JSON</button>{copyStatus && <span role="status">{copyStatus}</span>}</div>
       </details>
-
-      <div className="complete-actions">
-        <button className="primary-button" type="button" onClick={onNext}>再来一个</button>
-        <button className="secondary-button" type="button" onClick={onPractice}>重练这个</button>
-      </div>
+      <div className="complete-actions"><button className="primary-button" type="button" onClick={onNewScenario}>开始新场景</button></div>
     </div>
   )
 }

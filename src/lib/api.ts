@@ -1,23 +1,34 @@
+/**
+ * [INPUT]: 依赖 zod、../types、../../shared/listening-scaffold 与 ../../shared/speech-assist 的跨端 API 协议
+ * [OUTPUT]: 对外提供配置、动态会话、回复、提示、反馈、重做、四级听力支架与语音续说辅助请求函数及响应校验
+ * [POS]: src/lib 的 HTTP 通信边界，负责序列化前端请求并严格验证服务端结构化响应
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { z } from 'zod'
+import {
+  ListeningScaffoldResponseSchema,
+  type ListeningScaffoldRequest,
+  type ListeningScaffoldResponse,
+} from '../../shared/listening-scaffold'
+import {
+  SpeechAssistResponseSchema,
+  type SpeechAssistRequest,
+  type SpeechAssistResponse,
+} from '../../shared/speech-assist'
 import type {
   ConversationFeedbackRequest,
   ConversationFeedbackResponse,
   ConversationMessage,
   PrototypeConfig,
-  RescueResponse,
+  RedoFeedbackRequest,
+  RedoFeedbackResponse,
   RoundRecord,
   SessionScenario,
   UsageSummary,
 } from '../types'
-const ScenarioCatalogSchema = z.array(z.object({
-  id: z.string().min(1),
-  version: z.number().int().positive(),
-}))
-
 const ConfigSchema = z.object({
   mode: z.enum(['real', 'partial', 'mock']),
-  limits: z.object({ maxTurns: z.number().int().min(1).max(5) }),
-  scenarioCatalog: ScenarioCatalogSchema,
+  limits: z.object({ maxTurns: z.literal(5) }),
   elevenlabs: z.object({
     sttAvailable: z.boolean(),
     ttsAvailable: z.boolean(),
@@ -30,15 +41,6 @@ const ConfigSchema = z.object({
     model: z.string().min(1),
     mockAllowed: z.boolean(),
   }),
-})
-
-const SessionStartSchema = z.object({
-  scenarioId: z.string().min(1),
-  scenarioVersion: z.number().int().positive(),
-  variantId: z.string().min(1),
-  firstLine: z.string().min(1),
-  maxTurns: z.number().int().min(1).max(5),
-  reveal: z.object({ titleZh: z.string().min(1), summaryZh: z.string().min(1) }),
 })
 
 const TokenSchema = z.object({ token: z.string().min(10), expiresInSeconds: z.number().positive() })
@@ -59,90 +61,39 @@ const StreamEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('error'), code: z.string(), message: z.string() }),
 ])
 
-const FORBIDDEN_EVALUATION_PATTERNS = /(?:发音|声调|口音|语调|情绪|発音|声調|アクセント|イントネーション|\b(?:[1-9]\d?|100)分\b|★|⭐|星[1-5一二三四五]|得分)/
+const FORBIDDEN_EVALUATION_PATTERNS = /(?:能力等级|掌握|肌肉记忆|发音|声调|口音|语调|情绪|発音|声調|アクセント|イントネーション|得分|评分|★|⭐)/
 
-const FeedbackStrengthItemSchema = z
-  .object({
-    quoteJa: z.string().trim().min(1),
-    praiseZh: z.string().trim().min(1).refine(
-      (val) => !FORBIDDEN_EVALUATION_PATTERNS.test(val),
-      'Forbidden mention of pronunciation, tone, accent, score, or emotion in feedback.',
-    ),
-  })
-  .strict()
+const FeedbackTextSchema = z.string().trim().min(1).refine(
+  (value) => !FORBIDDEN_EVALUATION_PATTERNS.test(value),
+  'Feedback contains a forbidden ability or pronunciation claim.',
+)
 
-const FeedbackImprovementItemSchema = z
-  .object({
-    turn: z.number().int().min(1),
-    type: z.enum(['grammar_fix', 'naturalness_upgrade']),
-    originalQuoteJa: z.string().trim().min(1),
+export const FeedbackResponseSchema = z.object({
+  outcome: z.enum(['completed', 'partial', 'not_completed', 'insufficient_evidence']),
+  outcomeEvidenceZh: FeedbackTextSchema,
+  listeningFinding: z.object({
+    turn: z.number().int().min(1).max(5),
+    findingZh: FeedbackTextSchema,
+    evidenceZh: FeedbackTextSchema,
+  }).strict().nullable(),
+  expressionImprovement: z.object({
+    turn: z.number().int().min(1).max(5),
+    userConfirmedJa: z.string().trim().min(1),
     suggestedJa: z.string().trim().min(1),
-    reasonZh: z.string().trim().min(1).refine(
-      (val) => !FORBIDDEN_EVALUATION_PATTERNS.test(val),
-      'Forbidden mention of pronunciation, tone, accent, score, or emotion in feedback.',
-    ),
-  })
-  .strict()
+    reasonZh: FeedbackTextSchema,
+  }).strict().nullable(),
+  redoTask: z.object({
+    turn: z.number().int().min(1).max(5),
+    partnerPromptJa: z.string().trim().min(1),
+    firstConfirmedJa: z.string().trim().min(1),
+    directionZh: FeedbackTextSchema,
+  }).strict(),
+}).strict()
 
-const FeedbackReusableExpressionSchema = z
-  .object({
-    patternJa: z.string().trim().min(1),
-    meaningZh: z.string().trim().min(1).refine(
-      (val) => !FORBIDDEN_EVALUATION_PATTERNS.test(val),
-      'Forbidden mention of pronunciation, tone, accent, score, or emotion in feedback.',
-    ),
-    usageExampleJa: z.string().trim().min(1),
-  })
-  .strict()
-
-const FeedbackMasterUpgradeSchema = z
-  .object({
-    turn: z.number().int().min(1),
-    originalJa: z.string().trim().min(1),
-    upgradedJa: z.string().trim().min(1),
-    explanationZh: z.string().trim().min(1).refine(
-      (val) => !FORBIDDEN_EVALUATION_PATTERNS.test(val),
-      'Forbidden mention of pronunciation, tone, accent, score, or emotion in feedback.',
-    ),
-  })
-  .strict()
-
-const FeedbackRetryTaskSchema = z
-  .object({
-    turn: z.number().int().min(1),
-    targetAiPromptJa: z.string().trim().min(1),
-    userOriginalJa: z.string().trim().min(1),
-    recommendedReferenceJa: z.string().trim().min(1),
-    hintZh: z.string().trim().min(1).refine(
-      (val) => !FORBIDDEN_EVALUATION_PATTERNS.test(val),
-      'Forbidden mention of pronunciation, tone, accent, score, or emotion in feedback.',
-    ),
-  })
-  .strict()
-
-
-const RescueResponseSchema = z
-  .object({
-    interpretedIntentZh: z.string().trim().min(1),
-    suggestedJa: z.string().trim().min(1),
-    suggestedJaRuby: z.string().trim().min(1).optional(),
-    politenessTipZh: z.string().trim().min(1),
-  })
-  .strict()
-export const FeedbackResponseSchema = z
-  .object({
-    isGoalCompleted: z.boolean(),
-    goalSummaryZh: z.string().trim().min(1).refine(
-      (val) => !FORBIDDEN_EVALUATION_PATTERNS.test(val),
-      'Forbidden mention of pronunciation, tone, accent, score, or emotion in feedback.',
-    ),
-    strengths: z.array(FeedbackStrengthItemSchema).length(2),
-    improvements: z.array(FeedbackImprovementItemSchema).min(1).max(3),
-    reusableExpressions: z.array(FeedbackReusableExpressionSchema).length(2),
-    masterUpgrade: FeedbackMasterUpgradeSchema,
-    retryTask: FeedbackRetryTaskSchema,
-  })
-  .strict()
+const RedoFeedbackResponseSchema = z.object({
+  comparisonZh: FeedbackTextSchema,
+  referenceExpressionJa: z.string().trim().min(1),
+}).strict()
 export class ApiError extends Error {
   readonly code: string
   readonly status: number
@@ -178,48 +129,29 @@ export async function fetchConfig(signal?: AbortSignal): Promise<PrototypeConfig
 }
 
 export async function startScenarioSession(
-  scenarioIdOrToken: { scenarioId: string } | { scenarioToken: string },
+  scenarioToken: string,
   signal?: AbortSignal,
 ): Promise<SessionScenario> {
-  const isDynamic = 'scenarioToken' in scenarioIdOrToken
-  const body = isDynamic
-    ? { type: 'dynamic', scenarioToken: scenarioIdOrToken.scenarioToken }
-    : { type: 'catalog', scenarioId: scenarioIdOrToken.scenarioId }
-
   const response = await fetch('/api/session/start', {
     method: 'POST',
     signal,
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ type: 'dynamic', scenarioToken }),
   })
   if (!response.ok) throw await errorFromResponse(response)
   const data = (await response.json()) as Record<string, unknown>
-
-  if (isDynamic) {
-    return {
-      id: (data.scenario as { id: string }).id,
-      version: (data.scenario as { version: number }).version,
-      variantId: 'dynamic-variant',
-      firstLine: data.firstLine as string,
-      maxTurns: data.maxTurns as number,
-      recommendedMinTurns: data.recommendedMinTurns as number,
-      recommendedMaxTurns: data.recommendedMaxTurns as number,
-      scenarioType: 'dynamic',
-      sessionToken: data.sessionToken as string,
-      scenarioToken: scenarioIdOrToken.scenarioToken,
-      dynamicData: data.scenario as SessionScenario['dynamicData'],
-      reveal: data.reveal as SessionScenario['reveal'],
-    }
-  }
-  const session = SessionStartSchema.parse(data)
+  const dynamicData = data.scenario as SessionScenario['dynamicData']
   return {
-    id: session.scenarioId,
-    version: session.scenarioVersion,
-    variantId: session.variantId,
-    firstLine: session.firstLine,
-    maxTurns: session.maxTurns,
-    scenarioType: 'catalog',
-    reveal: session.reveal,
+    id: dynamicData.id,
+    version: dynamicData.version,
+    variantId: 'dynamic-variant',
+    firstLine: data.firstLine as string,
+    maxTurns: 5,
+    scenarioType: 'dynamic',
+    sessionToken: data.sessionToken as string,
+    scenarioToken,
+    dynamicData,
+    reveal: data.reveal as SessionScenario['reveal'],
   }
 }
 export async function requestElevenLabsToken(
@@ -247,32 +179,17 @@ export async function streamReply(
   sessionId: string,
   turn: number,
   messages: ConversationMessage[],
-  scenario: Pick<SessionScenario, 'id' | 'version' | 'variantId' | 'scenarioType' | 'sessionToken'>,
+  scenario: Pick<SessionScenario, 'sessionToken'>,
   onFirstText: () => void,
   signal?: AbortSignal,
-  model?: string,
-  baseUrl?: string,
 ): Promise<ReplyResult> {
-  const isDynamic = scenario.scenarioType === 'dynamic' && Boolean(scenario.sessionToken)
-  const body = isDynamic
-    ? {
-        scenarioType: 'dynamic',
-        sessionId,
-        sessionToken: scenario.sessionToken,
-        turn,
-        history: messages.map(({ role, text }) => ({ role, text })),
-      }
-    : {
-        scenarioType: 'catalog',
-        sessionId,
-        turn,
-        scenarioId: scenario.id,
-        scenarioVersion: scenario.version,
-        variantId: scenario.variantId,
-        model: model?.trim() || undefined,
-        baseUrl: baseUrl?.trim() || undefined,
-        history: messages.map(({ role, text }) => ({ role, text })),
-      }
+  const body = {
+    scenarioType: 'dynamic',
+    sessionId,
+    sessionToken: scenario.sessionToken,
+    turn,
+    history: messages.map(({ role, text }) => ({ role, text })),
+  }
 
   const response = await fetch('/api/respond', {
     method: 'POST',
@@ -338,21 +255,12 @@ export async function fetchHint(
   history: ConversationMessage[],
   signal?: AbortSignal,
 ): Promise<import('../types').HintResponse> {
-  const isDynamic = scenario.scenarioType === 'dynamic' && Boolean(scenario.sessionToken)
-  const body = isDynamic
-    ? {
-        scenarioType: 'dynamic',
-        sessionToken: scenario.sessionToken,
-        lastAssistantText,
-        history: history.map(({ role, text }) => ({ role, text })),
-      }
-    : {
-        scenarioType: 'catalog',
-        scenarioId: scenario.id,
-        variantId: scenario.variantId,
-        lastAssistantText,
-        history: history.map(({ role, text }) => ({ role, text })),
-      }
+  const body = {
+    scenarioType: 'dynamic',
+    sessionToken: scenario.sessionToken,
+    lastAssistantText,
+    history: history.map(({ role, text }) => ({ role, text })),
+  }
 
   const response = await fetch('/api/hint', {
     method: 'POST',
@@ -364,116 +272,90 @@ export async function fetchHint(
   return response.json() as Promise<import('../types').HintResponse>
 }
 
-export async function fetchRescueAnalysis(
-  scenario: SessionScenario,
-  turn: number,
-  aiPrompt: string,
-  userFinal: string,
-  history: ConversationMessage[],
+export async function requestListeningScaffold(
+  request: ListeningScaffoldRequest,
   signal?: AbortSignal,
-): Promise<RescueResponse> {
-  const isDynamic = scenario.scenarioType === 'dynamic'
-  const body = isDynamic
-    ? {
-        scenarioType: 'dynamic',
-        sessionToken: scenario.sessionToken,
-        dynamicData: scenario.dynamicData,
-        turn,
-        aiPrompt,
-        userFinal,
-        history: history.map(({ role, text }) => ({ role, text })),
-      }
-    : {
-        scenarioType: 'catalog',
-        scenarioId: scenario.id,
-        variantId: scenario.variantId,
-        turn,
-        aiPrompt,
-        userFinal,
-        history: history.map(({ role, text }) => ({ role, text })),
-      }
-
-  const response = await fetch('/api/rescue', {
+): Promise<ListeningScaffoldResponse> {
+  const response = await fetch('/api/listening-scaffold', {
     method: 'POST',
     signal,
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify(request),
   })
   if (!response.ok) throw await errorFromResponse(response)
-  const data = await response.json()
-  return RescueResponseSchema.parse(data)
+  return ListeningScaffoldResponseSchema.parse(await response.json())
 }
 
-export async function checkSessionCheckpoint(
-  sessionToken: string,
-  turn: number,
-  history: ConversationMessage[],
-  signal?: AbortSignal,
-): Promise<import('../types').SessionCheckpointResponse> {
-  const response = await fetch('/api/session/checkpoint', {
-    method: 'POST',
-    signal,
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({
-      sessionToken,
-      turn,
-      history: history.map(({ role, text }) => ({ role, text })),
-    }),
-  })
-  if (!response.ok) throw await errorFromResponse(response)
-  return response.json() as Promise<import('../types').SessionCheckpointResponse>
-}
 
 export function buildFeedbackRequestPayload(
-  scenario: Pick<SessionScenario, 'id' | 'variantId' | 'scenarioType' | 'sessionToken'>,
-  messages: ConversationMessage[],
+  scenario: Pick<SessionScenario, 'sessionToken'>,
   rounds: RoundRecord[],
 ): ConversationFeedbackRequest {
-  const isDynamic = scenario.scenarioType === 'dynamic' || Boolean(scenario.sessionToken)
-  const history = messages.map(({ role, text }) => ({ role, text }))
-  const transcriptRecords = rounds.map((record, index) => ({
-    turn: record.turn || index + 1,
-    aiPrompt: record.aiPrompt,
-    userOriginal: record.userOriginal,
-    userCleaned: record.userCleaned,
-    userFinal: record.userFinal,
-  }))
-  const totalTurns = rounds.length
-
-  if (isDynamic) {
-    return {
-      scenarioType: 'dynamic',
-      sessionToken: scenario.sessionToken ?? '',
-      totalTurns,
-      history,
-      transcriptRecords,
-    }
-  }
-
   return {
-    scenarioType: 'catalog',
-    scenarioId: scenario.id,
-    variantId: scenario.variantId,
-    totalTurns,
-    history,
-    transcriptRecords,
+    scenarioType: 'dynamic',
+    sessionToken: scenario.sessionToken,
+    turnRecords: rounds.map((record, index) => ({
+      turn: record.turn || index + 1,
+      partnerPromptJa: record.aiPrompt,
+      userOriginal: record.userOriginal,
+      userCleaned: record.userCleaned,
+      userConfirmed: record.userFinal,
+      inputMode: record.inputMode,
+      transcriptModified: record.transcriptModified,
+      rerecordCount: record.rerecordCount,
+      partnerAudioPlayCount: (record.timing.audioStartedAt === null ? 0 : 1) + record.ttsReplayCount,
+      ttsReplayCount: record.ttsReplayCount,
+      transcriptRevealed: record.transcriptRevealed,
+      listeningScaffoldLevel: record.listeningScaffoldLevel,
+      expressionScaffoldLevel: record.expressionScaffoldLevel,
+      failureCount: record.failureCount,
+      retryCount: record.retryCount,
+      textFallback: record.inputMode === 'text',
+      speechAssistUsed: record.speechAssistEvents.some((event) => event.displayed),
+    })),
   }
 }
 
 export async function requestConversationFeedback(
-  scenario: Pick<SessionScenario, 'id' | 'variantId' | 'scenarioType' | 'sessionToken'>,
-  messages: ConversationMessage[],
+  scenario: Pick<SessionScenario, 'sessionToken'>,
   rounds: RoundRecord[],
   signal?: AbortSignal,
 ): Promise<ConversationFeedbackResponse> {
-  const payload = buildFeedbackRequestPayload(scenario, messages, rounds)
   const response = await fetch('/api/conversation/feedback', {
     method: 'POST',
     signal,
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(buildFeedbackRequestPayload(scenario, rounds)),
   })
   if (!response.ok) throw await errorFromResponse(response)
-  const rawJson = await response.json()
-  return FeedbackResponseSchema.parse(rawJson)
+  return FeedbackResponseSchema.parse(await response.json())
+}
+
+export async function requestRedoFeedback(
+  request: RedoFeedbackRequest,
+  signal?: AbortSignal,
+): Promise<RedoFeedbackResponse> {
+  const response = await fetch('/api/conversation/redo-feedback', {
+    method: 'POST',
+    signal,
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!response.ok) throw await errorFromResponse(response)
+  return RedoFeedbackResponseSchema.parse(await response.json())
+}
+
+
+export async function requestSpeechAssist(
+  request: SpeechAssistRequest,
+  signal?: AbortSignal,
+): Promise<SpeechAssistResponse> {
+  const response = await fetch('/api/speech/assist', {
+    method: 'POST',
+    signal,
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!response.ok) throw await errorFromResponse(response)
+  return SpeechAssistResponseSchema.parse(await response.json())
 }

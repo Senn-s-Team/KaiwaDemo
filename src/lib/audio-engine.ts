@@ -1,5 +1,17 @@
+/**
+ * [INPUT]: 依赖 Web AudioContext 与 navigator.mediaDevices 录音硬件流
+ * [OUTPUT]: 对外提供 requestMicrophoneStream（含 single-flight 与取消废弃防护）、releaseMicrophoneStream、isPermissionRequesting、shouldTeardownOnVisibility、MicrophoneAudioPipeline、AudioRingBuffer、isMicrophoneTrackReady 等音频底层接口
+ * [POS]: src/lib 的音频底层引擎，管理全局共享 AudioContext/MediaStream 生命周期并挂载重采样与采样处理器
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 export class SttError extends Error {
-  readonly code: 'permission_denied' | 'device_missing' | 'token_expired' | 'connection_failed' | 'finalize_timeout'
+  readonly code:
+    | 'permission_denied'
+    | 'device_missing'
+    | 'token_expired'
+    | 'connection_failed'
+    | 'finalize_timeout'
+    | 'no_speech_detected'
 
   constructor(code: SttError['code'], message: string) {
     super(message)
@@ -21,10 +33,16 @@ const TARGET_SAMPLE_RATE = 16_000
 
 let sharedAudioContext: AudioContext | null = null
 let sharedMicrophoneStream: MediaStream | null = null
+let inFlightMicPromise: Promise<MediaStream> | null = null
+let micRequestEpoch = 0
 let isRequestingPermission = false
 
-export function setPermissionRequesting(state: boolean): void {
-  isRequestingPermission = state
+export function isPermissionRequesting(): boolean {
+  return isRequestingPermission
+}
+
+export function shouldTeardownOnVisibility(hidden: boolean): boolean {
+  return hidden && !isRequestingPermission
 }
 
 export function getSharedAudioContext(): AudioContext {
@@ -52,33 +70,59 @@ export async function requestMicrophoneStream(): Promise<MediaStream> {
     releaseMicrophoneStream()
   }
 
+  if (inFlightMicPromise) {
+    return inFlightMicPromise
+  }
+
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new SttError('device_missing', '当前设备不支持网页录音。')
   }
 
-  try {
-    isRequestingPermission = true
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        channelCount: 1,
-      },
-      video: false,
-    })
+  const currentEpoch = micRequestEpoch
+  isRequestingPermission = true
 
-    sharedMicrophoneStream = stream
-    return stream
-  } catch (error) {
-    const readiness = microphoneReadinessFromError(error)
-    if (readiness === 'denied') {
-      throw new SttError('permission_denied', '麦克风权限被拒绝。请在浏览器设置中允许麦克风。')
+  const executeRequest = async (): Promise<MediaStream> => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+        video: false,
+      })
+
+      // 如果在 getUserMedia 挂起期间调用了 releaseMicrophoneStream()，当前请求已经作废
+      if (currentEpoch !== micRequestEpoch) {
+        for (const track of stream.getTracks()) {
+          track.stop()
+        }
+        throw new SttError('device_missing', '麦克风请求已被取消或重置。')
+      }
+
+      sharedMicrophoneStream = stream
+      return stream
+    } catch (error) {
+      if (error instanceof SttError) {
+        throw error
+      }
+      const readiness = microphoneReadinessFromError(error)
+      if (readiness === 'denied') {
+        throw new SttError('permission_denied', '麦克风权限被拒绝。请在浏览器设置中允许麦克风。')
+      }
+      throw new SttError('device_missing', '没有可用麦克风。请连接输入设备或改用文字回答。')
+    } finally {
+      if (currentEpoch === micRequestEpoch) {
+        inFlightMicPromise = null
+        isRequestingPermission = false
+      }
     }
-    throw new SttError('device_missing', '没有可用麦克风。请连接输入设备或改用文字回答。')
-  } finally {
-    isRequestingPermission = false
   }
+
+  const promise = executeRequest()
+  inFlightMicPromise = promise
+  return promise
 }
 
 export function isMicrophoneTrackReady(
@@ -94,6 +138,9 @@ export function getMicrophoneTrack(): MediaStreamTrack | null {
 }
 
 export function releaseMicrophoneStream(): void {
+  micRequestEpoch += 1
+  inFlightMicPromise = null
+  isRequestingPermission = false
   if (sharedMicrophoneStream) {
     for (const track of sharedMicrophoneStream.getTracks()) {
       track.stop()
@@ -105,7 +152,7 @@ export function releaseMicrophoneStream(): void {
 // 监听页面可见性与卸载事件，离开前台或关闭页面时立即彻底销毁硬件占用
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && !isRequestingPermission) {
+    if (shouldTeardownOnVisibility(document.hidden)) {
       releaseMicrophoneStream()
     }
   })

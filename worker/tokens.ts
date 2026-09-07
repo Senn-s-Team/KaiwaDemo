@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 zod、Worker 环境密钥与 types 中的动态场景、场景 token、会话 token 契约
+ * [OUTPUT]: 对外提供场景与会话 token 的签名、验证、claims 类型和结构化 TokenError
+ * [POS]: worker 的可信边界，以严格 schema 保证签名和验签都完整保存五轮动态场景契约并拒绝 legacy claims
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { z } from 'zod'
 import type {
   DynamicScenarioDefinition,
@@ -26,30 +32,39 @@ const trainingGoalSchema = z.object({
   descriptionZh: z.string().trim().min(1),
 }).strict()
 
+const completionRulesSchema = z.object({
+  completed: z.array(z.string().trim().min(1)).min(1),
+  partial: z.array(z.string().trim().min(1)).min(1),
+  notCompleted: z.array(z.string().trim().min(1)).min(1),
+}).strict()
+
 const dynamicScenarioSchema = z.object({
   id: z.string().trim().min(1),
-  version: z.number().int().nonnegative(),
+  version: z.number().int().positive(),
   titleZh: z.string().trim().min(1),
   summaryZh: z.string().trim().min(1),
   aiRole: z.string().trim().min(1),
   userRole: z.string().trim().min(1),
   relationship: z.string().trim().min(1),
   tone: z.string().trim().min(1),
+  communicationFunction: z.string().trim().min(1),
   firstLine: z.string().trim().min(1),
+  partnerOpeningPlan: z.string().trim().min(1),
   userGoal: z.string().trim().min(1),
-  coreGoals: z.array(trainingGoalSchema).min(1).max(3),
-  optionalGoals: z.array(trainingGoalSchema).max(2),
+  coreGoal: trainingGoalSchema,
+  initialFacts: z.array(z.string().trim().min(1)).min(1),
+  partnerPrivateFacts: z.array(z.string().trim().min(1)),
+  keyIntents: z.array(z.string().trim().min(1)).min(1),
+  keyInformation: z.array(z.string().trim().min(1)).min(1),
+  completionRules: completionRulesSchema,
+  closingRules: z.array(z.string().trim().min(1)).min(1),
+  maxTurns: z.literal(5),
   worldAnchors: z.array(z.string().trim().min(1)).min(1),
   followUpPrinciples: z.array(z.string().trim().min(1)).min(1),
   hintStrategy: z.string().trim().min(1),
   feedbackFocus: z.array(z.string().trim().min(1)).min(1),
   safetyBoundary: z.string().trim().min(1),
-  recommendedMinTurns: z.number().int().min(1).max(20),
-  recommendedMaxTurns: z.number().int().min(1).max(20),
-}).strict().refine(
-  ({ recommendedMinTurns, recommendedMaxTurns }) => recommendedMinTurns <= recommendedMaxTurns,
-  'recommendedMinTurns must not exceed recommendedMaxTurns.',
-)
+}).strict()
 
 const scenarioTokenSchema = z.object({
   schemaVersion: z.literal(TOKEN_SCHEMA_VERSION),
@@ -65,7 +80,6 @@ const sessionTokenSchema = z.object({
   issuedAt: z.number().int().nonnegative(),
   expiresAt: z.number().int().nonnegative(),
   scenario: dynamicScenarioSchema,
-  cap: z.union([z.literal(10), z.literal(14), z.literal(20)]),
   startedAt: z.number().int().nonnegative(),
 }).strict().refine(({ issuedAt, expiresAt }) => expiresAt > issuedAt, 'expiresAt must be after issuedAt.')
 
@@ -106,7 +120,6 @@ export interface ScenarioTokenClaims {
 
 export interface SessionTokenClaims {
   scenario: DynamicScenarioDefinition
-  cap: SessionTokenPayload['cap']
   startedAt: number
   expiresAt: number
   issuedAt?: number
@@ -131,7 +144,6 @@ export async function signSessionToken(env: Env, claims: SessionTokenClaims): Pr
     issuedAt: claims.issuedAt ?? Date.now(),
     expiresAt: claims.expiresAt,
     scenario: claims.scenario,
-    cap: claims.cap,
     startedAt: claims.startedAt,
   }
 

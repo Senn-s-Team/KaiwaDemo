@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 Worker 环境、HTTP 边界、token、严格请求校验及各模型编排入口
+ * [OUTPUT]: 对外提供配置、场景、会话、回复、反馈、四级听力支架与语音服务的同源 API 路由
+ * [POS]: Worker 请求入口，统一执行方法、同源、JSON 大小、鉴权与错误响应边界
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { DEFAULT_MODELS, LIMITS } from './constants'
 import { createElevenLabsToken } from './elevenlabs'
 import type { Env } from './env'
@@ -13,12 +19,12 @@ import {
   draftScenario,
   generateConversationFeedback,
   generateHint,
-  generateRescueAnalysis,
-  generateSessionCheckpoint,
+  generateListeningScaffold,
+  generateRedoFeedback,
+  generateSpeechAssist,
   ScenarioDraftError,
   streamOpenAiReply,
 } from './openai'
-import { getScenarioCatalog, startScenario } from './scenarios'
 import {
   signScenarioToken,
   signSessionToken,
@@ -28,11 +34,12 @@ import {
 import {
   parseConversationFeedbackRequest,
   parseHintRequest,
+  parseListeningScaffoldRequest,
+  parseRedoFeedbackRequest,
   parseReplyRequest,
-  parseRescueRequest,
   parseScenarioDraftRequest,
-  parseSessionCheckpointRequest,
   parseSessionStartRequest,
+  parseSpeechAssistRequest,
   parseTokenRequest,
   ValidationError,
 } from './validation'
@@ -41,11 +48,14 @@ function configResponse(env: Env): Response {
   const elevenlabsConfigured = Boolean(env.ELEVENLABS_API_KEY)
   const ttsConfigured = elevenlabsConfigured && Boolean(env.ELEVENLABS_VOICE_ID)
   const openaiConfigured = Boolean(env.OPENAI_API_KEY)
-  const mode = elevenlabsConfigured && ttsConfigured && openaiConfigured ? 'real' : env.ALLOW_MOCK === 'true' ? 'mock' : 'partial'
+  const mode = elevenlabsConfigured && ttsConfigured && openaiConfigured
+    ? 'real'
+    : env.ALLOW_MOCK === 'true'
+      ? 'mock'
+      : 'partial'
 
   return json({
     mode,
-    scenarioCatalog: getScenarioCatalog(),
     limits: { maxTurns: LIMITS.maxTurns },
     elevenlabs: {
       sttAvailable: elevenlabsConfigured,
@@ -95,35 +105,27 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     if (request.method !== 'POST') return methodNotAllowed('POST')
     const body = await readJsonBody(request, LIMITS.requestBytes)
     const startRequest = parseSessionStartRequest(body)
+    const scenarioPayload = await verifyScenarioToken(env, startRequest.scenarioToken)
+    const startedAt = Date.now()
+    const sessionId = `dyn_ses_${crypto.randomUUID().replaceAll('-', '')}`
+    const sessionToken = await signSessionToken(env, {
+      scenario: scenarioPayload.scenario,
+      startedAt,
+      expiresAt: startedAt + LIMITS.sessionTokenTtlMs,
+    })
 
-    if (startRequest.type === 'dynamic') {
-      const scenarioPayload = await verifyScenarioToken(env, startRequest.scenarioToken)
-      const startedAt = Date.now()
-      const sessionId = `dyn_ses_${crypto.randomUUID().replaceAll('-', '')}`
-      const sessionToken = await signSessionToken(env, {
-        scenario: scenarioPayload.scenario,
-        cap: LIMITS.initialCap,
-        startedAt,
-        expiresAt: startedAt + LIMITS.sessionTokenTtlMs,
-      })
-
-      return json({
-        sessionId,
-        scenarioType: 'dynamic',
-        sessionToken,
-        scenario: scenarioPayload.scenario,
-        firstLine: scenarioPayload.scenario.firstLine,
-        maxTurns: LIMITS.initialCap,
-        recommendedMinTurns: scenarioPayload.scenario.recommendedMinTurns,
-        recommendedMaxTurns: scenarioPayload.scenario.recommendedMaxTurns,
-        reveal: {
-          titleZh: scenarioPayload.scenario.titleZh,
-          summaryZh: scenarioPayload.scenario.summaryZh,
-        },
-      })
-    }
-
-    return json(startScenario(startRequest))
+    return json({
+      sessionId,
+      scenarioType: 'dynamic',
+      sessionToken,
+      scenario: scenarioPayload.scenario,
+      firstLine: scenarioPayload.scenario.firstLine,
+      maxTurns: LIMITS.maxTurns,
+      reveal: {
+        titleZh: scenarioPayload.scenario.titleZh,
+        summaryZh: scenarioPayload.scenario.summaryZh,
+      },
+    })
   }
 
   if (url.pathname === '/api/respond') {
@@ -138,16 +140,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     return json(await generateHint(env, parseHintRequest(body)))
   }
 
-  if (url.pathname === '/api/rescue') {
+  if (url.pathname === '/api/listening-scaffold') {
     if (request.method !== 'POST') return methodNotAllowed('POST')
     const body = await readJsonBody(request, LIMITS.requestBytes)
-    return json(await generateRescueAnalysis(env, parseRescueRequest(body)))
-  }
-
-  if (url.pathname === '/api/session/checkpoint') {
-    if (request.method !== 'POST') return methodNotAllowed('POST')
-    const body = await readJsonBody(request, LIMITS.requestBytes)
-    return json(await generateSessionCheckpoint(env, parseSessionCheckpointRequest(body)))
+    return json(await generateListeningScaffold(env, parseListeningScaffoldRequest(body)))
   }
 
   if (url.pathname === '/api/conversation/feedback') {
@@ -155,6 +151,19 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const body = await readJsonBody(request, LIMITS.requestBytes)
     return json(await generateConversationFeedback(env, parseConversationFeedbackRequest(body)))
   }
+
+  if (url.pathname === '/api/conversation/redo-feedback') {
+    if (request.method !== 'POST') return methodNotAllowed('POST')
+    const body = await readJsonBody(request, LIMITS.requestBytes)
+    return json(await generateRedoFeedback(env, parseRedoFeedbackRequest(body)))
+  }
+
+  if (url.pathname === '/api/speech/assist') {
+    if (request.method !== 'POST') return methodNotAllowed('POST')
+    const body = await readJsonBody(request, LIMITS.requestBytes)
+    return json(await generateSpeechAssist(env, parseSpeechAssistRequest(body)))
+  }
+
   return errorJson(404, 'not_found', 'API route not found.')
 }
 

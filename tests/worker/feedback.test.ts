@@ -6,6 +6,9 @@ import type {
   ConversationFeedbackRequest,
   ConversationFeedbackResponse,
   DynamicScenarioDefinition,
+  FeedbackTurnRecord,
+  RedoFeedbackRequest,
+  RedoFeedbackResponse,
 } from '../../worker/types'
 
 const API_ORIGIN = 'https://kaiwa.example'
@@ -25,105 +28,104 @@ function post(path: string, body: unknown, headers: Record<string, string> = {})
   })
 }
 
-const dynamicScenario: DynamicScenarioDefinition = {
+const scenario: DynamicScenarioDefinition = {
   id: 'dynamic-hotel-checkin',
   version: 1,
   titleZh: '酒店办理入住',
-  summaryZh: '向酒店前台出示预订并询问早餐时间。',
+  summaryZh: '向酒店前台出示预订并完成入住。',
   aiRole: 'ホテルフロント係',
   userRole: '宿泊客',
   relationship: '初対面の接客',
-  tone: '丁寧',
+  tone: '丁寧体',
   firstLine: 'いらっしゃいませ。チェックインでございますか？',
-  userGoal: 'チェックイン手続きを行い、朝食の時間を確認する。',
-  coreGoals: [{ id: 'checkin', titleZh: '完成入住', descriptionZh: '告知预订姓名与天数。' }],
-  optionalGoals: [],
-  worldAnchors: ['チェックインは15時から', '朝食は2階で7時から9時半'],
-  followUpPrinciples: ['丁寧に対応し、一つずつ確認する'],
-  hintStrategy: 'まずは名前を伝え、その後に朝食について尋ねる。',
-  feedbackFocus: ['丁寧語の使い分け', '質問の切り出し方'],
-  safetyBoundary: '実在の個人情報やクレジットカード番号を求めない。',
-  recommendedMinTurns: 6,
-  recommendedMaxTurns: 8,
-}
-
-const validCatalogRequest: ConversationFeedbackRequest = {
-  scenarioType: 'catalog',
-  scenarioId: 'weekend-chat',
-  variantId: 'casual-coworker',
-  totalTurns: 2,
-  history: [
-    { role: 'assistant', text: '週末は何をして過ごしたんですか？' },
-    { role: 'user', text: '家で日本の映画を見ました。' },
-    { role: 'assistant', text: 'どんな映画でしたか？' },
-    { role: 'user', text: 'アニメ映画で、とても面白かったです。' },
-  ],
-  transcriptRecords: [
-    {
-      turn: 1,
-      aiPrompt: '週末は何をして過ごしたんですか？',
-      userOriginal: 'いえで にほんの えいがを みました',
-      userCleaned: '家で日本の映画を見ました。',
-      userFinal: '家で日本の映画を見ました。',
-    },
-    {
-      turn: 2,
-      aiPrompt: 'どんな映画でしたか？',
-      userOriginal: 'あにめえいがで おもしろかったです',
-      userCleaned: 'アニメ映画で、とても面白かったです。',
-      userFinal: 'アニメ映画で、とても面白かったです。',
-    },
-  ],
-}
-
-const validFeedbackModelResponse: ConversationFeedbackResponse = {
-  isGoalCompleted: true,
-  goalSummaryZh: '成功分享了周末观影经历，交流顺畅且准确传达了感想。',
-  strengths: [
-    {
-      quoteJa: '家で日本の映画を見ました。',
-      praiseZh: '准确使用了场所助词「で」和宾格助词「を」，叙述清晰。',
-    },
-    {
-      quoteJa: 'アニメ映画で、とても面白かったです。',
-      praiseZh: '使用「で」连接名词句和形容词句，表达连贯。',
-    },
-  ],
-  improvements: [
-    {
-      turn: 2,
-      type: 'naturalness_upgrade',
-      originalQuoteJa: 'アニメ映画で、とても面白かったです。',
-      suggestedJa: 'アニメの映画を見たんですが、すごく面白かったです。',
-      reasonZh: '口语中使用「〜んですが」前置铺垫可以让语感更加地道自然。',
-    },
-  ],
-  reusableExpressions: [
-    {
-      patternJa: '〜で、〜かったです',
-      meaningZh: '用于罗列原因、背景并陈述过去体验的感受。',
-      usageExampleJa: '友達と一緒で、とても楽しかったです。',
-    },
-    {
-      patternJa: '〜を見たんですが',
-      meaningZh: '在口语中提及某物作为话题引子。',
-      usageExampleJa: '昨日新しい映画を見たんですが、良かったです。',
-    },
-  ],
-  masterUpgrade: {
-    turn: 1,
-    originalJa: '家で日本の映画を見ました。',
-    upgradedJa: '特にどこも出かけず、家でのんびり日本の映画を観て過ごしました。',
-    explanationZh: '加入「のんびり〜して過ごす」让周末休闲的氛围感更生动丰富。',
+  userGoal: '用日语完成酒店入住。',
+  coreGoal: { id: 'checkin', titleZh: '完成入住', descriptionZh: '告知预订姓名并明确提出入住请求。' },
+  communicationFunction: '在酒店前台确认预订信息并提出入住请求。',
+  initialFacts: ['用户已预订当日一晚住宿', '入住办理从15时开始'],
+  partnerPrivateFacts: ['前台可通过预订姓名核对订单'],
+  keyIntents: ['告知预订姓名', '明确提出办理入住'],
+  keyInformation: ['预订姓名为田中', '住宿一晚'],
+  completionRules: {
+    completed: ['告知预订姓名并明确提出入住请求'],
+    partial: ['仅告知姓名或仅提出入住请求'],
+    notCompleted: ['未提供可核对预订的信息，也未提出入住请求'],
   },
-  retryTask: {
+  closingRules: ['确认预订姓名和住宿晚数后结束办理'],
+  maxTurns: 5,
+  partnerOpeningPlan: '先确认客人是否要办理入住，再依次核对预订姓名和住宿晚数。',
+  worldAnchors: ['チェックインは15時から'],
+  followUpPrinciples: ['一つずつ確認する', '第4ターンから収束する'],
+  hintStrategy: '先说明姓名，再提出入住请求。',
+  feedbackFocus: ['请求是否清楚', '支架使用事实'],
+  safetyBoundary: '不索取真实证件号码或支付信息。',
+}
+
+function turnRecord(turn: number, overrides: Partial<FeedbackTurnRecord> = {}): FeedbackTurnRecord {
+  return {
+    turn,
+    partnerPromptJa: turn === 1 ? scenario.firstLine : `第${turn}ターンの相手発話です。`,
+    userOriginal: `第${turn}轮原始转写`,
+    userCleaned: `第${turn}轮整理稿`,
+    userConfirmed: turn === 1 ? '田中です。チェックインをお願いします。' : `第${turn}ターンの確認稿です。`,
+    inputMode: 'stt',
+    transcriptModified: false,
+    rerecordCount: 0,
+    partnerAudioPlayCount: 1,
+    ttsReplayCount: 0,
+    transcriptRevealed: false,
+    listeningScaffoldLevel: 0,
+    expressionScaffoldLevel: 0,
+    failureCount: 0,
+    retryCount: 0,
+    textFallback: false,
+    speechAssistUsed: false,
+    ...overrides,
+  }
+}
+
+async function sessionToken(): Promise<string> {
+  return signSessionToken(env, {
+    scenario,
+    startedAt: Date.now(),
+    expiresAt: Date.now() + 3_600_000,
+  })
+}
+
+async function feedbackRequest(): Promise<ConversationFeedbackRequest> {
+  return {
+    scenarioType: 'dynamic',
+    sessionToken: await sessionToken(),
+    turnRecords: [
+      turnRecord(1),
+      turnRecord(2, { ttsReplayCount: 1, listeningScaffoldLevel: 1 }),
+      turnRecord(3),
+      turnRecord(4),
+      turnRecord(5),
+    ],
+  }
+}
+
+const validFeedback = (records: FeedbackTurnRecord[]): ConversationFeedbackResponse => ({
+  outcome: 'completed',
+  outcomeEvidenceZh: `确认稿“${records[0]!.userConfirmed}”明确给出了姓名并提出入住请求。`,
+  listeningFinding: {
     turn: 2,
-    targetAiPromptJa: 'どんな映画でしたか？',
-    userOriginalJa: 'アニメ映画で、とても面白かったです。',
-    recommendedReferenceJa: 'アニメ映画を観たんですが、ストーリーがすごく面白かったです。',
-    hintZh: '尝试补充具体哪个方面有趣（如剧情、画面），丰富表达内容。',
+    findingZh: '这一轮在原速重听后完成了确认。',
+    evidenceZh: '第2轮记录为L1，重听1次。',
   },
-}
+  expressionImprovement: {
+    turn: 1,
+    userConfirmedJa: records[0]!.userConfirmed,
+    suggestedJa: '予約している田中と申します。チェックインをお願いいたします。',
+    reasonZh: '在前台场景中补充“予約している”并使用自谦式姓名表达更自然。',
+  },
+  redoTask: {
+    turn: 1,
+    partnerPromptJa: records[0]!.partnerPromptJa,
+    firstConfirmedJa: records[0]!.userConfirmed,
+    directionZh: '补充已经预约这一背景，并保持礼貌的入住请求。',
+  },
+})
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -131,387 +133,138 @@ afterEach(() => {
 })
 
 describe('POST /api/conversation/feedback', () => {
-  describe('Mock mode', () => {
-    it('returns complete valid structured feedback for catalog scenario', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', validCatalogRequest),
-        { ALLOW_MOCK: 'true' },
-      )
-
-      expect(response.status).toBe(200)
-      const data = (await response.json()) as ConversationFeedbackResponse
-      expect(data.isGoalCompleted).toBe(true)
-      expect(data.goalSummaryZh).toBeTruthy()
-      expect(data.strengths).toHaveLength(2)
-      expect(data.improvements.length).toBeGreaterThanOrEqual(1)
-      expect(data.improvements.length).toBeLessThanOrEqual(3)
-      expect(data.reusableExpressions).toHaveLength(2)
-      expect(data.masterUpgrade).toHaveProperty('upgradedJa')
-      expect(data.retryTask).toHaveProperty('recommendedReferenceJa')
-
-      // Quotes in improvements must exist in userFinal
-      const userFinals = validCatalogRequest.transcriptRecords.map((r) => r.userFinal)
-      for (const imp of data.improvements) {
-        expect(userFinals.some((text) => text.includes(imp.originalQuoteJa))).toBe(true)
-      }
+  it('returns conservative mock feedback instead of inventing completion', async () => {
+    const request = await feedbackRequest()
+    const response = await fetchWorker(post('/api/conversation/feedback', request), {
+      ALLOW_MOCK: 'true',
+      SCENARIO_SIGNING_SECRET: env.SCENARIO_SIGNING_SECRET,
     })
+    const body = (await response.json()) as ConversationFeedbackResponse
 
-    it('returns complete valid structured feedback for dynamic scenario', async () => {
-      const sessionToken = await signSessionToken(env, {
-        scenario: dynamicScenario,
-        cap: 10,
-        startedAt: Date.now(),
-        expiresAt: Date.now() + 3600_000,
-      })
-
-      const dynamicFeedbackRequest: ConversationFeedbackRequest = {
-        scenarioType: 'dynamic',
-        sessionToken,
-        totalTurns: 1,
-        history: [
-          { role: 'assistant', text: dynamicScenario.firstLine },
-          { role: 'user', text: 'はい、予約した田中です。チェックインをお願いします。' },
-        ],
-        transcriptRecords: [
-          {
-            turn: 1,
-            aiPrompt: dynamicScenario.firstLine,
-            userOriginal: 'はい よやくした たなかです',
-            userCleaned: 'はい、予約した田中です。',
-            userFinal: 'はい、予約した田中です。チェックインをお願いします。',
-          },
-        ],
-      }
-
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', dynamicFeedbackRequest),
-        { ALLOW_MOCK: 'true', SCENARIO_SIGNING_SECRET: env.SCENARIO_SIGNING_SECRET },
-      )
-
-      expect(response.status).toBe(200)
-      const data = (await response.json()) as ConversationFeedbackResponse
-      expect(data.isGoalCompleted).toBe(true)
-      expect(data.strengths).toHaveLength(2)
-      expect(data.improvements).toHaveLength(1)
-      expect(data.reusableExpressions).toHaveLength(2)
-    })
-
-    it('returns 503 when OpenAI is not configured and mock mode is disabled', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', validCatalogRequest),
-        {},
-      )
-
-      expect(response.status).toBe(503)
-      expect(await response.json()).toEqual({
-        error: {
-          code: 'openai_unconfigured',
-          message: 'OpenAI is not configured for this deployment.',
-        },
-      })
+    expect(response.status).toBe(200)
+    expect(body.outcome).toBe('insufficient_evidence')
+    expect(body.outcomeEvidenceZh).toContain(request.turnRecords[4]!.userConfirmed)
+    expect(body.redoTask).toMatchObject({
+      turn: 5,
+      partnerPromptJa: request.turnRecords[4]!.partnerPromptJa,
+      firstConfirmedJa: request.turnRecords[4]!.userConfirmed,
     })
   })
 
-  describe('Input validation', () => {
-    it('rejects cross-site requests', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', validCatalogRequest, { 'sec-fetch-site': 'cross-site' }),
-        { ALLOW_MOCK: 'true' },
-      )
-      expect(response.status).toBe(403)
-    })
+  it('accepts one to five sequential records and rejects inconsistent scaffold facts', async () => {
+    const request = await feedbackRequest()
+    const earlyReview = await fetchWorker(post('/api/conversation/feedback', {
+      ...request,
+      turnRecords: request.turnRecords.slice(0, 4),
+    }), { ALLOW_MOCK: 'true', SCENARIO_SIGNING_SECRET: env.SCENARIO_SIGNING_SECRET })
+    expect(earlyReview.status).toBe(200)
 
-    it('rejects non-POST methods', async () => {
-      const req = new Request(`${API_ORIGIN}/api/conversation/feedback`, { method: 'GET' })
-      const response = await fetchWorker(req, { ALLOW_MOCK: 'true' })
-      expect(response.status).toBe(405)
-    })
-
-    it('rejects catalog request with unknown scenario', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', { ...validCatalogRequest, scenarioId: 'unknown-scenario' }),
-        { ALLOW_MOCK: 'true' },
-      )
-      expect(response.status).toBe(400)
-      expect(await response.json()).toMatchObject({ error: { code: 'unknown_scenario' } })
-    })
-
-    it('rejects catalog request with variant mismatch', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', { ...validCatalogRequest, variantId: 'invalid-variant' }),
-        { ALLOW_MOCK: 'true' },
-      )
-      expect(response.status).toBe(400)
-      expect(await response.json()).toMatchObject({ error: { code: 'scenario_variant_mismatch' } })
-    })
-
-    it('rejects history not starting with scenario firstLine', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', {
-          ...validCatalogRequest,
-          history: [
-            { role: 'assistant', text: '間違った最初の発話' },
-            { role: 'user', text: '映画を見ました。' },
-          ],
-          totalTurns: 1,
-          transcriptRecords: [validCatalogRequest.transcriptRecords[0]],
-        }),
-        { ALLOW_MOCK: 'true' },
-      )
-      expect(response.status).toBe(400)
-      expect(await response.json()).toMatchObject({ error: { code: 'scenario_context_mismatch' } })
-    })
-
-    it('rejects non-alternating history roles', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', {
-          ...validCatalogRequest,
-          history: [
-            { role: 'assistant', text: '週末は何をして過ごしたんですか？' },
-            { role: 'assistant', text: '映画を見ました。' },
-          ],
-        }),
-        { ALLOW_MOCK: 'true' },
-      )
-      expect(response.status).toBe(400)
-      expect(await response.json()).toMatchObject({ error: { code: 'invalid_feedback_request' } })
-    })
-
-    it('rejects mismatch between totalTurns and user history turns', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', {
-          ...validCatalogRequest,
-          totalTurns: 3, // History only has 2 user turns
-        }),
-        { ALLOW_MOCK: 'true' },
-      )
-      expect(response.status).toBe(400)
-    })
-
-    it('rejects mismatch between totalTurns and transcriptRecords length', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', {
-          ...validCatalogRequest,
-          totalTurns: 2,
-          transcriptRecords: [validCatalogRequest.transcriptRecords[0]], // Only 1 record
-        }),
-        { ALLOW_MOCK: 'true' },
-      )
-      expect(response.status).toBe(400)
-    })
-
-    it('rejects non-sequential turns in transcriptRecords', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', {
-          ...validCatalogRequest,
-          transcriptRecords: [
-            { ...validCatalogRequest.transcriptRecords[0], turn: 1 },
-            { ...validCatalogRequest.transcriptRecords[1], turn: 3 }, // Skipped turn 2
-          ],
-        }),
-        { ALLOW_MOCK: 'true' },
-      )
-      expect(response.status).toBe(400)
-    })
-
-    it('rejects dynamic request with invalid session token', async () => {
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', {
-          scenarioType: 'dynamic',
-          sessionToken: 'invalid.jwt.token',
-          totalTurns: 1,
-          history: [
-            { role: 'assistant', text: dynamicScenario.firstLine },
-            { role: 'user', text: 'こんにちは' },
-          ],
-          transcriptRecords: [
-            {
-              turn: 1,
-              aiPrompt: dynamicScenario.firstLine,
-              userOriginal: 'こんにちは',
-              userCleaned: 'こんにちは',
-              userFinal: 'こんにちは',
-            },
-          ],
-        }),
-        { ALLOW_MOCK: 'true', SCENARIO_SIGNING_SECRET: env.SCENARIO_SIGNING_SECRET },
-      )
-      expect(response.status).toBe(400)
-    })
+    const inconsistentReveal = await fetchWorker(post('/api/conversation/feedback', {
+      ...request,
+      turnRecords: request.turnRecords.map((record, index) => index === 1
+        ? { ...record, transcriptRevealed: true, listeningScaffoldLevel: 1 }
+        : record),
+    }), { ALLOW_MOCK: 'true', SCENARIO_SIGNING_SECRET: env.SCENARIO_SIGNING_SECRET })
+    expect(inconsistentReveal.status).toBe(400)
   })
 
-  describe('OpenAI integration and Safety Red Lines', () => {
-    it('calls OpenAI, passes structured developer prompt, and returns parsed feedback', async () => {
-      const fetchMock = vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            output: [
-              {
-                type: 'message',
-                content: [
-                  {
-                    type: 'output_text',
-                    text: JSON.stringify(validFeedbackModelResponse),
-                  },
-                ],
-              },
-            ],
-          }),
-        ),
-      )
-      vi.stubGlobal('fetch', fetchMock)
+  it('sends all observable turn facts and accepts a strictly grounded response', async () => {
+    const request = await feedbackRequest()
+    request.turnRecords[2] = turnRecord(3, { speechAssistUsed: true })
+    const modelResponse = validFeedback(request.turnRecords)
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ output_text: JSON.stringify(modelResponse) })))
+    vi.stubGlobal('fetch', fetchMock)
 
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', validCatalogRequest),
-        env,
-      )
+    const response = await fetchWorker(post('/api/conversation/feedback', request), env)
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual(modelResponse)
 
-      expect(response.status).toBe(200)
-      const data = await response.json()
-      expect(data).toEqual(validFeedbackModelResponse)
+    const options = fetchMock.mock.calls[0]?.[1]
+    if (!options || typeof options !== 'object' || !('body' in options) || typeof options.body !== 'string') {
+      throw new Error('Feedback request body was not sent upstream.')
+    }
+    for (const field of [
+      'partnerPromptJa', 'userConfirmed', 'inputMode', 'rerecordCount', 'partnerAudioPlayCount', 'ttsReplayCount',
+      'transcriptRevealed', 'listeningScaffoldLevel', 'expressionScaffoldLevel', 'failureCount', 'retryCount', 'textFallback',
+      'speechAssistUsed',
+    ]) {
+      expect(options.body).toContain(field)
+    }
+  })
 
-      // Verify request payload sent to OpenAI
-      expect(fetchMock).toHaveBeenCalledOnce()
-      const requestOptions = fetchMock.mock.calls[0]?.[1]
-      if (!requestOptions || typeof requestOptions !== 'object' || !('body' in requestOptions)
-        || typeof requestOptions.body !== 'string') {
-        throw new Error('Feedback request did not include a JSON body.')
-      }
-      const parsedBody = JSON.parse(requestOptions.body) as { input?: Array<{ content?: string }> }
-      const promptContent = parsedBody.input?.[0]?.content || ''
-      expect(promptContent).toContain('発音、声調、イントネーション、アクセント、感情・表情に関する言及・評価は一切禁止')
-      expect(promptContent).toContain('数値スコアや虚偽の数字評価は一切禁止')
-      expect(promptContent).toContain('improvements（改善点）の originalQuoteJa は、ユーザーの userFinal（確定発話）の中に実際に存在する部分文字列')
-    })
-
-    it('rejects feedback when improvement quotes non-existent user text', async () => {
-      const fakeQuoteResponse = {
-        ...validFeedbackModelResponse,
-        improvements: [
-          {
-            turn: 1,
-            type: 'grammar_fix',
-            originalQuoteJa: 'まったく言っていない架空のフレーズ',
-            suggestedJa: '正しい表現',
-            reasonZh: '语法修改说明。',
-          },
-        ],
-      }
-
-      vi.stubGlobal(
-        'fetch',
-        vi.fn().mockResolvedValue(
-          new Response(
-            JSON.stringify({
-              output_text: JSON.stringify(fakeQuoteResponse),
-            }),
-          ),
-        ),
-      )
-
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', validCatalogRequest),
-        env,
-      )
-
+  it('rejects fabricated quotes, mismatched turns, and forbidden evaluation dimensions', async () => {
+    const request = await feedbackRequest()
+    const base = validFeedback(request.turnRecords)
+    for (const bad of [
+      { ...base, outcomeEvidenceZh: '目标已经完成。' },
+      { ...base, expressionImprovement: { ...base.expressionImprovement!, userConfirmedJa: '架空の発話' } },
+      { ...base, redoTask: { ...base.redoTask, partnerPromptJa: '架空の相手発話' } },
+      { ...base, outcomeEvidenceZh: `确认稿“${request.turnRecords[0]!.userConfirmed}”证明发音得分为90分。` },
+    ]) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ output_text: JSON.stringify(bad) }))))
+      const response = await fetchWorker(post('/api/conversation/feedback', request), env)
       expect(response.status).toBe(502)
-      const data = (await response.json()) as { error: { code: string; message: string } }
-      expect(data.error.code).toBe('feedback_model_invalid')
-      expect(data.error.message).toContain('not found in user utterances')
+      await expect(response.json()).resolves.toMatchObject({ error: { code: 'feedback_model_invalid' } })
+    }
+  })
+})
+
+describe('POST /api/conversation/redo-feedback', () => {
+  async function redoRequest(): Promise<RedoFeedbackRequest> {
+    return {
+      scenarioType: 'dynamic',
+      sessionToken: await sessionToken(),
+      turn: 1,
+      partnerPromptJa: scenario.firstLine,
+      firstConfirmedJa: '田中です。チェックインをお願いします。',
+      secondConfirmedJa: '予約している田中と申します。チェックインをお願いいたします。',
+      secondInputMode: 'stt',
+      secondListeningScaffoldLevel: 1,
+      secondExpressionScaffoldLevel: 2,
+    }
+  }
+
+  it('returns only comparisonZh and referenceExpressionJa in mock mode', async () => {
+    const request = await redoRequest()
+    const response = await fetchWorker(post('/api/conversation/redo-feedback', request), {
+      ALLOW_MOCK: 'true',
+      SCENARIO_SIGNING_SECRET: env.SCENARIO_SIGNING_SECRET,
     })
+    const body = (await response.json()) as RedoFeedbackResponse
 
-    it('rejects feedback when model mentions forbidden evaluation dimensions like pronunciation or score', async () => {
-      const forbiddenResponse = {
-        ...validFeedbackModelResponse,
-        strengths: [
-          {
-            quoteJa: '家で日本の映画を見ました。',
-            praiseZh: '发音非常标准清晰，语调自然。', // Contains forbidden word "发音"
-          },
-          validFeedbackModelResponse.strengths[1],
-        ],
-      }
+    expect(response.status).toBe(200)
+    expect(Object.keys(body)).toEqual(['comparisonZh', 'referenceExpressionJa'])
+    expect(body.comparisonZh).toContain(request.firstConfirmedJa)
+    expect(body.comparisonZh).toContain(request.secondConfirmedJa)
+  })
 
-      vi.stubGlobal(
-        'fetch',
-        vi.fn().mockResolvedValue(
-          new Response(
-            JSON.stringify({
-              output_text: JSON.stringify(forbiddenResponse),
-            }),
-          ),
-        ),
-      )
+  it('rejects a first-turn redo that does not reference the signed scenario opening', async () => {
+    const request = await redoRequest()
+    const response = await fetchWorker(post('/api/conversation/redo-feedback', {
+      ...request,
+      partnerPromptJa: '架空の相手発話',
+    }), { ALLOW_MOCK: 'true', SCENARIO_SIGNING_SECRET: env.SCENARIO_SIGNING_SECRET })
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({ error: { code: 'scenario_context_mismatch' } })
+  })
 
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', validCatalogRequest),
-        env,
-      )
+  it('accepts a grounded comparison and rejects forbidden or unquoted model output', async () => {
+    const request = await redoRequest()
+    const valid: RedoFeedbackResponse = {
+      comparisonZh: `第一稿“${request.firstConfirmedJa}”直接说明姓名；第二稿“${request.secondConfirmedJa}”补充预约背景并更符合前台关系。`,
+      referenceExpressionJa: '予約しております田中と申します。チェックインをお願いいたします。',
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ output_text: JSON.stringify(valid) }))))
+    const accepted = await fetchWorker(post('/api/conversation/redo-feedback', request), env)
+    expect(accepted.status).toBe(200)
+    await expect(accepted.json()).resolves.toEqual(valid)
 
-      expect(response.status).toBe(502)
-      const data = (await response.json()) as { error: { code: string; message: string } }
-      expect(data.error.code).toBe('feedback_model_invalid')
-    })
-
-    it('rejects feedback when model gives numerical scores', async () => {
-      const scoreResponse = {
-        ...validFeedbackModelResponse,
-        goalSummaryZh: '本次对话综合得分为90分，表现良好。', // Contains forbidden word "90分"
-      }
-
-      vi.stubGlobal(
-        'fetch',
-        vi.fn().mockResolvedValue(
-          new Response(
-            JSON.stringify({
-              output_text: JSON.stringify(scoreResponse),
-            }),
-          ),
-        ),
-      )
-
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', validCatalogRequest),
-        env,
-      )
-
-      expect(response.status).toBe(502)
-      const data = (await response.json()) as { error: { code: string; message: string } }
-      expect(data.error.code).toBe('feedback_model_invalid')
-    })
-
-    it('handles upstream OpenAI network errors gracefully', async () => {
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Upstream error', { status: 500 })))
-
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', validCatalogRequest),
-        env,
-      )
-
-      expect(response.status).toBe(502)
-      expect(await response.json()).toEqual({
-        error: {
-          code: 'feedback_request_failed',
-          message: 'OpenAI conversation feedback generation failed.',
-        },
-      })
-    })
-
-    it('handles invalid JSON from OpenAI gracefully', async () => {
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('not a json')))
-
-      const response = await fetchWorker(
-        post('/api/conversation/feedback', validCatalogRequest),
-        env,
-      )
-
-      expect(response.status).toBe(502)
-      expect(await response.json()).toEqual({
-        error: {
-          code: 'feedback_model_invalid',
-          message: 'Feedback model output is invalid. Retry this request.',
-        },
-      })
-    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ output_text: JSON.stringify({
+      ...valid,
+      comparisonZh: '第二稿显示能力等级已经掌握，得分90分。',
+    }) }))))
+    const rejected = await fetchWorker(post('/api/conversation/redo-feedback', request), env)
+    expect(rejected.status).toBe(502)
+    await expect(rejected.json()).resolves.toMatchObject({ error: { code: 'redo_feedback_model_invalid' } })
   })
 })

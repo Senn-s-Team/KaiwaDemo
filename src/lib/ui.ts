@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 ./api 的 ApiError、./stt 的 SttError、./tts 的 TtsError、../types 的 UiError
+ * [OUTPUT]: 对外提供 formatDuration、formatClock 与 toUiError 错误归一化纯函数
+ * [POS]: src/lib 的界面错误呈现与时间格式化工具，将各引擎与 API 底层错误（包括 no_speech_detected）映射为具有明确引导和恢复动作的 UiError
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import type { ApiError } from './api'
 import type { SttError } from './stt'
 import type { TtsError } from './tts'
@@ -17,6 +23,14 @@ export function formatClock(timestamp: number | null): string {
 export function toUiError(error: unknown): UiError {
   if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
     const code = error.code
+    if (code === 'no_speech_detected') {
+      return {
+        code,
+        title: '没有识别到有效语音',
+        message: '刚才没有收到清晰的声音。请重新录制，或改用文字回答。',
+        recovery: 'text_input',
+      }
+    }
     if (code === 'permission_denied' || code === 'device_missing') {
       return { code, title: '无法使用麦克风', message: '请允许麦克风权限，或改用文字回答。', recovery: 'text_input' }
     }

@@ -1,44 +1,52 @@
+/**
+ * [INPUT]: 依赖共享听力支架与语音续说契约、Worker 环境、模型配置、场景 prompt、token 校验、mock 回退、领域类型与响应校验器
+ * [OUTPUT]: 对外提供场景草拟、流式回复、提示、反馈、重做、四级听力支架与语音辅助的 OpenAI 编排函数及场景草拟错误
+ * [POS]: worker 的模型网关层，负责请求 OpenAI、隔离听力支架上下文、归一化完整场景契约并交由严格校验
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { DEFAULT_MODELS, LIMITS } from './constants'
 import type { Env } from './env'
-import { createMockFeedback, createMockReply, getMockRescueResponse } from './mock'
 import {
-  buildDeveloperPrompt,
+  createMockFeedback,
+  createMockListeningScaffold,
+  createMockRedoFeedback,
+  createMockReply,
+  createMockSpeechAssist,
+} from './mock'
+import {
   buildDynamicDeveloperPrompt,
   buildFeedbackPrompt,
   buildHintPrompt,
-  buildRescuePrompt,
-  buildCheckpointPrompt,
+  buildListeningScaffoldPrompt,
+  buildRedoFeedbackPrompt,
   buildScenarioDraftPrompt,
-  getScenarioVariant,
+  buildSpeechAssistPrompt,
 } from './scenarios'
-import {
-  signSessionToken,
-  verifySessionToken,
-} from './tokens'
+import { verifySessionToken } from './tokens'
+import type { ListeningScaffoldRequest, ListeningScaffoldResponse } from '../shared/listening-scaffold'
+import type { SpeechAssistRequest, SpeechAssistResponse } from '../shared/speech-assist'
 import type {
   ConversationFeedbackRequest,
   ConversationFeedbackResponse,
+  DynamicScenarioDefinition,
   HintRequest,
   HintResponse,
-  RescueRequest,
-  RescueResponse,
+  RedoFeedbackRequest,
+  RedoFeedbackResponse,
   ReplyDoneEvent,
   ReplyRequest,
   ReplyStreamEvent,
   ScenarioDraftModelResult,
   ScenarioDraftRequest,
-  DynamicScenarioDefinition,
-  SessionCheckpointRequest,
-  SessionCheckpointResponse,
-  TrainingGoal,
   UsageSummary,
 } from './types'
 import {
   parseConversationFeedbackResponse,
   parseHintResponse,
-  parseRescueResponse,
+  parseListeningScaffoldModelOutput,
+  parseRedoFeedbackResponse,
   parseScenarioDraftModelResult,
-  parseSessionCheckpointEvaluation,
+  parseSpeechAssistModelOutput,
   validateAssistantReply,
   ValidationError,
 } from './validation'
@@ -167,32 +175,42 @@ export function normalizeScenarioDraftResult(value: unknown): unknown {
     const numericVersion = versionMatch ? Number(versionMatch[0]) : NaN
     if (Number.isInteger(numericVersion) && numericVersion > 0) scenario.version = numericVersion
   }
+  if (scenario.maxTurns === '5') scenario.maxTurns = 5
 
-  for (const field of ['worldAnchors', 'followUpPrinciples', 'feedbackFocus'] as const) {
+  const collectionFields = [
+    'initialFacts',
+    'partnerPrivateFacts',
+    'keyIntents',
+    'keyInformation',
+    'closingRules',
+    'worldAnchors',
+    'followUpPrinciples',
+    'feedbackFocus',
+  ] as const
+  for (const field of collectionFields) {
     if (typeof scenario[field] === 'string') scenario[field] = [scenario[field]]
   }
 
-  for (const field of ['coreGoals', 'optionalGoals'] as const) {
-    const goals = scenario[field]
-    if (!Array.isArray(goals)) continue
-    scenario[field] = goals.map((goal, index) => {
-      if (typeof goal === 'object' && goal !== null && !Array.isArray(goal)) {
-        const g = goal as Record<string, unknown>
-        return {
-          id: typeof g.id === 'string' && g.id.trim() ? g.id.trim() : `${field === 'coreGoals' ? 'core' : 'optional'}_${index + 1}`,
-          titleZh: g.titleZh,
-          descriptionZh: g.descriptionZh,
-        }
-      }
-      if (typeof goal === 'string') {
-        return {
-          id: `${field === 'coreGoals' ? 'core' : 'optional'}_${index + 1}`,
-          titleZh: goal,
-          descriptionZh: goal,
-        }
-      }
-      return goal
-    })
+  if (typeof scenario.coreGoal === 'string') {
+    scenario.coreGoal = {
+      id: 'core_1',
+      titleZh: scenario.coreGoal,
+      descriptionZh: scenario.coreGoal,
+    }
+  } else if (typeof scenario.coreGoal === 'object' && scenario.coreGoal !== null && !Array.isArray(scenario.coreGoal)) {
+    const coreGoal = scenario.coreGoal as Record<string, unknown>
+    scenario.coreGoal = {
+      ...coreGoal,
+      id: typeof coreGoal.id === 'string' && coreGoal.id.trim() ? coreGoal.id.trim() : 'core_1',
+    }
+  }
+
+  if (typeof scenario.completionRules === 'object' && scenario.completionRules !== null && !Array.isArray(scenario.completionRules)) {
+    const completionRules = { ...(scenario.completionRules as Record<string, unknown>) }
+    for (const field of ['completed', 'partial', 'notCompleted'] as const) {
+      if (typeof completionRules[field] === 'string') completionRules[field] = [completionRules[field]]
+    }
+    scenario.completionRules = completionRules
   }
 
   if (Array.isArray(scenario.hintStrategy)) {
@@ -213,31 +231,41 @@ export function normalizeScenarioDraftResult(value: unknown): unknown {
 }
 
 export function createFallbackReadyScenario(inputZh: string): DynamicScenarioDefinition {
+  const userGoal = inputZh || '用自然日语清晰传达主要需求'
   return {
     id: `dyn_${crypto.randomUUID().slice(0, 8)}`,
     version: 1,
     titleZh: inputZh.slice(0, 30) || '日语情境会话',
-    summaryZh: inputZh || '根据您的需求生成的日语日常口语会话练习。',
-    aiRole: '日本の店員・同僚',
-    userRole: '日本語学習者',
-    relationship: '丁寧な関係',
-    tone: '丁寧で自然な日常会話',
-    firstLine: 'こんにちは！お疲れ様です。',
-    userGoal: inputZh || '自然な日本語で相手とコミュニケーションをとる',
-    coreGoals: [
-      { id: 'core_1', titleZh: '清晰传达主要想法', descriptionZh: '用自然的日语表达自己的观点与需求' },
-      { id: 'core_2', titleZh: '积极回应对方提问', descriptionZh: '针对对方说的话给予合适回应并顺畅推进交流' },
-    ],
-    optionalGoals: [
-      { id: 'optional_1', titleZh: '进阶表达与追问', descriptionZh: '在交流中自然运用所学表达并主动提问' },
-    ],
-    worldAnchors: ['日常生活或职场交流背景'],
-    followUpPrinciples: ['根据用户回答自然追问，每次只问一个问题'],
-    hintStrategy: '先明确表达观点，再展开具体细节。',
-    feedbackFocus: ['用词地道性', '对话流畅度'],
-    safetyBoundary: '遵守日常礼貌，不涉及敏感隐私。',
-    recommendedMinTurns: 6,
-    recommendedMaxTurns: 8,
+    summaryZh: inputZh || '根据需求生成的五轮日语口语会话练习。',
+    aiRole: '场景中的日语会话对象',
+    userRole: '需要完成交际目标的日语学习者',
+    relationship: '符合用户需求的礼貌关系',
+    tone: '自然且符合双方社会距离的日语口语',
+    communicationFunction: '在礼貌对话中提出主要需求并确认双方理解一致',
+    firstLine: 'こんにちは。今日はどのようなご用件でしょうか？',
+    partnerOpeningPlan: '以礼貌问候建立场景，并用一个开放问题邀请用户说明主要需求。',
+    userGoal,
+    coreGoal: {
+      id: 'core_1',
+      titleZh: '清晰传达主要需求',
+      descriptionZh: `在五轮内围绕“${userGoal.slice(0, 80)}”向对方给出可确认的关键信息。`,
+    },
+    initialFacts: ['这是一次固定五轮的日语口语练习', '双方需要围绕用户给出的场景需求完成对话'],
+    partnerPrivateFacts: [],
+    keyIntents: ['用户：用日语清晰表达主要需求', 'AI：确认需求并在职责范围内自然回应'],
+    keyInformation: ['用户的主要需求', '相手对该需求的明确理解或回应'],
+    completionRules: {
+      completed: ['确认稿清楚表达主要需求，且相手已作出明确理解或回应'],
+      partial: ['确认稿表达了需求方向，但仍缺少相手完成确认所必需的信息'],
+      notCompleted: ['确认稿未表达与场景相关的主要需求，或双方未形成可判断的理解'],
+    },
+    closingRules: ['第4轮只确认完成目标仍缺少的最后一项必要信息', '第5轮不提问、不新增条件，以确认或礼貌回应自然结束'],
+    maxTurns: 5,
+    worldAnchors: ['这是一次五轮的日语口语验证练习'],
+    followUpPrinciples: ['每次只确认一项必要信息', '第四轮收束，第五轮不新增任务或问题'],
+    hintStrategy: '先提示要表达的方向，再逐级提供关键词、起手式和完整例句。',
+    feedbackFocus: ['确认稿是否完成唯一目标', '听力与表达支架的实际使用'],
+    safetyBoundary: '不要求真实敏感信息，不承诺执行外部操作。',
   }
 }
 
@@ -312,13 +340,18 @@ export async function draftScenario(env: Env, request: ScenarioDraftRequest): Pr
     let upstreamErrText = ''
     try {
       upstreamErrText = (await upstream.text()).slice(0, 500)
-    } catch {}
+    } catch {
+      upstreamErrText = ''
+    }
     throw new ScenarioDraftError('scenario_draft_request_failed', upstreamErrText || 'OpenAI could not draft this scenario. Retry this request.', 502)
   }
   let modelPayload: unknown
   try {
     modelPayload = await upstream.json()
   } catch {
+    if (mustGenerate) {
+      return { status: 'ready', scenario: createFallbackReadyScenario(request.inputZh) }
+    }
     throw new ScenarioDraftError('scenario_draft_model_invalid', 'Scenario draft model output is invalid. Retry this request.', 502)
   }
 
@@ -328,9 +361,10 @@ export async function draftScenario(env: Env, request: ScenarioDraftRequest): Pr
     const modelJson = parseModelJson(text)
     result = parseScenarioDraftModelResult(normalizeScenarioDraftResult(modelJson))
   } catch (error) {
-    if (error instanceof ScenarioDraftError) {
-      throw error
+    if (mustGenerate) {
+      return { status: 'ready', scenario: createFallbackReadyScenario(request.inputZh) }
     }
+    if (error instanceof ScenarioDraftError) throw error
     if (error instanceof ValidationError) {
       throw new ScenarioDraftError('scenario_draft_schema_invalid', `Scenario draft model output failed validation: ${error.message}`, 502)
     }
@@ -400,11 +434,13 @@ function streamResponse(stream: ReadableStream<Uint8Array>): Response {
 }
 
 export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promise<Response> {
+  const sessionPayload = await verifySessionToken(env, request.sessionToken)
+  if (request.history[0]?.text !== sessionPayload.scenario.firstLine) {
+    throw new ValidationError('scenario_context_mismatch', 'Conversation history does not start with the scenario first line.')
+  }
   const model = env.OPENAI_MODEL || DEFAULT_MODELS.openai
   if (!env.OPENAI_API_KEY) {
-    if (env.ALLOW_MOCK === 'true') {
-      return mockStream(request, model)
-    }
+    if (env.ALLOW_MOCK === 'true') return mockStream(request, model)
     return new Response(
       JSON.stringify({ error: { code: 'openai_unconfigured', message: 'OpenAI is not configured for this deployment.' } }),
       { status: 503, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } },
@@ -412,8 +448,7 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
   }
   let responsesUrl: string
   try {
-    const configuredBaseUrl = (request.scenarioType === 'catalog' ? request.baseUrl?.trim() : undefined) || env.OPENAI_BASE_URL
-    responsesUrl = resolveOpenAiResponsesUrl(configuredBaseUrl)
+    responsesUrl = resolveOpenAiResponsesUrl(env.OPENAI_BASE_URL)
   } catch (error) {
     return new Response(
       JSON.stringify({
@@ -426,26 +461,11 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
     )
   }
 
-  let developerPrompt: string
+  const developerPrompt = buildDynamicDeveloperPrompt(sessionPayload.scenario, request.turn)
   let messagesSlice = request.history
-
-  if (request.scenarioType === 'dynamic') {
-    const sessionPayload = await verifySessionToken(env, request.sessionToken)
-    if (request.turn > sessionPayload.cap) {
-      throw new ValidationError('turn_limit', `Turn exceeds the authorized cap of ${sessionPayload.cap}.`)
-    }
-    if (request.history[0]?.text !== sessionPayload.scenario.firstLine) {
-      throw new ValidationError('scenario_context_mismatch', 'Conversation history does not start with the scenario first line.')
-    }
-    developerPrompt = buildDynamicDeveloperPrompt(sessionPayload.scenario, request.turn, sessionPayload.cap)
-
-    if (request.history.length > 7) {
-      const firstTurn = request.history[0]!
-      const recent = request.history.slice(-6)
-      messagesSlice = [firstTurn, ...recent]
-    }
-  } else {
-    developerPrompt = buildDeveloperPrompt(request)
+  if (request.history.length > 7) {
+    const firstTurn = request.history[0]!
+    messagesSlice = [firstTurn, ...request.history.slice(-6)]
   }
 
   const input = [
@@ -486,7 +506,9 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
     let upstreamError = ''
     try {
       upstreamError = (await upstream.text()).slice(0, 500)
-    } catch {}
+    } catch {
+      upstreamError = ''
+    }
     const status = upstream.status === 401 || upstream.status === 403 ? 502 : upstream.status
     return new Response(
       JSON.stringify({
@@ -550,7 +572,7 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
           }
         }
 
-        const text = validateAssistantReply(output)
+        const text = validateAssistantReply(output, request.turn)
         controller.enqueue(
           ndjson({
             type: 'done',
@@ -583,6 +605,10 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
   return streamResponse(stream)
 }
 export async function generateHint(env: Env, request: HintRequest): Promise<HintResponse> {
+  const sessionPayload = await verifySessionToken(env, request.sessionToken)
+  if (request.history[0]?.text !== sessionPayload.scenario.firstLine) {
+    throw new ValidationError('scenario_context_mismatch', 'Hint history does not start with the scenario first line.')
+  }
   if (!env.OPENAI_API_KEY) {
     if (env.ALLOW_MOCK === 'true') {
       return {
@@ -595,42 +621,7 @@ export async function generateHint(env: Env, request: HintRequest): Promise<Hint
     throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
   }
 
-  let scenarioInfo: {
-    titleZh?: string
-    aiRole: string
-    userRole?: string
-    relationship?: string
-    tone?: string
-    userGoal: string
-    worldFacts?: string
-    worldAnchors?: readonly string[]
-    hintStrategy?: string
-  }
-
-  if (request.scenarioType === 'dynamic') {
-    const sessionPayload = await verifySessionToken(env, request.sessionToken)
-    scenarioInfo = {
-      titleZh: sessionPayload.scenario.titleZh,
-      aiRole: sessionPayload.scenario.aiRole,
-      userRole: sessionPayload.scenario.userRole,
-      relationship: sessionPayload.scenario.relationship,
-      tone: sessionPayload.scenario.tone,
-      userGoal: sessionPayload.scenario.userGoal,
-      worldAnchors: sessionPayload.scenario.worldAnchors,
-      hintStrategy: sessionPayload.scenario.hintStrategy,
-    }
-  } else {
-    const variant = getScenarioVariant(request.scenarioId, request.variantId)
-    if (!variant) throw new ValidationError('scenario_variant_mismatch', 'Variant not found.')
-    scenarioInfo = {
-      titleZh: variant.titleZh,
-      aiRole: variant.aiRole,
-      userGoal: variant.userGoal,
-      worldFacts: variant.worldFacts,
-    }
-  }
-
-  const prompt = buildHintPrompt(scenarioInfo, request.lastAssistantText, request.history)
+  const prompt = buildHintPrompt(sessionPayload.scenario, request.lastAssistantText, request.history)
   const responsesUrl = resolveOpenAiResponsesUrl(env.OPENAI_BASE_URL)
   const isResponsesEndpoint = responsesUrl.endsWith('/responses')
 
@@ -671,275 +662,166 @@ export async function generateHint(env: Env, request: HintRequest): Promise<Hint
   return parseHintResponse(parseModelJson(text))
 }
 
-export async function generateRescueAnalysis(env: Env, request: RescueRequest): Promise<RescueResponse> {
-  if (!env.OPENAI_API_KEY) {
-    if (env.ALLOW_MOCK === 'true') {
-      return getMockRescueResponse(request)
-    }
-    throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
-  }
-
-  let scenarioInfo: {
-    titleZh?: string
-    aiRole: string
-    userRole?: string
-    relationship?: string
-    tone?: string
-    userGoal: string
-    worldFacts?: string
-    worldAnchors?: readonly string[]
-  }
-
-  if (request.scenarioType === 'dynamic') {
-    if (request.dynamicData) {
-      scenarioInfo = {
-        titleZh: request.dynamicData.titleZh,
-        aiRole: request.dynamicData.aiRole,
-        userRole: request.dynamicData.userRole,
-        relationship: request.dynamicData.relationship,
-        tone: request.dynamicData.tone,
-        userGoal: request.dynamicData.userGoal,
-        worldAnchors: request.dynamicData.worldAnchors,
-      }
-    } else if (request.sessionToken) {
-      const sessionPayload = await verifySessionToken(env, request.sessionToken)
-      scenarioInfo = {
-        titleZh: sessionPayload.scenario.titleZh,
-        aiRole: sessionPayload.scenario.aiRole,
-        userRole: sessionPayload.scenario.userRole,
-        relationship: sessionPayload.scenario.relationship,
-        tone: sessionPayload.scenario.tone,
-        userGoal: sessionPayload.scenario.userGoal,
-        worldAnchors: sessionPayload.scenario.worldAnchors,
-      }
-    } else {
-      throw new ValidationError('invalid_rescue_request', 'Missing scenario information.')
-    }
-  } else {
-    const variant = getScenarioVariant(request.scenarioId, request.variantId)
-    if (!variant) throw new ValidationError('scenario_variant_mismatch', 'Variant not found.')
-    scenarioInfo = {
-      titleZh: variant.titleZh,
-      aiRole: variant.aiRole,
-      userGoal: variant.userGoal,
-      worldFacts: variant.worldFacts,
-    }
-  }
-
-  const prompt = buildRescuePrompt(scenarioInfo, request.turn, request.aiPrompt, request.userFinal, request.history)
-  const responsesUrl = resolveOpenAiResponsesUrl(env.OPENAI_BASE_URL)
-  const isResponsesEndpoint = responsesUrl.endsWith('/responses')
-
-  const requestBody = isResponsesEndpoint
-    ? {
-        model: env.OPENAI_MODEL || DEFAULT_MODELS.openai,
-        input: [{ role: 'developer', content: prompt }],
-        reasoning: { effort: 'low' },
-        max_output_tokens: LIMITS.rescueOutputTokens,
-        store: false,
-        stream: false,
-        tools: [],
-        text: { format: { type: 'json_object' } },
-      }
-    : {
-        model: env.OPENAI_MODEL || DEFAULT_MODELS.openai,
-        messages: [{ role: 'system', content: prompt }],
-        max_tokens: LIMITS.rescueOutputTokens,
-        response_format: { type: 'json_object' },
-      }
-
-  const upstream = await fetch(responsesUrl, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      'content-type': 'application/json',
-      accept: 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-  })
-
-  if (!upstream.ok) {
-    throw new ScenarioDraftError('rescue_request_failed', 'OpenAI rescue analysis generation failed.', 502)
-  }
-
-  const payload: unknown = await upstream.json()
-  const text = responseTextFromCompletedJson(payload)
-  return parseRescueResponse(parseModelJson(text))
-}
-
-export async function generateSessionCheckpoint(
-  env: Env,
-  request: SessionCheckpointRequest,
-): Promise<SessionCheckpointResponse> {
-  const sessionPayload = await verifySessionToken(env, request.sessionToken)
-  if (request.history[0]?.text !== sessionPayload.scenario.firstLine) {
-    throw new ValidationError('scenario_context_mismatch', 'Conversation history does not start with the scenario first line.')
-  }
-
-  let evalResult: {
-    isGoalCompleted: boolean
-    completedGoals: Array<{ id: string; evidence: string }>
-    remainingGoals: Array<{ id: string; titleZh: string }>
-    factsSummary: string[]
-    nextDirection: string
-  }
-
-  if (!env.OPENAI_API_KEY) {
-    if (env.ALLOW_MOCK === 'true') {
-      evalResult = {
-        isGoalCompleted: request.turn >= 6,
-        completedGoals: sessionPayload.scenario.coreGoals.map((g) => ({ id: g.id, evidence: 'Mock evidence' })),
-        remainingGoals: [],
-        factsSummary: ['Mock summary'],
-        nextDirection: '自然に会話を締めくくってください。',
-      }
-    } else {
-      throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
-    }
-  } else {
-    const prompt = buildCheckpointPrompt(sessionPayload.scenario, request.turn, request.history)
-    const responsesUrl = resolveOpenAiResponsesUrl(env.OPENAI_BASE_URL)
-    const isResponsesEndpoint = responsesUrl.endsWith('/responses')
-
-    const requestBody = isResponsesEndpoint
-      ? {
-          model: env.OPENAI_MODEL || DEFAULT_MODELS.openai,
-          input: [{ role: 'developer', content: prompt }],
-          reasoning: { effort: 'low' },
-          max_output_tokens: LIMITS.checkpointOutputTokens,
-          store: false,
-          stream: false,
-          tools: [],
-          text: { format: { type: 'json_object' } },
-        }
-      : {
-          model: env.OPENAI_MODEL || DEFAULT_MODELS.openai,
-          messages: [{ role: 'system', content: prompt }],
-          max_tokens: LIMITS.checkpointOutputTokens,
-          response_format: { type: 'json_object' },
-        }
-
-    const upstream = await fetch(responsesUrl, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        'content-type': 'application/json',
-        accept: 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-    })
-
-    if (!upstream.ok) {
-      throw new ScenarioDraftError('checkpoint_request_failed', 'OpenAI checkpoint evaluation failed.', 502)
-    }
-
-    const payload: unknown = await upstream.json()
-    const text = responseTextFromCompletedJson(payload)
-    evalResult = parseSessionCheckpointEvaluation(parseModelJson(text))
-  }
-
-  let canExtend = false
-  let nextCap: 14 | 20 | null = null
-  let newSessionToken: string | null = null
-
-  if (!evalResult.isGoalCompleted && sessionPayload.cap < LIMITS.maxCap) {
-    canExtend = true
-    nextCap = sessionPayload.cap === 10 ? 14 : 20
-    const now = Date.now()
-    newSessionToken = await signSessionToken(env, {
-      scenario: sessionPayload.scenario,
-      cap: nextCap,
-      startedAt: sessionPayload.startedAt,
-      expiresAt: now + LIMITS.sessionTokenTtlMs,
-    })
-  }
-
-  return {
-    ...evalResult,
-    canExtend,
-    nextCap,
-    newSessionToken,
-  }
-}
-
 export async function generateConversationFeedback(
   env: Env,
   request: ConversationFeedbackRequest,
 ): Promise<ConversationFeedbackResponse> {
-  let scenarioInfo: {
-    titleZh?: string
-    summaryZh?: string
-    aiRole: string
-    userRole?: string
-    userGoal: string
-    coreGoals?: readonly TrainingGoal[]
-    optionalGoals?: readonly TrainingGoal[]
-    worldFacts?: string
-    worldAnchors?: readonly string[]
-    feedbackFocus?: readonly string[]
-  }
-
-  if (request.scenarioType === 'dynamic') {
-    const sessionPayload = await verifySessionToken(env, request.sessionToken)
-    if (request.history[0]?.text !== sessionPayload.scenario.firstLine) {
-      throw new ValidationError('scenario_context_mismatch', 'Conversation history does not start with the scenario first line.')
-    }
-    scenarioInfo = {
-      titleZh: sessionPayload.scenario.titleZh,
-      summaryZh: sessionPayload.scenario.summaryZh,
-      aiRole: sessionPayload.scenario.aiRole,
-      userRole: sessionPayload.scenario.userRole,
-      userGoal: sessionPayload.scenario.userGoal,
-      coreGoals: sessionPayload.scenario.coreGoals,
-      optionalGoals: sessionPayload.scenario.optionalGoals,
-      worldAnchors: sessionPayload.scenario.worldAnchors,
-      feedbackFocus: sessionPayload.scenario.feedbackFocus,
-    }
-  } else {
-    const variant = getScenarioVariant(request.scenarioId, request.variantId)
-    if (!variant) throw new ValidationError('scenario_variant_mismatch', 'Variant not found.')
-    if (request.history[0]?.text !== variant.firstLine) {
-      throw new ValidationError('scenario_context_mismatch', 'Conversation history does not start with the registered scenario line.')
-    }
-    scenarioInfo = {
-      titleZh: variant.titleZh,
-      summaryZh: variant.summaryZh,
-      aiRole: variant.aiRole,
-      userGoal: variant.userGoal,
-      worldFacts: variant.worldFacts,
-    }
+  const sessionPayload = await verifySessionToken(env, request.sessionToken)
+  if (request.turnRecords[0]?.partnerPromptJa !== sessionPayload.scenario.firstLine) {
+    throw new ValidationError('scenario_context_mismatch', 'Feedback records do not start with the scenario first line.')
   }
 
   if (!env.OPENAI_API_KEY) {
+    if (env.ALLOW_MOCK === 'true') return createMockFeedback(request)
+    throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
+  }
+
+  const prompt = buildFeedbackPrompt(sessionPayload.scenario, request)
+  const parsedJson = await generateStructuredFeedbackJson(
+    env,
+    prompt,
+    LIMITS.feedbackOutputTokens,
+    'feedback_request_failed',
+    'OpenAI conversation feedback generation failed.',
+    'feedback_model_invalid',
+    'Feedback model output is invalid. Retry this request.',
+  )
+
+  try {
+    return parseConversationFeedbackResponse(parsedJson, request.turnRecords)
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      throw new ScenarioDraftError('feedback_model_invalid', error.message, 502)
+    }
+    throw error
+  }
+}
+
+export async function generateRedoFeedback(
+  env: Env,
+  request: RedoFeedbackRequest,
+): Promise<RedoFeedbackResponse> {
+  const sessionPayload = await verifySessionToken(env, request.sessionToken)
+  if (request.turn === 1 && request.partnerPromptJa !== sessionPayload.scenario.firstLine) {
+    throw new ValidationError('scenario_context_mismatch', 'Redo feedback does not reference the real first turn.')
+  }
+
+  if (!env.OPENAI_API_KEY) {
+    if (env.ALLOW_MOCK === 'true') return createMockRedoFeedback(request)
+    throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
+  }
+
+  const prompt = buildRedoFeedbackPrompt(sessionPayload.scenario, request)
+  const parsedJson = await generateStructuredFeedbackJson(
+    env,
+    prompt,
+    LIMITS.redoFeedbackOutputTokens,
+    'redo_feedback_request_failed',
+    'OpenAI redo feedback generation failed.',
+    'redo_feedback_model_invalid',
+    'Redo feedback model output is invalid. Retry this request.',
+  )
+
+  try {
+    return parseRedoFeedbackResponse(parsedJson, request)
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      throw new ScenarioDraftError('redo_feedback_model_invalid', error.message, 502)
+    }
+    throw error
+  }
+}
+
+export async function generateListeningScaffold(
+  env: Env,
+  request: ListeningScaffoldRequest,
+): Promise<ListeningScaffoldResponse> {
+  const session = await verifySessionToken(env, request.sessionToken)
+  if (!env.OPENAI_API_KEY) {
     if (env.ALLOW_MOCK === 'true') {
-      return createMockFeedback(request)
+      return createMockListeningScaffold(request)
     }
     throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
   }
 
-  const prompt = buildFeedbackPrompt(scenarioInfo, request.totalTurns, request.transcriptRecords)
+  const prompt = buildListeningScaffoldPrompt(session.scenario, request)
+  const parsedJson = await generateStructuredFeedbackJson(
+    env,
+    prompt,
+    300,
+    'listening_scaffold_request_failed',
+    'OpenAI listening scaffold generation failed.',
+    'listening_scaffold_model_invalid',
+    'Listening scaffold model output is invalid.',
+  )
+
+  try {
+    return parseListeningScaffoldModelOutput(parsedJson, request.partnerPromptJa)
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      throw new ScenarioDraftError('listening_scaffold_model_invalid', error.message, 502)
+    }
+    throw error
+  }
+}
+
+export async function generateSpeechAssist(
+  env: Env,
+  request: SpeechAssistRequest,
+): Promise<SpeechAssistResponse> {
+  const session = await verifySessionToken(env, request.sessionToken)
+  if (!env.OPENAI_API_KEY) {
+    if (env.ALLOW_MOCK === 'true') {
+      return createMockSpeechAssist(request)
+    }
+    throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
+  }
+  const prompt = buildSpeechAssistPrompt(session.scenario, request)
+  const parsedJson = await generateStructuredFeedbackJson(
+    env,
+    prompt,
+    150,
+    'speech_assist_request_failed',
+    'OpenAI speech assist generation failed.',
+    'speech_assist_model_invalid',
+    'Speech assist model output is invalid.',
+  )
+
+  return parseSpeechAssistModelOutput(parsedJson, request.observedTextJa)
+}
+
+async function generateStructuredFeedbackJson(
+  env: Env,
+  prompt: string,
+  maxOutputTokens: number,
+  requestErrorCode: string,
+  requestErrorMessage: string,
+  modelErrorCode: string,
+  modelErrorMessage: string,
+): Promise<unknown> {
   let responsesUrl: string
   try {
     responsesUrl = resolveOpenAiResponsesUrl(env.OPENAI_BASE_URL)
   } catch {
     throw new ScenarioDraftError('openai_base_url_invalid', 'OPENAI_BASE_URL is invalid.', 500)
   }
+  const model = env.OPENAI_MODEL || DEFAULT_MODELS.openai
   const isResponsesEndpoint = responsesUrl.endsWith('/responses')
   const requestBody = isResponsesEndpoint
     ? {
-        model: env.OPENAI_MODEL || DEFAULT_MODELS.openai,
+        model,
         input: [{ role: 'developer', content: prompt }],
         reasoning: { effort: 'low' },
-        max_output_tokens: LIMITS.feedbackOutputTokens,
+        max_output_tokens: maxOutputTokens,
         store: false,
         stream: false,
         tools: [],
         text: { format: { type: 'json_object' } },
       }
     : {
-        model: env.OPENAI_MODEL || DEFAULT_MODELS.openai,
+        model,
         messages: [{ role: 'system', content: prompt }],
-        max_tokens: LIMITS.feedbackOutputTokens,
+        max_tokens: maxOutputTokens,
         response_format: { type: 'json_object' },
       }
 
@@ -953,33 +835,18 @@ export async function generateConversationFeedback(
     body: JSON.stringify(requestBody),
   })
   if (!upstream.ok) {
-    throw new ScenarioDraftError('feedback_request_failed', 'OpenAI conversation feedback generation failed.', 502)
+    throw new ScenarioDraftError(requestErrorCode, requestErrorMessage, 502)
   }
 
   let modelPayload: unknown
   try {
     modelPayload = await upstream.json()
   } catch {
-    throw new ScenarioDraftError('feedback_model_invalid', 'Feedback model output is invalid. Retry this request.', 502)
+    throw new ScenarioDraftError(modelErrorCode, modelErrorMessage, 502)
   }
-
-  let parsedJson: unknown
   try {
-    const text = responseTextFromCompletedJson(modelPayload)
-    parsedJson = parseModelJson(text)
-  } catch (error) {
-    if (error instanceof ScenarioDraftError) {
-      throw error
-    }
-    throw new ScenarioDraftError('feedback_model_invalid', 'Feedback model output is invalid. Retry this request.', 502)
-  }
-
-  try {
-    return parseConversationFeedbackResponse(parsedJson, request.transcriptRecords)
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      throw new ScenarioDraftError('feedback_model_invalid', error.message, 502)
-    }
-    throw error
+    return parseModelJson(responseTextFromCompletedJson(modelPayload))
+  } catch {
+    throw new ScenarioDraftError(modelErrorCode, modelErrorMessage, 502)
   }
 }

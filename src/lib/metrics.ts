@@ -1,4 +1,11 @@
-import type { IntegrationMode, RoundRecord, RoundTiming, SelfAssessment, SessionReport, SessionScenario } from '../types'
+/**
+ * [INPUT]: 依赖 ../types 的会话/回合记录契约与 ./session 的五回合终止规则
+ * [OUTPUT]: 对外提供回合指标初始化、时长计算、含 completion/recovery 事实的会话报告构建与下载
+ * [POS]: src/lib 的可观测会话指标聚合层，仅从既有回合、失败/重试与实时辅助事件导出事实
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
+import { isFinalTurn } from './session'
+import type { IntegrationMode, RedoRecord, RoundRecord, RoundTiming, SessionReport, SessionScenario } from '../types'
 
 export function createTiming(): RoundTiming {
   return {
@@ -24,7 +31,9 @@ export function createRoundRecord(turn: number, aiPrompt: string, rerecordCount:
     userOriginal: '',
     userCleaned: '',
     userFinal: '',
-    hintLevelUsed: 0,
+    expressionScaffoldLevel: 0,
+    listeningScaffoldLevel: 0,
+    transcriptRevealed: false,
     transcriptModified: false,
     transcriptModificationCount: 0,
     rerecordCount,
@@ -42,6 +51,7 @@ export function createRoundRecord(turn: number, aiPrompt: string, rerecordCount:
     llmMock: false,
     usage: { inputTokens: null, outputTokens: null, totalTokens: null },
     timing: createTiming(),
+    speechAssistEvents: [],
   }
 }
 
@@ -59,13 +69,26 @@ export function buildSessionReport(
   sessionId: string,
   mode: IntegrationMode,
   scenario: Pick<SessionScenario, 'id' | 'version' | 'variantId' | 'reveal'>,
-  selfAssessment: SelfAssessment,
   startedAt: number,
   endedAt: number,
   rounds: RoundRecord[],
+  redos: RedoRecord[] = [],
 ): SessionReport {
   const speechStartLatencies: number[] = []
+  let finalTurn = 0
+  let failureCount = 0
+  let retryCount = 0
+  let speechAssistRequestCount = 0
+  let speechAssistDisplayedCount = 0
   for (const round of rounds) {
+    finalTurn = Math.max(finalTurn, round.turn)
+    failureCount += round.failureCount
+    retryCount += round.retryCount
+    speechAssistRequestCount += round.speechAssistEvents.length
+    for (const event of round.speechAssistEvents) {
+      if (event.displayed) speechAssistDisplayedCount += 1
+    }
+
     if (round.timing.firstSpeechAt !== null) {
       const baseTime = round.timing.recordingStartedAt ?? round.timing.audioCompletedAt
       if (baseTime !== null && round.timing.firstSpeechAt >= baseTime) {
@@ -82,18 +105,30 @@ export function buildSessionReport(
       : null
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     sessionId,
     mode,
     scenarioId: scenario.id,
     scenarioVersion: scenario.version,
     variantId: scenario.variantId,
     reveal: scenario.reveal,
-    selfAssessment,
     startedAt,
     endedAt,
     durationMilliseconds: Math.max(0, endedAt - startedAt),
+    completion: {
+      maxTurns: 5,
+      finalTurn,
+      reason: 'turn_budget',
+      closedNaturally: isFinalTurn(finalTurn),
+    },
+    recovery: {
+      failureCount,
+      retryCount,
+      speechAssistRequestCount,
+      speechAssistDisplayedCount,
+    },
     rounds,
+    redos,
     totals: {
       rerecordCount: rounds.reduce((total, round) => total + round.rerecordCount, 0),
       ttsReplayCount: rounds.reduce((total, round) => total + round.ttsReplayCount, 0),
@@ -102,12 +137,12 @@ export function buildSessionReport(
       llmRequestCount: rounds.reduce((total, round) => total + round.llmRequestCount, 0),
       ttsRequestCount: rounds.reduce((total, round) => total + round.ttsRequestCount, 0),
       ttsCharacterCount: rounds.reduce((total, round) => total + round.ttsCharacterCount, 0),
-      failureCount: rounds.reduce((total, round) => total + round.failureCount, 0),
-      retryCount: rounds.reduce((total, round) => total + round.retryCount, 0),
+      failureCount,
+      retryCount,
       inputTokens: sumNullable(rounds.map((round) => round.usage.inputTokens)),
       outputTokens: sumNullable(rounds.map((round) => round.usage.outputTokens)),
-      hintLevelTotal: rounds.reduce((total, round) => total + round.hintLevelUsed, 0),
-      hintRoundsCount: rounds.filter((round) => round.hintLevelUsed > 0).length,
+      expressionScaffoldLevelTotal: rounds.reduce((total, round) => total + round.expressionScaffoldLevel, 0),
+      expressionScaffoldRoundsCount: rounds.filter((round) => round.expressionScaffoldLevel > 0).length,
       transcriptModificationCount: rounds.reduce((total, round) => total + round.transcriptModificationCount, 0),
       avgSpeechStartLatencyMs,
     },
@@ -116,6 +151,9 @@ export function buildSessionReport(
       'ElevenLabs STT cost must be reconciled with audio duration and the supplier dashboard.',
       'ElevenLabs TTS cost must be reconciled with request count, generated characters, voice/model, and the supplier dashboard.',
       'No exact currency amount is estimated without confirmed account pricing.',
+      ...(rounds.some((r) => r.speechAssistEvents?.some((e) => e.displayed && e.continuationSuggestionJa !== null))
+        ? ['实时语音续说建议（B）在练习中已被展示；展示该建议的回合不可认定为无表达支架完成。']
+        : []),
     ],
   }
 }
