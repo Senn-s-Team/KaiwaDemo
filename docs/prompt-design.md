@@ -2,7 +2,7 @@
 
 > **文档性质**：KaiwaDemo 核心 Prompt 架构设计、接口契约与离线验证工程规范（目标设计规范）
 > **文档版本**：Prompt Architecture Specification v1.2
-> **基线说明**：本文档以 `docs/product-summary.md`（Product Baseline v2.0）及当前代码库契约（`src/types.ts`、`worker/constants.ts`、`worker/scenarios.ts`）为基准。文档系统梳理当前实现状态、演进目标设计与成熟期暂缓项，明确区分当前运行时事实与目标架构设计。
+> **基线说明**：本文档以 `docs/product-summary.md`（Product Baseline v1.1）及当前代码库契约（`src/types.ts`、`worker/constants.ts`、`worker/scenarios.ts`）为基准。当前运行时的场景准备最多澄清一次，训练固定五个正式回合；下文仍保留的“最多两次澄清”和“6 至 8 轮”仅是目标设计契约，不构成当前运行时要求。文档系统梳理当前实现状态、演进目标设计与成熟期暂缓项，明确区分当前运行时事实与目标架构设计。
 > **适用对象**：Prompt 研发工程师、LLM 评测与测试开发人员、AI 对话流设计人员。
 
 ---
