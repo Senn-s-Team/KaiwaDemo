@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 zod、../types、../../shared/listening-scaffold 与 ../../shared/speech-assist 的跨端 API 协议
- * [OUTPUT]: 对外提供配置、动态会话、回复、提示、反馈、重做、四级听力支架与语音续说辅助请求函数及响应校验
+ * [OUTPUT]: 提供原场景复练请求及版本化证据响应； 对外提供配置、动态会话、回复、提示、反馈、重做、四级听力支架与语音续说辅助请求函数及响应校验
  * [POS]: src/lib 的 HTTP 通信边界，负责序列化前端请求并严格验证服务端结构化响应
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -69,6 +69,12 @@ const FeedbackTextSchema = z.string().trim().min(1).refine(
 )
 
 export const FeedbackResponseSchema = z.object({
+  evaluationVersion: z.number().int().positive().optional(),
+  evidenceResults: z.array(z.object({
+    pointId: z.string().min(1),
+    status: z.enum(['completed', 'not_completed', 'not_observed', 'insufficient_evidence']),
+    evidence: z.array(z.object({turn: z.number().int().min(1).max(5), quoteJa: z.string().trim().min(1)}).strict()),
+  }).strict()).optional(),
   outcome: z.enum(['completed', 'partial', 'not_completed', 'insufficient_evidence']),
   outcomeEvidenceZh: FeedbackTextSchema,
   listeningFinding: z.object({
@@ -150,6 +156,7 @@ export async function startScenarioSession(
     scenarioType: 'dynamic',
     sessionToken: data.sessionToken as string,
     scenarioToken,
+    practiceToken: data.practiceToken as string | undefined,
     dynamicData,
     reveal: data.reveal as SessionScenario['reveal'],
   }
@@ -311,7 +318,7 @@ export function buildFeedbackRequestPayload(
       failureCount: record.failureCount,
       retryCount: record.retryCount,
       textFallback: record.inputMode === 'text',
-      speechAssistUsed: record.speechAssistEvents.some((event) => event.displayed),
+      speechAssistUsed: record.speechAssistEvents.some((event) => event.displayed && event.continuationSuggestionJa !== null),
     })),
   }
 }
@@ -358,4 +365,14 @@ export async function requestSpeechAssist(
   })
   if (!response.ok) throw await errorFromResponse(response)
   return SpeechAssistResponseSchema.parse(await response.json())
+}
+
+export async function restartPractice(practiceToken: string, signal?: AbortSignal): Promise<import('../types').ScenarioDraftReadyResponse> {
+  const response = await fetch('/api/practice/restart', {
+    method: 'POST', signal,
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ practiceToken }),
+  })
+  if (!response.ok) throw await errorFromResponse(response)
+  return response.json() as Promise<import('../types').ScenarioDraftReadyResponse>
 }

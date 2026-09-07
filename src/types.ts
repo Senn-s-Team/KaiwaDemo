@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖浏览器会话编排、动态场景协议、共享听力支架协议与语音续说辅助观测数据
- * [OUTPUT]: 对外提供前端会话、四级支架、反馈、恢复、指标与报告领域类型
+ * [OUTPUT]: 提供可选版本化证据、长期复练凭据与旧单场兼容类型； 对外提供前端会话、四级支架、反馈、恢复、指标与报告领域类型
  * [POS]: src 的前端领域类型总入口，统一动态会话与可序列化消息缓存的数据形状
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -40,6 +40,8 @@ export interface TrainingGoal {
 export interface DynamicScenarioData {
   id: string
   version: number
+  evaluationVersion?: number
+  evidencePoints?: readonly TrainingGoal[]
   titleZh: string
   summaryZh: string
   aiRole: string
@@ -79,6 +81,7 @@ export interface SessionScenario {
   scenarioType: 'dynamic'
   sessionToken: string
   scenarioToken: string
+  practiceToken?: string
   dynamicData: DynamicScenarioData
 }
 
@@ -97,6 +100,7 @@ export interface ScenarioDraftReadyResponse {
   status: 'ready'
   scenario: DynamicScenarioData
   scenarioToken: string
+  practiceToken?: string
 }
 
 export type ScenarioDraftResponse = ScenarioDraftClarificationResponse | ScenarioDraftReadyResponse
@@ -130,7 +134,15 @@ export interface RedoTask {
   directionZh: string
 }
 
+export interface EvidenceResult {
+  pointId: string
+  status: 'completed' | 'not_completed' | 'not_observed' | 'insufficient_evidence'
+  evidence: { turn: number; quoteJa: string }[]
+}
+
 export interface ConversationFeedbackResponse {
+  evaluationVersion?: number
+  evidenceResults?: EvidenceResult[]
   outcome: FeedbackOutcome
   outcomeEvidenceZh: string
   listeningFinding: ListeningFinding | null

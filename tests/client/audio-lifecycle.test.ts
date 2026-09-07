@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖浏览器音频、麦克风与 TTS 生命周期公开接口
+ * [OUTPUT]: 验证共享麦克风释放、权限并发、TTS 操作取消及真实 HTMLAudioElement 暂停继续位置
+ * [POS]: tests/client 的浏览器媒体生命周期契约，保护资源释放和不重置播放位置的交互事实
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { describe, expect, it } from 'vitest'
 import { formatRecordingTime, microphoneLevelToBars, shouldWarnSilence } from '../../src/lib/audio-feedback'
 import { microphoneReadinessFromError, queryMicrophonePermission, setCachedMicrophoneReadiness } from '../../src/lib/microphone'
@@ -114,6 +120,74 @@ describe('microphone capture readiness', () => {
       } else {
         Reflect.deleteProperty(globalThis, 'AudioContext')
       }
+    }
+  })
+
+  it('CachedTtsPlayer pauses and resumes the same HTMLAudioElement at its current position', async () => {
+    const originalAudioDesc = Object.getOwnPropertyDescriptor(globalThis, 'Audio')
+    const listeners = new Map<string, Set<() => void>>()
+    let createdAudio: FakeAudio | null = null
+
+    class FakeAudio {
+      paused = true
+      currentTime = 0
+      src = ''
+      preload = ''
+      muted = false
+      setAttribute(): void {}
+      removeAttribute(): void {}
+      load(): void {}
+      pause(): void { this.paused = true }
+      async play(): Promise<void> { this.paused = false }
+      addEventListener(type: string, listener: () => void): void {
+        const registered = listeners.get(type) ?? new Set<() => void>()
+        registered.add(listener)
+        listeners.set(type, registered)
+      }
+      removeEventListener(type: string, listener: () => void): void {
+        listeners.get(type)?.delete(listener)
+      }
+      emit(type: string): void {
+        for (const listener of listeners.get(type) ?? []) listener()
+      }
+    }
+
+    Object.defineProperty(globalThis, 'Audio', {
+      configurable: true,
+      writable: true,
+      value: class extends FakeAudio {
+        constructor() {
+          super()
+          createdAudio = this
+        }
+      },
+    })
+
+    try {
+      const player = new CachedTtsPlayer()
+      const cache = Reflect.get(player, 'cache') as Map<string, { url: string; bytes: number }>
+      cache.set('voice:model:テスト', { url: 'blob:test', bytes: 1 })
+      const playback = player.speak({
+        text: 'テスト', voiceId: 'voice', modelId: 'model',
+        onGenerationStarted: () => undefined, onFirstAudio: () => undefined,
+        onAudioStarted: () => undefined, onAudioEnded: () => undefined, onTtsRequest: () => undefined,
+      })
+      await Promise.resolve()
+      expect(createdAudio?.paused).toBe(false)
+      if (!createdAudio) throw new Error('Expected CachedTtsPlayer to create an HTMLAudioElement.')
+      createdAudio.currentTime = 12.5
+      expect(player.pause()).toBe(true)
+      expect(createdAudio.paused).toBe(true)
+      expect(createdAudio.currentTime).toBe(12.5)
+      expect(await player.resume()).toBe(true)
+      expect(createdAudio.paused).toBe(false)
+      expect(createdAudio.currentTime).toBe(12.5)
+      createdAudio.emit('ended')
+      await playback
+      player.dispose()
+    } finally {
+      if (originalAudioDesc) Object.defineProperty(globalThis, 'Audio', originalAudioDesc)
+      else Reflect.deleteProperty(globalThis, 'Audio')
     }
   })
 

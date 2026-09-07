@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 ./api 的 streamReply 与 ReplyResult，./tts 的 CachedTtsPlayer/TtsCancelledError，./session 的 decideNextSessionStep/createMessageId，./metrics 的 createRoundRecord，./ui 的 toUiError
- * [OUTPUT]: 对外提供 useAiTurnController 自定义 Hook、createAiTurnRuntime（支持运行时依赖快照实时同步）、aiTurnReducer 纯状态机、AiTurnDependencies、AiTurnState、AiTurnActions 等类型
- * [POS]: src/lib 的相手 AI 回合控制器深模块，闭环拥有 LLM 流式应答、TTS 语音播放/降级/重播、五回合自然判定与回合流转
+ * [OUTPUT]: 对外提供 useAiTurnController 自定义 Hook、createAiTurnRuntime（支持运行时依赖快照实时同步）、aiTurnReducer 纯状态机、含暂停/继续的播放动作及相关类型
+ * [POS]: src/lib 的相手 AI 回合控制器深模块，闭环拥有 LLM 流式应答、TTS 语音播放/暂停/继续/降级、五回合自然判定与回合流转
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { useEffect, useLayoutEffect, useReducer, useState } from 'react'
@@ -15,9 +15,10 @@ import type { AppPhase, ConversationMessage, RoundRecord, SessionScenario, UiErr
 export interface TtsPlayerLike {
   speak: (options: SpeakOptions) => Promise<unknown>
   stop: () => void
+  pause?: () => boolean
+  resume?: () => Promise<boolean>
   unlock: () => Promise<void>
 }
-
 export interface AiTurnAdapters {
   streamReply?: (
     sessionId: string,
@@ -60,6 +61,7 @@ export interface AiTurnState {
   activeAiMessageId: string | null
   playedAiMessageIds: Set<string>
   expandedAiMessageIds: Set<string>
+  pausedAiMessageId: string | null
   reviewAudioNotice: string
   aiError: UiError | null
   lastFailedStep: 'llm' | 'tts' | null
@@ -70,6 +72,7 @@ export type AiTurnAction =
   | { type: 'LLM_SUCCESS'; replyText: string }
   | { type: 'SET_ACTIVE_AI_MESSAGE'; messageId: string | null }
   | { type: 'MARK_AI_MESSAGE_PLAYED'; messageId: string }
+  | { type: 'SET_PAUSED_AI_MESSAGE'; messageId: string | null }
   | { type: 'TOGGLE_EXPAND_AI_MESSAGE'; messageId: string }
   | { type: 'SET_AI_TEXT_REVEALED'; revealed: boolean }
   | { type: 'TOGGLE_AI_TEXT_REVEALED' }
@@ -84,6 +87,7 @@ export const initialAiTurnState: AiTurnState = {
   activeAiMessageId: null,
   playedAiMessageIds: new Set<string>(),
   expandedAiMessageIds: new Set<string>(),
+  pausedAiMessageId: null,
   reviewAudioNotice: '',
   aiError: null,
   lastFailedStep: null,
@@ -109,6 +113,11 @@ export function aiTurnReducer(state: AiTurnState, action: AiTurnAction): AiTurnS
       return {
         ...state,
         activeAiMessageId: action.messageId,
+      }
+    case 'SET_PAUSED_AI_MESSAGE':
+      return {
+        ...state,
+        pausedAiMessageId: action.messageId,
       }
     case 'MARK_AI_MESSAGE_PLAYED': {
       if (state.playedAiMessageIds.has(action.messageId)) return state
@@ -176,6 +185,8 @@ export interface AiTurnActions {
     messageId?: string,
   ) => Promise<void>
   stopAiPlayback: () => void
+  pauseAiPlayback: () => void
+  resumeAiPlayback: () => Promise<void>
   skipFailedTts: () => void
   playReviewAudio: (text: string) => Promise<void>
   toggleExpandAiMessage: (messageId: string) => void
@@ -195,6 +206,7 @@ export interface AiTurnController {
   meta: {
     pendingAdvanceReply: string | null
     isTtsActionLocked: boolean
+    isPlaybackPaused: boolean
   }
 }
 
@@ -206,6 +218,7 @@ export interface AiTurnRuntime {
   meta: {
     pendingAdvanceReply: string | null
     isTtsActionLocked: boolean
+    isPlaybackPaused: boolean
   }
 }
 
@@ -263,6 +276,7 @@ export function createAiTurnRuntime(
 
   const dispose = () => {
     playbackGeneration += 1
+    dispatch({ type: 'SET_PAUSED_AI_MESSAGE', messageId: null })
     llmAbortController?.abort('disposed')
     llmAbortController = null
     ttsPlayer.stop()
@@ -304,6 +318,7 @@ export function createAiTurnRuntime(
     if (!currentDeps.operation.isCurrent(operationId)) return
 
     playbackGeneration += 1
+    dispatch({ type: 'SET_PAUSED_AI_MESSAGE', messageId: null })
     const currentGeneration = playbackGeneration
 
     ttsActionLock = true
@@ -406,6 +421,21 @@ export function createAiTurnRuntime(
     }
   }
 
+  const pauseAiPlayback = () => {
+    const activeMessageId = state.activeAiMessageId
+    if (!activeMessageId || !ttsPlayer.pause?.()) return
+    dispatch({ type: 'SET_PAUSED_AI_MESSAGE', messageId: activeMessageId })
+  }
+
+  const resumeAiPlayback = async () => {
+    const activeMessageId = state.pausedAiMessageId
+    if (!activeMessageId) return
+    if (await ttsPlayer.resume?.()) {
+      dispatch({ type: 'SET_PAUSED_AI_MESSAGE', messageId: null })
+    }
+  }
+
+
   const stopAiPlayback = () => {
     playbackGeneration += 1
     ttsPlayer.stop()
@@ -416,6 +446,7 @@ export function createAiTurnRuntime(
         round.timing.audioCompletedAt = Date.now()
       }
     })
+    dispatch({ type: 'SET_PAUSED_AI_MESSAGE', messageId: null })
     if (pendingReply) {
       finalizeAndAdvance(pendingReply)
     } else {
@@ -435,6 +466,7 @@ export function createAiTurnRuntime(
     } else {
       currentDeps.transitionTo('waiting_user')
     }
+    dispatch({ type: 'SET_PAUSED_AI_MESSAGE', messageId: null })
   }
 
   const playReviewAudio = async (text: string) => {
@@ -554,6 +586,8 @@ export function createAiTurnRuntime(
     generateNextReply,
     playAiText,
     stopAiPlayback,
+    pauseAiPlayback,
+    resumeAiPlayback,
     skipFailedTts,
     playReviewAudio,
     toggleExpandAiMessage,
@@ -578,6 +612,9 @@ export function createAiTurnRuntime(
       },
       get isTtsActionLocked() {
         return ttsActionLock
+      },
+      get isPlaybackPaused() {
+        return state.pausedAiMessageId !== null
       },
     },
   }

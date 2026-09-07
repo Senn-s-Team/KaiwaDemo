@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 ./api 的 requestElevenLabsToken 获取临时密钥、HTMLAudioElement 与 Web AudioContext 播放音频
- * [OUTPUT]: 对外提供 CachedTtsPlayer 类（含 unlock 音频解锁缓存与 speak 流式合成）、TtsCancelledError 与错误解析辅助
- * [POS]: src/lib 的语音合成播放模块，负责相手语音的流式获取、本地缓存与手势期音频就绪解锁
+ * [OUTPUT]: 对外提供 CachedTtsPlayer 类（含 unlock 音频解锁缓存、流式合成及原位置暂停继续）、TtsCancelledError 与错误解析辅助
+ * [POS]: src/lib 的语音合成播放模块，负责相手语音的流式获取、本地缓存、原位置播放控制与手势期音频就绪解锁
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { z } from 'zod'
@@ -170,6 +170,22 @@ export class CachedTtsPlayer {
     assertCurrentTtsOperation(operationId, this.operationId)
     await this.play(cached.url, options, operationId)
     return { generated, bytes: cached.bytes }
+  }
+
+  pause(): boolean {
+    if (!this.audio || this.audio.paused || !this.playbackAbort) return false
+    this.audio.pause()
+    return true
+  }
+
+  async resume(): Promise<boolean> {
+    if (!this.audio || !this.audio.paused || !this.playbackAbort) return false
+    try {
+      await this.audio.play()
+      return true
+    } catch {
+      return false
+    }
   }
 
   stop(): void {

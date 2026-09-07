@@ -1,10 +1,10 @@
 /**
- * [INPUT]: 依赖 lib/api 接口请求、shared/listening-scaffold 四级听力支架协议、lib/voice-turn-controller 语音回合控制器深模块、lib/ai-turn-controller 相手回合控制器深模块、lib/microphone 权限探测、lib/session 会话状态与显式中断恢复状态机
- * [OUTPUT]: 对外提供 App 根组件，驱动 KaiwaDemo 动态五回合会话、按消息缓存的 L0-L4 听力支架、实时语音辅助、阶段感知刷新恢复与全生命周期交互
- * [POS]: src/ 核心入口与主控制器，编排可持久化会话业务状态、四级听力支架、可见语音辅助、phase-aware 安全恢复及 offline/background 中断恢复；不可恢复媒体与网络资源不重放，已提交的业务事实按阶段回滚或推进
+ * [INPUT]: 依赖 lib/practice-history 本机历史、lib/practice-progress 表现比较、lib/api 接口请求、shared/listening-scaffold 内部四级听力协议、lib/stt 中文场景输入识别、lib/voice-turn-controller 语音回合控制器深模块、lib/ai-turn-controller 相手回合控制器深模块、lib/microphone 权限探测、lib/session 会话状态与显式中断恢复状态机
+ * [OUTPUT]: 对外提供 App 根组件，驱动可编辑中文语音场景输入、原场景复练与证据对比、KaiwaDemo 固定五回合会话、渐进帮助、可暂停继续的相手语音与安全生命周期交互
+ * [POS]: src/ 核心入口与主控制器，编排可持久化会话业务状态、内部四级帮助、不可恢复媒体资源的显式释放与 offline/background 业务中断恢复；pagehide 仅释放资源，真实活动阶段才回滚业务状态
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
-import { AlertCircle, ArrowRight, Keyboard, Lightbulb, MessageCircle, Mic, Pencil, Sparkles, Square, Target, Volume2, X } from 'lucide-react'
+import { AlertCircle, ArrowRight, Keyboard, Lightbulb, MessageCircle, Mic, Pencil, Square, Target, Volume2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
 import type { SpeechAssistAbortReason } from '../shared/speech-assist'
@@ -26,18 +26,21 @@ import {
   requestRedoFeedback,
   requestSpeechAssist,
   startScenarioSession,
+  restartPractice,
 } from './lib/api'
 import { buildSessionReport, createRoundRecord, downloadReport } from './lib/metrics'
-import { buildSparkPrompt } from './lib/spark-practice'
+import { savePracticeAttempt, listPracticeAttempts, deletePracticeScenario, type PracticeAttempt, type StoredPracticeAttempt } from './lib/practice-history'
+import { comparePracticeAttempts } from './lib/practice-progress'
+import { buildSparkPrompt, drawPracticeExamples } from './lib/spark-practice'
+import { appendHomeSttText, shouldApplyHomeSttResult, shouldCancelHomeSttForTransition } from './lib/home-stt'
 import { queryMicrophonePermission } from './lib/microphone'
-import { shouldTeardownOnVisibility } from './lib/audio-engine'
+import { releaseMicrophoneStream, shouldTeardownOnVisibility } from './lib/audio-engine'
 import { createMessageId, createSessionId, decideInterruptionRecovery, decideInterruptionRecoveryAffordances, executeInterruptionRecovery, INITIAL_INTERRUPTION_RECOVERY_STATE, reduceInterruptionRecovery } from './lib/session'
 import { RealtimeSttSession } from './lib/stt'
 import { toUiError } from './lib/ui'
 import { useVoiceTurnController } from './lib/voice-turn-controller'
 import { useAiTurnController } from './lib/ai-turn-controller'
 import { ASSIST_TIMING, shouldDisplaySpeechAssistResult, shouldTriggerSpeechAssist, type ActiveSpeechAssistState } from './lib/speech-assist'
-import { drawRandomScenario, type VocabScenario } from './data/vocab-bank'
 import type {
   AppPhase,
   ConversationFeedbackResponse,
@@ -173,17 +176,14 @@ const STATUS_LABELS: Record<AppPhase, string> = {
   error: '需要处理',
 }
 
-const ACTIVE_SESSION_PHASES: AppPhase[] = [
+const BACKGROUND_INTERRUPT_PHASES: readonly AppPhase[] = [
   'fetching_token',
   'connecting_stt',
-  'waiting_user',
   'recording',
   'finalizing_transcript',
-  'confirming_transcript',
   'requesting_llm',
   'preparing_tts',
   'playing_ai',
-  'round_complete',
 ]
 const PHASE_TRANSITIONS: Record<AppPhase, readonly AppPhase[]> = {
   loading_config: ['idle', 'preparing_tts', 'error'],
@@ -208,19 +208,19 @@ interface ListeningRequestState {
 }
 
 const LISTENING_LEVEL_LABELS: Record<ListeningScaffoldLevel, string> = {
-  0: 'L0 未使用支架',
-  1: 'L1 已原速重听',
-  2: 'L2 已显示关键信息',
-  3: 'L3 已显示日语台词',
-  4: 'L4 已显示中文意图',
+  0: '未查看帮助',
+  1: '已重听',
+  2: '已查看关键信息',
+  3: '已查看日语台词',
+  4: '已查看中文意图',
 }
 
 function nextListeningAction(level: ListeningScaffoldLevel): string | null {
   switch (level) {
-    case 0: return 'L1 原速重听'
-    case 1: return 'L2 查看关键信息线索'
-    case 2: return 'L3 查看日语台词'
-    case 3: return 'L4 查看中文意图'
+    case 0: return '没听懂'
+    case 1: return '查看关键信息'
+    case 2: return '查看日语台词'
+    case 3: return '查看中文意图'
     case 4: return null
   }
 }
@@ -272,13 +272,29 @@ function App() {
   const [copyStatus, setCopyStatus] = useState('')
   const [pendingHistory, setPendingHistory] = useState<ConversationMessage[]>([])
   const requestAbortRef = useRef<AbortController | null>(null)
-  const [sparkScenario, setSparkScenario] = useState<VocabScenario>(() => drawRandomScenario())
-  const [homeTab, setHomeTab] = useState<'spark' | 'custom'>('spark')
   const [customInputZh, setCustomInputZh] = useState('')
   const [clarifications, setClarifications] = useState<Array<{ questionZh: string; answerZh: string }>>([])
   const [pendingClarification, setPendingClarification] = useState<{ questionZh: string; optionsZh: readonly string[] } | null>(null)
-  const [readyScenarioData, setReadyScenarioData] = useState<{ scenario: DynamicScenarioData; scenarioToken: string } | null>(null)
+  const [readyScenarioData, setReadyScenarioData] = useState<{ scenario: DynamicScenarioData; scenarioToken: string; practiceToken?: string } | null>(null)
   const [isDraftingScenario, setIsDraftingScenario] = useState(false)
+  const [practiceHistory, setPracticeHistory] = useState<StoredPracticeAttempt[]>([])
+  const [historyNotice, setHistoryNotice] = useState('')
+  const [historySaving, setHistorySaving] = useState(false)
+  const [historySaveFailed, setHistorySaveFailed] = useState(false)
+  const historyWriteRef = useRef<Promise<void>>(Promise.resolve())
+  const deletedPracticeSessionsRef = useRef(new Set<string>())
+  const feedbackRequestVersionRef = useRef(0)
+  const draftRequestRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    let active = true
+    void listPracticeAttempts().then((attempts) => {
+      if (active) setPracticeHistory(attempts)
+    }).catch(() => {
+      if (active) setHistoryNotice('无法读取本机历史，仍可开始新练习。')
+    })
+    return () => { active = false; draftRequestRef.current?.abort() }
+  }, [])
   const [hintData, setHintData] = useState<HintResponse | null>(null)
   const [hintLevel, setHintLevel] = useState<0 | 1 | 2 | 3 | 4>(0)
   const [isLoadingHint, setIsLoadingHint] = useState(false)
@@ -486,6 +502,7 @@ function App() {
   const {
     currentAiText,
     activeAiMessageId,
+    pausedAiMessageId,
     playedAiMessageIds,
     reviewAudioNotice,
     aiError,
@@ -495,6 +512,8 @@ function App() {
     generateNextReply,
     playAiText,
     stopAiPlayback,
+    pauseAiPlayback,
+    resumeAiPlayback,
     skipFailedTts,
     playReviewAudio,
     initFirstLine,
@@ -692,6 +711,15 @@ function App() {
   }, [currentRoundView, listeningLevels, rounds])
 
   const replayPartnerMessage = useCallback((message: ConversationMessage) => {
+    const isActiveMessage = activeAiMessageId === message.id
+    if (isActiveMessage && pausedAiMessageId === message.id) {
+      void resumeAiPlayback()
+      return
+    }
+    if (isActiveMessage && aiTurn.meta.isTtsActionLocked) {
+      pauseAiPlayback()
+      return
+    }
     if (aiTurn.meta.isTtsActionLocked) return
     setListeningLevelAtLeast(message.id, 1)
     updateRoundByTurn(message.turn, (round) => {
@@ -699,7 +727,7 @@ function App() {
       if (round.listeningScaffoldLevel < 1) round.listeningScaffoldLevel = 1
     })
     void playAiText(message.text, false, undefined, message.id)
-  }, [aiTurn.meta.isTtsActionLocked, playAiText, setListeningLevelAtLeast, updateRoundByTurn])
+  }, [activeAiMessageId, aiTurn.meta.isTtsActionLocked, pausedAiMessageId, pauseAiPlayback, playAiText, resumeAiPlayback, setListeningLevelAtLeast, updateRoundByTurn])
 
   const advanceListeningScaffold = useCallback(async (message: ConversationMessage) => {
     const level = getListeningLevel(message)
@@ -902,7 +930,7 @@ function App() {
       interruptActiveSession('offline')
     }
     const handleVisibility = () => {
-      if (document.visibilityState === 'hidden' && ACTIVE_SESSION_PHASES.includes(phaseRef.current)) {
+      if (document.visibilityState === 'hidden' && BACKGROUND_INTERRUPT_PHASES.includes(phaseRef.current)) {
         // 如果正在等待用户麦克风系统权限弹窗，切出属于正常系统弹窗遮挡/切换行为，不能误杀刚获取的流或判定失败
         if (!shouldTeardownOnVisibility(document.hidden)) {
           return
@@ -954,6 +982,7 @@ function App() {
     setUiError(null)
     setInlineError('')
     setCopyStatus('')
+    feedbackRequestVersionRef.current++
     setFeedbackData(null)
     setFeedbackStatus('idle')
     setFeedbackErrorMsg('')
@@ -995,6 +1024,7 @@ function App() {
       if (controller.signal.aborted || !isCurrentOperation(operationId)) return
       setUiError(toUiError(error))
       setLastFailedStep('scenario')
+      transitionTo('idle')
     } finally {
       if (requestAbortRef.current === controller) requestAbortRef.current = null
       sessionStartLockRef.current = false
@@ -1003,23 +1033,28 @@ function App() {
   const handleDraftScenario = useCallback(async (customPrompt?: string, clarificationsList?: Array<{ questionZh: string; answerZh: string }>, forceGen?: boolean) => {
     const text = customPrompt ?? customInputZh
     if (!text.trim()) return
+    draftRequestRef.current?.abort()
+    const controller = new AbortController()
+    draftRequestRef.current = controller
     setIsDraftingScenario(true)
     setUiError(null)
     const list = clarificationsList ?? clarifications
 
     try {
-      const res = await draftScenario(text.trim(), list, forceGen ?? false, AbortSignal.timeout(25_000))
+      const res = await draftScenario(text.trim(), list, forceGen ?? false, AbortSignal.any([controller.signal, AbortSignal.timeout(25_000)]))
+      if (controller.signal.aborted) return
       if (res.status === 'needs_clarification') {
         setPendingClarification({ questionZh: res.questionZh, optionsZh: res.optionsZh })
       } else {
         setPendingClarification(null)
-        setReadyScenarioData({ scenario: res.scenario, scenarioToken: res.scenarioToken })
+        setReadyScenarioData({ scenario: res.scenario, scenarioToken: res.scenarioToken, practiceToken: res.practiceToken })
       }
     } catch (error) {
+      if (controller.signal.aborted) return
       setUiError(toUiError(error))
       setLastFailedStep('scenario')
     } finally {
-      setIsDraftingScenario(false)
+      if (draftRequestRef.current === controller) setIsDraftingScenario(false)
     }
   }, [clarifications, customInputZh])
 
@@ -1031,11 +1066,6 @@ function App() {
     setPendingClarification(null)
     void handleDraftScenario(undefined, next, false)
   }, [clarifications, handleDraftScenario, pendingClarification])
-
-  const handlePrepareSpark = useCallback(async (spark: VocabScenario) => {
-    const prompt = buildSparkPrompt(spark)
-    await handleDraftScenario(prompt, [], true)
-  }, [handleDraftScenario])
 
   const handleRequestHint = useCallback(async () => {
     const nextLevel = Math.min(4, hintLevel + 1) as 0 | 1 | 2 | 3 | 4
@@ -1076,19 +1106,50 @@ function App() {
     transitionTo('session_complete')
   }, [appendRound, replaceCurrentRound, stopActiveResources, transitionTo])
 
+  const persistPractice = useCallback((attempt: PracticeAttempt) => {
+    if (deletedPracticeSessionsRef.current.has(attempt.report.sessionId)) return Promise.resolve()
+    setHistorySaving(true)
+    setHistorySaveFailed(false)
+    const pending = historyWriteRef.current.then(async () => {
+      if (deletedPracticeSessionsRef.current.has(attempt.report.sessionId)) return
+      await savePracticeAttempt(attempt)
+      setPracticeHistory(await listPracticeAttempts())
+      setHistorySaveFailed(false)
+      setHistoryNotice('已保存到当前浏览器。')
+    }).catch(() => {
+      setHistorySaveFailed(true)
+      setHistoryNotice('本次未保存到浏览器，请重试或导出训练报告。')
+    }).finally(() => {
+      if (historyWriteRef.current === pending) setHistorySaving(false)
+    })
+    historyWriteRef.current = pending
+    return pending
+  }, [])
+
   const fetchFeedback = useCallback(async () => {
     if (!scenario || roundsRef.current.length === 0) return
+    const requestVersion = ++feedbackRequestVersionRef.current
+    const completedReport = config && sessionStartedAt !== null && sessionEndedAt !== null
+      ? buildSessionReport(sessionId, config.mode, scenario, sessionStartedAt, sessionEndedAt, roundsRef.current, redoRecords)
+      : null
     setFeedbackStatus('loading')
     setFeedbackErrorMsg('')
     try {
       const res = await requestConversationFeedback(scenario, roundsRef.current)
+      if (requestVersion !== feedbackRequestVersionRef.current) {
+        if (completedReport && scenario.practiceToken) {
+          await persistPractice({ scenario: scenario.dynamicData, practiceToken: scenario.practiceToken, report: completedReport, feedback: res })
+        }
+        return
+      }
       setFeedbackData(res)
       setFeedbackStatus('success')
     } catch (error) {
+      if (requestVersion !== feedbackRequestVersionRef.current) return
       setFeedbackStatus('error')
       setFeedbackErrorMsg(error instanceof Error ? error.message : '反馈生成失败，可点击重试。')
     }
-  }, [scenario])
+  }, [config, persistPractice, redoRecords, scenario, sessionEndedAt, sessionId, sessionStartedAt])
 
   useEffect(() => {
     if (phase === 'session_complete' && !feedbackFetchedRef.current && scenario && roundsRef.current.length > 0) {
@@ -1208,6 +1269,11 @@ function App() {
   }, [aiTurn.actions, enterTextInput, voiceTurn.actions])
 
   const resetSession = useCallback(() => {
+    feedbackRequestVersionRef.current++
+    setFeedbackData(null)
+    setFeedbackStatus('idle')
+    setFeedbackErrorMsg('')
+    setUiError(null)
     stopActiveResources()
     dispatchInterruptionRecovery({ type: 'reset' })
     clearSessionSnapshot()
@@ -1251,6 +1317,59 @@ function App() {
     if (!config || !scenario || !sessionId || sessionStartedAt === null || sessionEndedAt === null) return null
     return buildSessionReport(sessionId, config.mode, scenario, sessionStartedAt, sessionEndedAt, rounds, redoRecords)
   }, [config, redoRecords, rounds, scenario, sessionEndedAt, sessionId, sessionStartedAt])
+
+  const currentPractice = useMemo<PracticeAttempt | null>(() => {
+    if (!report || !scenario?.practiceToken || report.rounds.length === 0) return null
+    return { scenario: scenario.dynamicData, practiceToken: scenario.practiceToken, report, feedback: feedbackData }
+  }, [feedbackData, report, scenario])
+  const practiceComparison = useMemo(() => currentPractice ? comparePracticeAttempts(currentPractice, practiceHistory) : null, [currentPractice, practiceHistory])
+  const recentPractices = useMemo(() => {
+    const seen = new Set<string>()
+    return practiceHistory.filter((attempt) => {
+      if (seen.has(attempt.scenarioKey)) return false
+      seen.add(attempt.scenarioKey)
+      return true
+    })
+  }, [practiceHistory])
+
+  useEffect(() => {
+    if (currentPractice) void persistPractice(currentPractice)
+  }, [currentPractice, persistPractice])
+
+  const preparePracticeAgain = useCallback(async (attempt: PracticeAttempt) => {
+    if (!online || isDraftingScenario) return
+    resetSession()
+    setCustomInputZh(attempt.scenario.userGoal)
+    draftRequestRef.current?.abort()
+    const controller = new AbortController()
+    draftRequestRef.current = controller
+    setIsDraftingScenario(true)
+    try {
+      const ready = await restartPractice(attempt.practiceToken, AbortSignal.any([controller.signal, AbortSignal.timeout(25_000)]))
+      if (!controller.signal.aborted) setReadyScenarioData(ready)
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setUiError(toUiError(error))
+        setHistoryNotice('原场景暂时无法载入，可从最近练过中重试。')
+      }
+    } finally {
+      if (draftRequestRef.current === controller) setIsDraftingScenario(false)
+    }
+  }, [isDraftingScenario, online, resetSession])
+
+  const removePractice = useCallback(async (attempt: StoredPracticeAttempt) => {
+    if (!window.confirm(`删除“${attempt.scenario.titleZh}”及其全部本机练习记录？`)) return
+    await historyWriteRef.current
+    try {
+      const deleted = practiceHistory.filter((item) => item.scenarioKey === attempt.scenarioKey).map((item) => item.report.sessionId)
+      await deletePracticeScenario(attempt.scenarioKey)
+      deleted.forEach((id) => deletedPracticeSessionsRef.current.add(id))
+      setPracticeHistory(await listPracticeAttempts())
+      setHistoryNotice('已删除该场景的本机练习记录。')
+    } catch {
+      setHistoryNotice('删除失败，练习记录仍保留，请重试。')
+    }
+  }, [practiceHistory])
 
   const copyReport = useCallback(async () => {
     if (!report) return
@@ -1302,11 +1421,8 @@ function App() {
               ready={config !== null}
               online={online}
               error={uiError}
-              homeTab={homeTab}
-              setHomeTab={setHomeTab}
-              sparkScenario={sparkScenario}
-              setSparkScenario={setSparkScenario}
-              onPrepareSpark={(spark) => void handlePrepareSpark(spark)}
+              sttAvailable={Boolean(config?.elevenlabs.sttAvailable)}
+              sttModel={config?.elevenlabs.sttModel ?? ''}
               customInputZh={customInputZh}
               setCustomInputZh={setCustomInputZh}
               clarifications={clarifications}
@@ -1317,7 +1433,24 @@ function App() {
               onAnswerClarification={handleAnswerClarification}
               onStartDynamic={(token) => void startSession(token)}
               onResetCustom={() => { setClarifications([]); setPendingClarification(null); setReadyScenarioData(null) }}
+              recentPracticeSlot={<section className="practice-history" aria-label="本机练习历史">
+              {recentPractices.length > 0 && <>
+                <h2>最近练过</h2>
+                <ul className="practice-history-list">{recentPractices.map((attempt) => (
+                  <li key={attempt.scenarioKey}>
+                    <button className="practice-history-open" type="button" disabled={isDraftingScenario || !online || phase === 'loading_config'} onClick={() => void preparePracticeAgain(attempt)}>
+                      <strong>{attempt.scenario.titleZh}</strong>
+                      <span>{new Date(attempt.report.startedAt).toLocaleDateString('zh-CN')} · {practiceHistory.filter((item) => item.scenarioKey === attempt.scenarioKey).length} 次练习</span>
+                    </button>
+                    <button className="text-button" type="button" disabled={isDraftingScenario || historySaving} onClick={() => void removePractice(attempt)} aria-label={`删除${attempt.scenario.titleZh}的练习记录`}>删除</button>
+                  </li>
+                ))}</ul>
+              </>}
+              {recentPractices.length > 0 && <p className="practice-storage-note">练习记录仅保存在当前浏览器，清理浏览器数据会删除记录。</p>}
+              {historyNotice && <p role="status" className="practice-storage-note">{historyNotice}</p>}
+            </section>}
             />
+
           </section>
         )}
 
@@ -1345,6 +1478,10 @@ function App() {
               onCacheListeningScaffold={cacheListeningScaffold}
               onNewScenario={resetSession}
               audioNotice={reviewAudioNotice}
+              practiceComparison={practiceComparison}
+              onRepeatScenario={currentPractice ? () => void preparePracticeAgain(currentPractice) : undefined}
+              historyNotice={historySaving ? '正在保存本次练习…' : historyNotice}
+              onRetrySave={historySaveFailed && currentPractice ? () => void persistPractice(currentPractice) : undefined}
             />
           </section>
         )}
@@ -1438,19 +1575,13 @@ function App() {
                               className={`im-voice-bubble ${isPlayingThisAi ? 'is-playing' : ''} ${isPreparingThisAi ? 'is-preparing' : ''} ${hasPlayed ? 'is-played' : 'is-unplayed'}`}
                               type="button"
                               onClick={() => replayPartnerMessage(message)}
-                              aria-label={isPlayingThisAi ? '相手语音正在播放' : hasPlayed ? '重播相手语音' : '播放相手语音'}
+                              aria-label={isActiveAudio && pausedAiMessageId === message.id ? '继续播放相手语音' : isPlayingThisAi ? '暂停相手语音' : hasPlayed ? '从头重听相手语音' : '播放相手语音'}
                             >
                               <span className="im-voice-unread-dot" aria-hidden="true" />
-                              <span className="im-voice-icon-box">
-                                <span className="im-voice-waves" aria-hidden="true">
-                                  <span /><span /><span />
-                                </span>
-                              </span>
-                              <span className="im-voice-duration">
-                                {Math.max(2, Math.round(message.text.length * 0.18))}″
-                              </span>
+                              <span className="im-voice-icon-box"><span className="im-voice-waves" aria-hidden="true"><span /><span /><span /></span></span>
+                              <span className="im-voice-duration">{Math.max(2, Math.round(message.text.length * 0.18))}″</span>
                               <span className="im-voice-status-tip" aria-live="polite">
-                                {isPlayingThisAi ? '播放中' : isPreparingThisAi ? '载入中' : hasPlayed ? '重听' : '未播放'}
+                                {isActiveAudio && pausedAiMessageId === message.id ? '继续播放' : isPlayingThisAi ? '暂停' : isPreparingThisAi ? '载入中' : hasPlayed ? '从头重听' : '播放'}
                               </span>
                             </button>
 
@@ -1464,31 +1595,31 @@ function App() {
                                   onClick={() => void advanceListeningScaffold(message)}
                                 >
                                   <span aria-hidden="true">+</span>
-                                  {requestState?.loading ? '正在获取 L2 线索...' : nextAction}
+                                  {requestState?.loading ? '正在获取关键信息…' : nextAction}
                                 </button>
                               )}
                             </div>
                             {requestState?.error && (
                               <p className="im-listening-error" role="alert">
-                                {requestState.error} 未升级层级，可点击 L2 重试。
+                                {requestState.error} 未显示新帮助，可再次尝试。
                               </p>
                             )}
                             {listeningLevel >= 2 && message.listeningScaffold && (
                               <div className="im-listening-scaffold is-hint">
-                                <strong>L2 关键信息线索</strong>
+                                <strong>关键信息</strong>
                                 <p>{message.listeningScaffold.keyInformationHintZh}</p>
                                 <p className="im-listening-key-phrases" lang="ja">原文线索：{message.listeningScaffold.keyPhrasesJa.join(' / ')}</p>
                               </div>
                             )}
                             {listeningLevel >= 3 && (
                               <div className="im-expanded-transcript">
-                                <strong>L3 日语台词</strong>
+                                <strong>日语台词</strong>
                                 <p lang="ja">{message.text}</p>
                               </div>
                             )}
                             {listeningLevel >= 4 && message.listeningScaffold && (
                               <div className="im-listening-scaffold is-intent">
-                                <strong>L4 一句中文意图</strong>
+                                <strong>这句话想表达</strong>
                                 <p>{message.listeningScaffold.intentSummaryZh}</p>
                               </div>
                             )}
@@ -1617,10 +1748,10 @@ function App() {
                       onSubmit={(e) => {
                         e.preventDefault()
                         if (!dockTextValue.trim()) return
+                        enterTextInput()
                         updateFinalText(dockTextValue.trim())
                         setDockTextValue('')
                         openTranscriptSheet()
-                        enterTextInput()
                       }}
                     >
                       <input
@@ -1652,8 +1783,8 @@ function App() {
                       }
                       setShowHintSheet(true)
                     }}
-                    title="获取表达提示"
-                    disabled={isLoadingHint}
+                    title="不知道怎么说"
+                    aria-label="不知道怎么说，查看表达帮助"
                   >
                     <Lightbulb size={18} />
                   </button>
@@ -1795,7 +1926,7 @@ function App() {
                 <div className="im-bottom-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className="im-sheet-drag-handle" />
                   <div className="im-sheet-header">
-                    <h3 className="im-sheet-title"><Lightbulb size={18} /> 表达提示 ({Math.max(1, hintLevel)}/4 级)</h3>
+                    <h3 className="im-sheet-title"><Lightbulb size={18} /> 不知道怎么说</h3>
                     <button className="im-sheet-close-btn" type="button" onClick={() => setShowHintSheet(false)}><X size={18} /></button>
                   </div>
                   <div className="im-sheet-content">
@@ -1836,7 +1967,7 @@ function App() {
                         type="button"
                         onClick={() => void handleRequestHint()}
                       >
-                        进阶下一级提示 <ArrowRight size={14} />
+                        再多给一点帮助 <ArrowRight size={14} />
                       </button>
                     )}
                     <button
@@ -1895,13 +2026,10 @@ interface HomeProps {
   ready: boolean
   online: boolean
   error: UiError | null
-  homeTab: 'spark' | 'custom'
-  setHomeTab: (tab: 'spark' | 'custom') => void
-  sparkScenario: VocabScenario
-  setSparkScenario: React.Dispatch<React.SetStateAction<VocabScenario>>
-  onPrepareSpark: (scenario: VocabScenario) => void
+  sttAvailable: boolean
+  sttModel: string
   customInputZh: string
-  setCustomInputZh: (value: string) => void
+  setCustomInputZh: React.Dispatch<React.SetStateAction<string>>
   clarifications: Array<{ questionZh: string; answerZh: string }>
   pendingClarification: { questionZh: string; optionsZh: readonly string[] } | null
   readyScenarioData: { scenario: DynamicScenarioData; scenarioToken: string } | null
@@ -1910,92 +2038,159 @@ interface HomeProps {
   onAnswerClarification: (answer: string) => void
   onStartDynamic: (scenarioToken: string) => void
   onResetCustom: () => void
+  recentPracticeSlot?: React.ReactNode
 }
 
 function Home({
-  loading,
-  ready,
-  online,
-  error,
-  homeTab,
-  setHomeTab,
-  sparkScenario,
-  setSparkScenario,
-  onPrepareSpark,
-  customInputZh,
-  setCustomInputZh,
-  clarifications,
-  pendingClarification,
-  readyScenarioData,
-  isDraftingScenario,
-  onDraftScenario,
-  onAnswerClarification,
-  onStartDynamic,
-  onResetCustom,
+  loading, ready, online, error, sttAvailable, sttModel, customInputZh, setCustomInputZh,
+  clarifications, pendingClarification, readyScenarioData, isDraftingScenario,
+  onDraftScenario, onAnswerClarification, onStartDynamic, onResetCustom, recentPracticeSlot,
 }: HomeProps): React.JSX.Element {
   const [clarificationInput, setClarificationInput] = useState('')
+  const [examples, setExamples] = useState(() => drawPracticeExamples())
+  const topicInputRef = useRef<HTMLTextAreaElement>(null)
+  const [homeSttState, setHomeSttState] = useState<'idle' | 'connecting' | 'recording' | 'stopping'>('idle')
+  const [homeSttText, setHomeSttText] = useState('')
+  const [homeSttError, setHomeSttError] = useState('')
+  const homeSttRef = useRef<RealtimeSttSession | null>(null)
+  const homeSttGenerationRef = useRef(0)
+  const busy = loading || isDraftingScenario
+  const unavailable = busy || !ready || !online
+
+  const cancelHomeStt = useCallback(() => {
+    homeSttGenerationRef.current += 1
+    homeSttRef.current?.close()
+    homeSttRef.current = null
+    releaseMicrophoneStream()
+    setHomeSttText('')
+    setHomeSttState('idle')
+  }, [])
+
+  useEffect(() => cancelHomeStt, [cancelHomeStt])
+
+  useEffect(() => {
+    const stopForPageExit = () => cancelHomeStt()
+    const stopForBackground = () => {
+      if (document.visibilityState === 'hidden') cancelHomeStt()
+    }
+    window.addEventListener('pagehide', stopForPageExit)
+    document.addEventListener('visibilitychange', stopForBackground)
+    return () => {
+      window.removeEventListener('pagehide', stopForPageExit)
+      document.removeEventListener('visibilitychange', stopForBackground)
+    }
+  }, [cancelHomeStt])
+
+  useEffect(() => {
+    if (shouldCancelHomeSttForTransition(Boolean(readyScenarioData), Boolean(pendingClarification), busy)) cancelHomeStt()
+  }, [busy, cancelHomeStt, pendingClarification, readyScenarioData])
+  const startHomeStt = useCallback(async () => {
+    if (!sttAvailable || !sttModel || homeSttState !== 'idle' || readyScenarioData || pendingClarification || busy) return
+    const generation = ++homeSttGenerationRef.current
+    const session = new RealtimeSttSession()
+    homeSttRef.current = session
+    setHomeSttError('')
+    setHomeSttText('')
+    setHomeSttState('connecting')
+    try {
+      const token = await requestElevenLabsToken('realtime_scribe')
+      if (generation !== homeSttGenerationRef.current) return
+      await session.start(token, sttModel, {
+        onPartial: (text) => {
+          if (shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden)) setHomeSttText(text)
+        },
+        onConnectionState: (state) => {
+          if (state === 'connected' && shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden)) setHomeSttState('recording')
+        },
+        onAudioLevel: () => undefined,
+      }, 'zh')
+    } catch (error) {
+      if (shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden)) {
+        setHomeSttError(error instanceof Error ? error.message : '中文识别暂时无法启动，请改为输入文字。')
+        cancelHomeStt()
+      }
+    }
+  }, [busy, cancelHomeStt, homeSttState, pendingClarification, readyScenarioData, sttAvailable, sttModel])
+
+  const stopHomeStt = useCallback(async () => {
+    const session = homeSttRef.current
+    const generation = homeSttGenerationRef.current
+    if (!session || homeSttState !== 'recording') return
+    setHomeSttState('stopping')
+    try {
+      const recognized = await session.stop()
+      if (shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden) && recognized.trim()) {
+        setCustomInputZh((current) => {
+          const merged = appendHomeSttText(current, recognized)
+          if (!merged.applied) setHomeSttError('输入框已接近 300 字，未写入本次识别结果；原有内容已保留。')
+          return merged.text
+        })
+      }
+    } catch (error) {
+      if (shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden)) {
+        setHomeSttError(error instanceof Error ? error.message : '中文识别失败，已保留原有内容。')
+      }
+    } finally {
+      if (generation === homeSttGenerationRef.current) cancelHomeStt()
+    }
+  }, [cancelHomeStt, homeSttState, setCustomInputZh])
+
 
   return (
-    <div className="intro-block home-dual-layout">
+    <div className="intro-block home-launch-layout">
       <header className="home-header">
-        <h1 id="conversation-heading">日语语音会话</h1>
-        <p className="home-subtitle">先确认场景与唯一目标，再开始五轮以内的会话。</p>
+        <h1 id="conversation-heading">今天想练哪段日语对话？</h1>
+        <p className="home-subtitle">写下一个场景，或一件你想说清楚的事。</p>
       </header>
-      <div className="home-tabs" role="tablist" aria-label="练习入口">
-        <button className={`home-tab ${homeTab === 'spark' ? 'is-active' : ''}`} type="button" role="tab" aria-selected={homeTab === 'spark'} onClick={() => { onResetCustom(); setHomeTab('spark') }}>灵感速练</button>
-        <button className={`home-tab ${homeTab === 'custom' ? 'is-active' : ''}`} type="button" role="tab" aria-selected={homeTab === 'custom'} onClick={() => { onResetCustom(); setHomeTab('custom') }}>自定义</button>
-      </div>
-
       {error && <div className="error-panel" role="alert"><div><p className="error-title">{error.title}</p><p>{error.message}</p></div></div>}
-
       {readyScenarioData ? (
-        <div className="ready-scenario-card">
-          <p className="ready-badge"><Sparkles size={16} /> 场景已就绪</p>
-          <h2>{readyScenarioData.scenario.titleZh}</h2>
-          <p className="ready-desc"><strong>背景：</strong>{readyScenarioData.scenario.summaryZh}</p>
+        <section className="ready-scenario-card" aria-labelledby="ready-scenario-title">
+          <p className="ready-badge">准备好了</p>
+          <h2 id="ready-scenario-title">{readyScenarioData.scenario.titleZh}</h2>
+          <p className="ready-desc">{readyScenarioData.scenario.summaryZh}</p>
           <div className="ready-meta">
-            <p><strong>相手角色：</strong>{readyScenarioData.scenario.aiRole}</p>
-            <p><strong>你的角色：</strong>{readyScenarioData.scenario.userRole}</p>
+            <p><strong>你是：</strong>{readyScenarioData.scenario.userRole}</p>
+            <p><strong>对方是：</strong>{readyScenarioData.scenario.aiRole}</p>
+          </div>
+          <div className="ready-goal"><strong>这次想做到</strong><p>{readyScenarioData.scenario.coreGoal.descriptionZh}</p></div>
+          <div className="ready-actions">
+            <button className="primary-button" type="button" onClick={() => { cancelHomeStt(); onStartDynamic(readyScenarioData.scenarioToken) }} disabled={unavailable}>开始对话 <ArrowRight size={18} aria-hidden="true" /></button>
+            <button className="text-button" type="button" onClick={() => { cancelHomeStt(); onResetCustom() }} disabled={busy}>修改描述</button>
           </div>
           <p className="session-length">最多五轮，也可随时提前复盘。</p>
-          <div className="ready-actions">
-            <button className="primary-button" type="button" onClick={() => onStartDynamic(readyScenarioData.scenarioToken)} disabled={loading || !online}>开始会话</button>
-            <button className="text-button" type="button" onClick={onResetCustom}>重新选择</button>
-          </div>
-        </div>
-      ) : homeTab === 'spark' ? (
-        <div className="spark-card">
-          <span className="spark-card-domain">{sparkScenario.domainZh}</span>
-          <h2 className="spark-card-title">{sparkScenario.titleZh}</h2>
-          <div className="spark-card-row"><span className="spark-card-label">背景：</span><span>{sparkScenario.settingZh}</span></div>
-          <div className="spark-card-row"><span className="spark-card-label">相手：</span><span>{sparkScenario.partnerZh}</span></div>
-          <div className="spark-card-row"><span className="spark-card-label">目标：</span><span>{sparkScenario.challengeZh}</span></div>
-          <div className="spark-actions">
-            <button className="spark-shuffle-btn" type="button" onClick={() => setSparkScenario(drawRandomScenario(sparkScenario.id))} disabled={isDraftingScenario}>换一组灵感</button>
-            <button className="spark-start-btn" type="button" onClick={() => onPrepareSpark(sparkScenario)} disabled={loading || !ready || isDraftingScenario || !online}>{isDraftingScenario ? '正在生成场景...' : '生成练习说明'}</button>
-          </div>
-        </div>
+        </section>
       ) : (
-        <div className="custom-scenario-box">
-          {!pendingClarification ? (
-            <>
-              <label htmlFor="custom-topic-input"><strong>想练习什么场景？</strong></label>
-              <textarea id="custom-topic-input" className="custom-textarea" rows={3} maxLength={300} placeholder="例如：在日本银行开户，询问所需证件和流程" value={customInputZh} onChange={(event) => setCustomInputZh(event.target.value)} />
-              <div className="char-count">{customInputZh.length} / 300</div>
-              <button className="primary-button start-button" type="button" onClick={() => onDraftScenario()} disabled={!customInputZh.trim() || isDraftingScenario || !online}>{isDraftingScenario ? '正在生成场景...' : '生成练习说明'}</button>
-            </>
-          ) : (
-            <div className="clarification-panel">
-              <p className="clarification-question"><strong>补充一次信息：</strong>{pendingClarification.questionZh}</p>
-              <div className="clarification-options">{pendingClarification.optionsZh.map((option) => <button key={option} className="secondary-button clarify-opt-btn" type="button" onClick={() => onAnswerClarification(option)}>{option}</button>)}</div>
-              <div className="clarify-custom-row">
-                <input className="clarify-input" value={clarificationInput} onChange={(event) => setClarificationInput(event.target.value)} placeholder="或者自己补充" />
-                <button className="secondary-button" type="button" disabled={!clarificationInput.trim()} onClick={() => { onAnswerClarification(clarificationInput); setClarificationInput('') }}>提交</button>
+        <>
+          <form className="custom-scenario-box" aria-busy={isDraftingScenario} onSubmit={(event) => { event.preventDefault(); if (!unavailable && customInputZh.trim() && !pendingClarification) { cancelHomeStt(); onDraftScenario() } }}>
+            <label className="visually-hidden" htmlFor="custom-topic-input">想练习的场景</label>
+            <textarea ref={topicInputRef} id="custom-topic-input" className="custom-textarea" rows={3} maxLength={300} aria-describedby="topic-help topic-count" placeholder="比如：明天去剪头发，想说明剪短一点，但不要露出额头。" value={customInputZh} disabled={busy || Boolean(pendingClarification)} onChange={(event) => setCustomInputZh(event.target.value)} />
+            <div className="topic-footer">
+              <span id="topic-count" className="char-count">{customInputZh.length} / 300</span>
+              <div className="topic-actions">
+                {sttAvailable && <button className="text-button" type="button" disabled={busy || !online || Boolean(pendingClarification) || homeSttState === 'stopping'} onClick={() => void (homeSttState === 'connecting' ? cancelHomeStt() : homeSttState === 'idle' ? startHomeStt() : stopHomeStt())}><Mic size={16} aria-hidden="true" /> {homeSttState === 'idle' ? '中文语音输入' : homeSttState === 'connecting' ? '正在连接，取消' : homeSttState === 'stopping' ? '正在填入输入框…' : '说完了，填入输入框'}</button>}
+                {!pendingClarification && <button className="primary-button" type="submit" disabled={!customInputZh.trim() || unavailable}>{isDraftingScenario ? '正在准备…' : '准备练习'} <ArrowRight size={18} aria-hidden="true" /></button>}
               </div>
-              <button className="text-button skip-clarify-btn" type="button" onClick={() => onDraftScenario(customInputZh, clarifications, true)}>跳过，直接生成</button>
             </div>
-          )}
-        </div>
+            {(homeSttState !== 'idle' || homeSttText || homeSttError) && <div className="topic-stt-status" role={homeSttError ? 'alert' : 'status'}>{homeSttError || (homeSttState === 'connecting' ? '正在连接中文语音识别…' : homeSttState === 'stopping' ? '正在整理识别结果…' : homeSttText || '正在听你说话…')}</div>}
+            {pendingClarification && (
+              <div className="clarification-panel">
+                <p className="clarification-question" id="clarification-question">{pendingClarification.questionZh}</p>
+                <div className="clarification-options">{pendingClarification.optionsZh.map((option) => <button key={option} className="secondary-button clarify-opt-btn" type="button" disabled={unavailable} onClick={() => { cancelHomeStt(); onAnswerClarification(option) }}>{option}</button>)}</div>
+                <div className="clarify-custom-row">
+                  <input className="clarify-input" aria-labelledby="clarification-question" value={clarificationInput} maxLength={300} disabled={unavailable} onChange={(event) => setClarificationInput(event.target.value)} placeholder="或者自己补充" />
+                  <button className="secondary-button" type="button" disabled={!clarificationInput.trim() || unavailable} onClick={() => { cancelHomeStt(); onAnswerClarification(clarificationInput.trim()); setClarificationInput('') }}>提交</button>
+                </div>
+                <button className="text-button skip-clarify-btn" type="button" disabled={unavailable} onClick={() => { cancelHomeStt(); onDraftScenario(customInputZh, clarifications, true) }}>跳过，直接准备</button>
+              </div>
+            )}
+          </form>
+          <p id="topic-help" className="topic-help">中文描述即可，只写“美容院”也可以。</p>
+          {recentPracticeSlot}
+          {!pendingClarification && <section className="practice-examples" aria-labelledby="practice-examples-heading">
+            <div className="examples-heading"><h2 id="practice-examples-heading">从一个场景开始</h2><button className="text-button" type="button" disabled={busy} onClick={() => setExamples(drawPracticeExamples(examples.map((example) => example.id)))}>换一组</button></div>
+            <ul>{examples.map((example) => <li key={example.id}><button className="practice-example" type="button" disabled={busy} onClick={() => { setCustomInputZh(buildSparkPrompt(example)); topicInputRef.current?.focus() }}><span><strong>{example.challengeZh}</strong><small>{example.titleZh} · {example.domainZh}</small></span><ArrowRight size={18} aria-hidden="true" /></button></li>)}</ul>
+          </section>}
+        </>
       )}
     </div>
   )
@@ -2024,6 +2219,10 @@ interface SessionCompleteProps {
   onCacheListeningScaffold: (messageId: string, scaffold: ListeningScaffoldResponse) => void
   onNewScenario: () => void
   audioNotice: string
+  practiceComparison: ReturnType<typeof comparePracticeAttempts> | null
+  onRepeatScenario?: () => void
+  historyNotice: string
+  onRetrySave?: () => void
 }
 
 function SessionComplete({
@@ -2048,6 +2247,10 @@ function SessionComplete({
   onCacheListeningScaffold,
   onNewScenario,
   audioNotice,
+  practiceComparison,
+  onRepeatScenario,
+  historyNotice,
+  onRetrySave,
 }: SessionCompleteProps): React.JSX.Element {
   const [redoState, setRedoState] = useState<'idle' | 'ready' | 'recording' | 'confirming' | 'loading' | 'complete'>('idle')
   const [redoTranscript, setRedoTranscript] = useState('')
@@ -2168,7 +2371,7 @@ function SessionComplete({
 
   const confirmRedo = async () => {
     if (!feedbackData || !redoTranscript.trim()) {
-      setRedoError('第二稿不能为空，请修改或重新录制。')
+      setRedoError('回答不能为空，请修改或重新录音。')
       return
     }
     setRedoState('loading')
@@ -2217,52 +2420,83 @@ function SessionComplete({
       <h1 id="conversation-heading">{reveal.titleZh}</h1>
       <p className="reveal-summary">{reveal.summaryZh}</p>
       {audioNotice && <p className="network-notice" role="status">{audioNotice}</p>}
+      {practiceComparison && feedbackStatus === 'success' && <section className="practice-comparison" aria-labelledby="practice-comparison-heading">
+        <h2 id="practice-comparison-heading">本场景表现</h2>
+        {practiceComparison.current.validEvaluation ? <>
+          <p>{practiceComparison.baselineAttempt
+            ? `与 ${new Date(practiceComparison.baselineAttempt.report.startedAt).toLocaleDateString('zh-CN')} 的首次完整有效练习比较。`
+            : report.completion.closedNaturally ? '已记录本次表现。再次完整练习同一场景后，可与首次有效记录比较。' : '本次提前结束，仅展示已观察到的表现。'}</p>
+          <details className="practice-details">
+            <summary>查看详细统计</summary>
+            <table className="practice-comparison-table">
+              <thead><tr><th scope="col">沟通证据点</th>{practiceComparison.baseline && <th scope="col">首次</th>}<th scope="col">本次</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">已完成</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.completed}/{practiceComparison.baseline.total}</td>}<td>{practiceComparison.current.completed}/{practiceComparison.current.total}</td></tr>
+                <tr><th scope="row">听力未查看帮助</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.listeningIndependent}</td>}<td>{practiceComparison.current.listeningIndependent}</td></tr>
+                <tr><th scope="row">表达未查看帮助</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.expressionIndependent}</td>}<td>{practiceComparison.current.expressionIndependent}</td></tr>
+                <tr><th scope="row">独立性证据不足</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.independenceUnknown}</td>}<td>{practiceComparison.current.independenceUnknown}</td></tr>
+              </tbody>
+            </table>
+            <p className="practice-storage-note">帮助统计仅针对已完成的证据点。编辑、重录、文字输入、音频证据缺失，或无法排除先前表达帮助的影响时，独立性保留为证据不足。</p>
+            <p className="practice-storage-note">本次未观察 {practiceComparison.current.notObserved} 项，完成情况证据不足 {practiceComparison.current.insufficientEvidence} 项。原场景复练反映熟练情况，不代表整体日语水平。</p>
+          </details>
+        </> : <p>本次缺少可比较的评价证据，保留对话事实与复盘。</p>}
+        {scenario.dynamicData.evidencePoints && feedbackData?.evidenceResults && <ul className="practice-evidence-list">
+          {scenario.dynamicData.evidencePoints.map((point) => {
+            const result = feedbackData.evidenceResults?.find((item) => item.pointId === point.id)
+            const labels = { completed: '已完成', not_completed: '未完成', not_observed: '未观察', insufficient_evidence: '证据不足' }
+            return <li key={point.id}><strong>{point.titleZh}</strong><span>{result ? labels[result.status] : '证据不足'}</span>
+              {result?.evidence.map((item, index) => <p key={`${item.turn}-${index}`} lang="ja">第 {item.turn} 轮：「{item.quoteJa}」</p>)}
+            </li>
+          })}
+        </ul>}
+      </section>}
 
       {feedbackStatus === 'loading' && <div className="feedback-loading-card"><span className="pulse-dot" /><p>正在整理本场反馈...</p></div>}
       {feedbackStatus === 'error' && <div className="feedback-error-card" role="alert"><p>{feedbackErrorMsg}</p><button className="primary-button" type="button" onClick={onRetryFeedback}>重新生成</button></div>}
       {feedbackStatus === 'success' && feedbackData && (
         <div className="feedback-content">
-          <section className="feedback-section goal-summary-card"><h2>1. 目标结果</h2><p><strong>{outcomeLabel[feedbackData.outcome]}</strong></p></section>
-          <section className="feedback-section"><h2>2. 结果依据</h2><p>{feedbackData.outcomeEvidenceZh}</p></section>
-          <section className="feedback-section"><h2>3. 听力发现</h2>{feedbackData.listeningFinding ? <><p>第 {feedbackData.listeningFinding.turn} 轮：{feedbackData.listeningFinding.findingZh}</p><p>{feedbackData.listeningFinding.evidenceZh}</p></> : <p>本场没有足够证据形成听力发现。</p>}</section>
-          <section className="feedback-section"><h2>4. 表达改进</h2>{feedbackData.expressionImprovement ? <><p lang="ja">{feedbackData.expressionImprovement.userConfirmedJa}</p><p lang="ja">建议：{feedbackData.expressionImprovement.suggestedJa}</p><p>{feedbackData.expressionImprovement.reasonZh}</p></> : <p>本场没有必须改写的表达。</p>}</section>
+          <section className="feedback-section goal-summary-card"><h2>这次收获</h2><p><strong>{outcomeLabel[feedbackData.outcome]}</strong></p></section>
+          <section className="feedback-section"><h2>做到这一点的证据</h2><p>{feedbackData.outcomeEvidenceZh}</p></section>
+          <section className="feedback-section"><h2>听力收获</h2>{feedbackData.listeningFinding ? <><p>第 {feedbackData.listeningFinding.turn} 轮：{feedbackData.listeningFinding.findingZh}</p><p>{feedbackData.listeningFinding.evidenceZh}</p></> : <p>本场没有足够证据形成听力发现。</p>}</section>
+          <section className="feedback-section"><h2>下次可以这样说</h2>{feedbackData.expressionImprovement ? <><p lang="ja">{feedbackData.expressionImprovement.userConfirmedJa}</p><p lang="ja">建议：{feedbackData.expressionImprovement.suggestedJa}</p><p>{feedbackData.expressionImprovement.reasonZh}</p></> : <p>本场没有必须改写的表达。</p>}</section>
           <section className="feedback-section retry-task-card">
-            <h2>5. 完整回合重做</h2>
-            <p lang="ja"><strong>第一次确认稿：</strong>{feedbackData.redoTask.firstConfirmedJa}</p>
-            {redoState === 'idle' && <div className="retry-actions"><button className="primary-button" type="button" onClick={startRedo}><Volume2 size={16} /> 开始完整回合重做</button></div>}
-            {redoState === 'ready' && <div className="retry-actions"><button className="primary-button" type="button" onClick={() => void startRedoRecording()}><Mic size={16} /> 开始第二稿</button><button className="text-button" type="button" onClick={() => { setRedoInputMode('text'); setRedoState('confirming') }}>改用文字</button></div>}
+            <h2>再练一个关键回合</h2>
+            <p lang="ja"><strong>这次回答：</strong>{feedbackData.redoTask.firstConfirmedJa}</p>
+            {redoState === 'idle' && <div className="retry-actions"><button className="primary-button" type="button" onClick={startRedo}><Volume2 size={16} /> 再练这个回合</button></div>}
+            {redoState === 'ready' && <div className="retry-actions"><button className="primary-button" type="button" onClick={() => void startRedoRecording()}><Mic size={16} /> 开始回答</button><button className="text-button" type="button" onClick={() => { setRedoInputMode('text'); setRedoState('confirming') }}>改用文字</button></div>}
             {(redoState === 'ready' || redoState === 'recording' || redoState === 'confirming') && (
               <div className="retry-scaffold" aria-live="polite">
                 <div className="retry-scaffold-status">
                   <strong>{LISTENING_LEVEL_LABELS[redoListeningLevel]}</strong>
-                  <span>{nextListeningAction(redoListeningLevel) ? `下一步：${nextListeningAction(redoListeningLevel)}` : '四级听力支架已完成'}</span>
+                  <span>{nextListeningAction(redoListeningLevel) ?? '已显示全部帮助'}</span>
                 </div>
                 <div className="retry-actions">
-                  <button className="text-button" type="button" onClick={() => { onReplayAi(feedbackData.redoTask.partnerPromptJa); setRedoListeningLevel((level) => level < 1 ? 1 : level) }}>再听原相手语音</button>
+                  <button className="text-button" type="button" onClick={() => { onReplayAi(feedbackData.redoTask.partnerPromptJa); setRedoListeningLevel((level) => level < 1 ? 1 : level) }}>从头重听</button>
                   {nextListeningAction(redoListeningLevel) && redoListeningLevel > 0 && (
                     <button className="secondary-button" type="button" disabled={redoScaffoldLoading} onClick={() => void advanceRedoListeningScaffold()}>
-                      {redoScaffoldLoading ? '正在获取 L2 线索...' : nextListeningAction(redoListeningLevel)}
+                      {redoScaffoldLoading ? '正在获取关键信息…' : nextListeningAction(redoListeningLevel)}
                     </button>
                   )}
-                  <button className="text-button" type="button" onClick={() => setRedoExpressionLevel((level) => level === 4 ? 4 : (level + 1) as 1 | 2 | 3 | 4)}>展开表达支架 L{Math.min(4, redoExpressionLevel + 1)}</button>
+                  <button className="text-button" type="button" onClick={() => setRedoExpressionLevel((level) => level === 4 ? 4 : (level + 1) as 1 | 2 | 3 | 4)}>再多给一点表达帮助</button>
                 </div>
-                {redoScaffoldError && <p className="im-listening-error" role="alert">{redoScaffoldError} 未升级层级，可重试。</p>}
+                {redoScaffoldError && <p className="im-listening-error" role="alert">{redoScaffoldError} 未显示新帮助，可重试。</p>}
                 {redoListeningLevel >= 2 && effectiveRedoScaffold && (
                   <div className="retry-scaffold-reveal is-hint">
-                    <strong>L2 关键信息线索</strong>
+                    <strong>关键信息</strong>
                     <p>{effectiveRedoScaffold.keyInformationHintZh}</p>
                     <p lang="ja">原文线索：{effectiveRedoScaffold.keyPhrasesJa.join(' / ')}</p>
                   </div>
                 )}
                 {redoListeningLevel >= 3 && (
                   <div className="retry-scaffold-reveal">
-                    <strong>L3 日语台词</strong>
+                    <strong>日语台词</strong>
                     <p lang="ja">{feedbackData.redoTask.partnerPromptJa}</p>
                   </div>
                 )}
                 {redoListeningLevel >= 4 && effectiveRedoScaffold && (
                   <div className="retry-scaffold-reveal is-intent">
-                    <strong>L4 一句中文意图</strong>
+                    <strong>这句话想表达</strong>
                     <p>{effectiveRedoScaffold.intentSummaryZh}</p>
                   </div>
                 )}
@@ -2270,8 +2504,8 @@ function SessionComplete({
             )}
             {redoState === 'recording' && <div className="retry-recording-panel"><p lang="ja">{redoTranscript || '请开始说话'}</p><button className="primary-button" type="button" onClick={() => void stopRedoRecording()}>说完了，确认转写</button></div>}
             {redoExpressionLevel > 0 && redoState !== 'complete' && <p><strong>表达方向：</strong>{feedbackData.redoTask.directionZh}</p>}
-            {redoState === 'confirming' && <div className="retry-confirming-panel"><label htmlFor="redo-confirmed"><strong>确认第二稿：</strong></label><textarea id="redo-confirmed" className="retry-textarea" lang="ja" value={redoTranscript} onChange={(event) => setRedoTranscript(event.target.value)} /><div className="retry-confirm-buttons"><button className="secondary-button" type="button" onClick={() => void startRedoRecording()}>重新录音</button><button className="primary-button" type="button" onClick={() => void confirmRedo()}>确认第二稿并查看比较</button></div></div>}
-            {redoState === 'loading' && <p>正在比较两次确认稿...</p>}
+            {redoState === 'confirming' && <div className="retry-confirming-panel"><label htmlFor="redo-confirmed"><strong>确认这次回答：</strong></label><textarea id="redo-confirmed" className="retry-textarea" lang="ja" value={redoTranscript} onChange={(event) => setRedoTranscript(event.target.value)} /><div className="retry-confirm-buttons"><button className="secondary-button" type="button" onClick={() => void startRedoRecording()}>重新录音</button><button className="primary-button" type="button" onClick={() => void confirmRedo()}>确认回答并查看比较</button></div></div>}
+            {redoState === 'loading' && <p>正在比较两次回答…</p>}
             {redoError && <p className="inline-error" role="alert">{redoError}</p>}
             {redoState === 'complete' && redoResult && <div className="retry-completed-panel"><p>{redoResult.comparisonZh}</p><p lang="ja"><strong>参考表达：</strong>{redoResult.referenceExpressionJa}</p><button className="text-button" type="button" onClick={startRedo}>再做一次</button></div>}
           </section>
@@ -2283,7 +2517,12 @@ function SessionComplete({
         <p>会话 {messages.length} 条消息，{rounds.length} 个原始回合，{report.redos.length} 个重做记录。</p>
         <div className="developer-actions"><button className="secondary-button" type="button" onClick={onCopy}>复制 JSON</button><button className="text-button" type="button" onClick={onDownload}>下载 JSON</button>{copyStatus && <span role="status">{copyStatus}</span>}</div>
       </details>
-      <div className="complete-actions"><button className="primary-button" type="button" onClick={onNewScenario}>开始新场景</button></div>
+      {historyNotice && <p role="status" className="practice-storage-note">{historyNotice}</p>}
+      {onRetrySave && <button className="secondary-button" type="button" onClick={onRetrySave}>重试保存</button>}
+      <div className="complete-actions">
+        {onRepeatScenario && <button className="primary-button" type="button" onClick={onRepeatScenario}>再练这个场景</button>}
+        <button className="secondary-button" type="button" onClick={onNewScenario}>开始新场景</button>
+      </div>
     </div>
   )
 }

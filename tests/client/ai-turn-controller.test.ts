@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖相手 AI 回合控制器及可注入 TTS 播放器
+ * [OUTPUT]: 验证回合推进、请求代际隔离、播放降级和控制器暂停继续状态
+ * [POS]: tests/client 的相手回合控制器契约测试，隔离网络与真实 TTS 服务
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { describe, expect, it } from 'vitest'
 import {
   createAiTurnRuntime,
@@ -326,6 +332,39 @@ describe('ai-turn-controller production orchestration contracts', () => {
 
     expect(playedEndedCalled).toBe(true)
     expect(runtime.getState().playedAiMessageIds.has('msg_assistant_99')).toBe(true)
+  })
+
+  it('pauses and resumes the active voice bar without creating a replay or completing playback', async () => {
+    let currentOperationId = 1
+    let paused = false
+    let resumed = false
+    const playbackGate = Promise.withResolvers<void>()
+    const mockTts: TtsPlayerLike = {
+      speak: async (options: SpeakOptions) => {
+        options.onAudioStarted?.()
+        await playbackGate.promise
+        options.onAudioEnded?.()
+      },
+      stop: () => undefined,
+      pause: () => { paused = true; return true },
+      resume: async () => { resumed = true; return true },
+      unlock: async () => undefined,
+    }
+    const runtime = createAiTurnRuntime({
+      config: { ttsAvailable: true, voiceId: 'v_1', ttsModel: 'm_1' }, sessionId: 'sess_1', scenario: dummyScenario, turn: 1,
+      operation: { begin: () => ++currentOperationId, isCurrent: (id) => id === currentOperationId }, transitionTo: () => true,
+      touchRound: () => undefined, commitCurrentRound: () => undefined, replaceCurrentRound: () => undefined,
+      commitAssistantMessage: () => undefined, advanceTurn: () => undefined, adapters: { createTtsPlayer: () => mockTts },
+    })
+    const playback = runtime.actions.playAiText('一時停止します', false, 1, 'assistant_1')
+    runtime.actions.pauseAiPlayback()
+    expect(paused).toBe(true)
+    expect(runtime.getState().pausedAiMessageId).toBe('assistant_1')
+    await runtime.actions.resumeAiPlayback()
+    expect(resumed).toBe(true)
+    expect(runtime.getState().pausedAiMessageId).toBeNull()
+    playbackGate.resolve()
+    await playback
   })
 
   it('resetAiTurn 与 dispose: 停止播放器、abort pending、清空 pendingReply 与所有内部状态', async () => {

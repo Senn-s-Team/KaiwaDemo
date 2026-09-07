@@ -1,5 +1,11 @@
+/**
+ * [INPUT]: 场景素材与首页例子适配函数
+ * [OUTPUT]: 验证可编辑描述、三条例子与准备结果
+ * [POS]: tests/client 的首页场景准备契约测试
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { describe, expect, it, vi } from 'vitest'
-import { buildSparkPrompt, prepareSparkPractice } from '../../src/lib/spark-practice'
+import { buildSparkPrompt, drawPracticeExamples, prepareSparkPractice } from '../../src/lib/spark-practice'
 import type { VocabScenario } from '../../src/data/vocab-bank'
 import type { DynamicScenarioData } from '../../src/types'
 
@@ -49,5 +55,27 @@ describe('灵感速练预览', () => {
   it('意外追问时拒绝产生不完整预览', async () => {
     const draft = vi.fn().mockResolvedValue({ status: 'needs_clarification', questionZh: '补充？', optionsZh: [] })
     await expect(prepareSparkPractice(spark, draft)).rejects.toThrow('完整场景')
+  })
+})
+
+
+describe('首页场景例子', () => {
+  it('提供三个可编辑且不包含参考日语的短描述', () => {
+    const examples = drawPracticeExamples()
+    expect(examples).toHaveLength(3)
+    expect(new Set(examples.map((example) => example.id)).size).toBe(3)
+    for (const example of examples) {
+      const prompt = buildSparkPrompt(example)
+      expect(prompt.length).toBeLessThanOrEqual(300)
+      for (const expression of example.keyExpressions) expect(prompt).not.toContain(expression)
+    }
+  })
+
+  it('换组避开当前三个例子，结果不重复', () => {
+    const previous = drawPracticeExamples().map((example) => example.id)
+    const next = drawPracticeExamples(previous)
+    expect(next).toHaveLength(3)
+    expect(new Set(next.map((example) => example.id)).size).toBe(3)
+    expect(next.every((example) => !previous.includes(example.id))).toBe(true)
   })
 })

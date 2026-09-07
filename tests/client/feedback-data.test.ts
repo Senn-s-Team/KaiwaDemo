@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 反馈请求构造器与回合记录
+ * [OUTPUT]: 验证确认稿、帮助与自动续说的事实传递
+ * [POS]: tests/client 的反馈请求契约测试
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { describe, expect, it, vi } from 'vitest'
 import {
   FeedbackResponseSchema,
@@ -69,6 +75,20 @@ describe('conversation feedback client contract', () => {
         speechAssistUsed: false,
       }],
     })
+  })
+
+  it('only reports displayed continuation suggestions as expression assistance', () => {
+    const round = createRoundRecord(1, 'ご希望は？', 0)
+    round.speechAssistEvents = [{
+      turn: 1, requestVersion: 1, observedTextJa: 'あの予約', cleanedObservedTextJa: '予約',
+      continuationSuggestionJa: null, displayed: true, latencyMs: 100, failureReason: null,
+    }]
+    const used = () => buildFeedbackRequestPayload({ sessionToken: 'session-token' }, [round]).turnRecords[0].speechAssistUsed
+    expect(used()).toBe(false)
+    round.speechAssistEvents[0].continuationSuggestionJa = 'お願いしたいのですが'
+    expect(used()).toBe(true)
+    round.speechAssistEvents[0].displayed = false
+    expect(used()).toBe(false)
   })
 
   it('validates the five-part feedback and rejects forbidden ability claims', () => {

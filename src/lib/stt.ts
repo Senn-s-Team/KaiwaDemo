@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 @elevenlabs/client 的 Scribe 实时连接、./audio-engine 的麦克风音频采集流水线与缓冲环
- * [OUTPUT]: 对外提供 RealtimeSttSession 类、SttTokenManager 类（含 single-flight 与代际隔离）、SttHandlers 接口（含 onPipelineReady 就绪回调）、selectFinalSttText 与转写规约纯函数
- * [POS]: src/lib 的语音识别核心模块，负责低延迟音频缓冲、实时转写 WebSocket 流处理，并在最终提交连接关闭或超时时保全已观察到的有效转写
+ * [OUTPUT]: 对外提供 RealtimeSttSession（可选识别语言）、SttTokenManager 类（含 single-flight 与代际隔离）、SttHandlers 接口（含 onPipelineReady 就绪回调）、selectFinalSttText 与转写规约纯函数
+ * [POS]: src/lib 的语音识别核心模块，负责低延迟音频缓冲、实时转写 WebSocket 流处理与取消后的共享麦克风释放，并在最终提交连接关闭或超时时保全已观察到的有效转写
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { AudioFormat, CommitStrategy, RealtimeEvents, Scribe, type RealtimeConnection } from '@elevenlabs/client'
@@ -9,6 +9,7 @@ import {
   AudioRingBuffer,
   isMicrophoneTrackReady,
   MicrophoneAudioPipeline,
+  releaseMicrophoneStream,
   requestMicrophoneStream,
   SttError,
   unlockAudio,
@@ -142,7 +143,7 @@ export class RealtimeSttSession {
   private state: SttSessionState = 'idle'
   private sessionGeneration = 0
 
-  async start(token: string, modelId: string, handlers: SttHandlers): Promise<void> {
+  async start(token: string, modelId: string, handlers: SttHandlers, languageCode = 'ja'): Promise<void> {
     this.close()
     const currentGen = ++this.sessionGeneration
     this.state = 'connecting'
@@ -162,6 +163,7 @@ export class RealtimeSttSession {
     }
 
     if (currentGen !== this.sessionGeneration || this.state !== 'connecting') {
+      releaseMicrophoneStream()
       return
     }
 
@@ -191,7 +193,7 @@ export class RealtimeSttSession {
       connection = Scribe.connect({
         token,
         modelId,
-        languageCode: 'ja',
+        languageCode,
         audioFormat: AudioFormat.PCM_16000,
         sampleRate: 16_000,
         commitStrategy: CommitStrategy.MANUAL,
