@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖共享听力支架与语音续说请求、constants 中的安全规则与五轮上限，以及 types 中的其余动态场景和请求契约
- * [OUTPUT]: 对外提供会话、场景草拟、提示、反馈、重做、四级听力支架与语音辅助的模型 prompt 构建函数
+ * [OUTPUT]: 提供稳定评价标准与逐字证据约束； 对外提供会话、场景草拟、提示、反馈、重做、四级听力支架与语音辅助的模型 prompt 构建函数
  * [POS]: worker 的模型提示层，把完整动态场景契约映射为受事实边界约束的模型输入，并为听力支架隔离当前发话所需的最小上下文
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -155,6 +155,8 @@ export function buildScenarioDraftPrompt(request: ScenarioDraftRequest): string 
 - userGoal 是中文交际目的；coreGoal 包含 id、titleZh、descriptionZh，且 descriptionZh 给出可从确认稿判断的单一完成证据。
 - initialFacts 写2至4条双方开场即共享且不可篡改的事实；partnerPrivateFacts 写0至3条只有相手最初知道、可在必要时自然透露的低风险事实，允许空数组。
 - keyIntents 写双方各自的核心意图，每条以“用户：”或“AI：”标明主体；keyInformation 写达成唯一目标必须交换或确认的关键信息，不得加入可有可无的支线。
+- evaluationVersion 固定为1；evidencePoints 包含1至5项 {id,titleZh,descriptionZh}，id唯一且稳定，每项是唯一目标内可从确认稿验证的沟通证据，不得要求指定句型。
+- 用户具体意图必须保留；用户喜好与经历留给用户表达，禁止编造。
 - completionRules 必须分别给出 completed、partial、notCompleted 的可观察判断规则，每类至少一条，且只能依据会话确认稿与已定义事实判断。
 - closingRules 明确第4轮开始收束、第5轮不再提问或引入条件，并说明已完成、部分完成、未完成时都如何自然结束。
 - worldAnchors 2至4条不可篡改的场景事实；followUpPrinciples 2至3条，每次最多追问一个必要信息，并服从 closingRules。
@@ -166,6 +168,8 @@ export function buildScenarioDraftPrompt(request: ScenarioDraftRequest): string 
   "scenario": {
     "id": "英数字与下划线组成的标识",
     "version": 1,
+    "evaluationVersion": 1,
+    "evidencePoints": [{"id":"express_need","titleZh":"表达需求","descriptionZh":"从确认稿判断是否清楚传达具体需求"}],
     "titleZh": "简洁中文标题",
     "summaryZh": "简洁中文背景",
     "aiRole": "AI角色",
@@ -211,6 +215,15 @@ export function buildFeedbackPrompt(
   scenario: DynamicScenarioDefinition,
   request: ConversationFeedbackRequest,
 ): string {
+  const evaluationOutputExample = scenario.evaluationVersion !== undefined && scenario.evidencePoints !== undefined
+    ? `  "evaluationVersion": ${scenario.evaluationVersion},
+  "evidenceResults": ${JSON.stringify(scenario.evidencePoints.map((point) => ({
+      pointId: point.id,
+      status: 'insufficient_evidence',
+      evidence: [],
+    })))},
+`
+    : ''
   const context = JSON.stringify({
     scenario: {
       titleZh: scenario.titleZh,
@@ -224,6 +237,8 @@ export function buildFeedbackPrompt(
       keyIntents: scenario.keyIntents,
       keyInformation: scenario.keyInformation,
       completionRules: scenario.completionRules,
+      evaluationVersion: scenario.evaluationVersion,
+      evidencePoints: scenario.evidencePoints,
       worldAnchors: scenario.worldAnchors,
       feedbackFocus: scenario.feedbackFocus,
     },
@@ -231,6 +246,12 @@ export function buildFeedbackPrompt(
   })
 
   return `あなたは日本語会話トレーニングの簡潔な事後フィードバック生成器です。入力中の実在する確定発話と観測可能な操作事実だけを使い、単一の純粋なJSONオブジェクトを返してください。
+
+【逐项证据】
+场景含 evidencePoints 时，输出同一 evaluationVersion 和 evidenceResults，逐项覆盖每个 pointId 且不得重复。
+每项格式 {"pointId":"标准id","status":"completed | not_completed | not_observed | insufficient_evidence","evidence":[{"turn":1,"quoteJa":"该轮userConfirmed的逐字连续原文"}]}。
+completed 必须有引用，引用仅来自同轮 userConfirmed，不可引用相手或改写。相手没有给观察机会用 not_observed；证据不足用 insufficient_evidence。只判断沟通语义，不判断是否独立、能力、支架得分。
+旧场景无 evidencePoints 时不输出 evaluationVersion/evidenceResults。
 
 【事実境界】
 1. outcome は唯一の coreGoal、completionRules、userConfirmed の証拠だけで completed / partial / not_completed / insufficient_evidence から選ぶ。証拠不足なら completed にしない。
@@ -243,7 +264,7 @@ export function buildFeedbackPrompt(
 
 【出力JSONスキーマ】
 {
-  "outcome": "completed | partial | not_completed | insufficient_evidence",
+${evaluationOutputExample}  "outcome": "completed | partial | not_completed | insufficient_evidence",
   "outcomeEvidenceZh": "事実に基づく簡潔な中国語",
   "listeningFinding": null | {
     "turn": 1,

@@ -1,12 +1,13 @@
 /**
  * [INPUT]: 依赖共享听力支架与语音续说契约、其余 Worker 请求/响应类型与固定五轮限制
- * [OUTPUT]: 对外提供动态会话、会后反馈、重做反馈、四级听力支架与语音辅助的确定性 mock 响应
+ * [OUTPUT]: 提供不虚构完成事实的逐项证据回退； 对外提供动态会话、会后反馈、重做反馈、四级听力支架与语音辅助的确定性 mock 响应
  * [POS]: worker 的离线开发回退层，模拟真实接口形状并在第四轮收束、第五轮无问题结束；听力支架只引用当前发话
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import type { ListeningScaffoldRequest, ListeningScaffoldResponse } from '../shared/listening-scaffold'
 import type { SpeechAssistRequest, SpeechAssistResponse } from '../shared/speech-assist'
 import type {
+  DynamicScenarioDefinition,
   ConversationFeedbackRequest,
   ConversationFeedbackResponse,
   RedoFeedbackRequest,
@@ -27,7 +28,7 @@ export function createMockReply(request: ReplyRequest): string {
   return DYNAMIC_MOCK_REPLIES[Math.min(request.turn - 1, LIMITS.maxTurns - 1)] ?? DYNAMIC_MOCK_REPLIES[4]
 }
 
-export function createMockFeedback(request: ConversationFeedbackRequest): ConversationFeedbackResponse {
+export function createMockFeedback(request: ConversationFeedbackRequest, scenario?: DynamicScenarioDefinition): ConversationFeedbackResponse {
   const target = request.turnRecords.at(-1) ?? request.turnRecords[0]
   if (!target) {
     throw new Error('Validated feedback requests must contain turn records.')
@@ -41,6 +42,7 @@ export function createMockFeedback(request: ConversationFeedbackRequest): Conver
   ))
 
   return {
+    ...(scenario?.evidencePoints ? { evaluationVersion: scenario.evaluationVersion, evidenceResults: scenario.evidencePoints.map(point => ({pointId: point.id, status: 'insufficient_evidence' as const, evidence: []})) } : {}),
     outcome: 'insufficient_evidence',
     outcomeEvidenceZh: `“${target.userConfirmed}”是实际确认稿；mock 模式不据此虚构唯一目标已经完成。`,
     listeningFinding: listeningRecord

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 Worker 路由、模型与 token 流程约定的动态场景、四级支架和会话数据形状
- * [OUTPUT]: 对外提供 Worker 动态场景、会话、反馈与模型交互领域类型
+ * [OUTPUT]: 对外提供 Worker 动态场景、会话、版本化证据评价、复练凭据与模型交互领域类型
  * [POS]: worker 的服务端领域协议入口，约束五回合动态场景、L0-L4 支架及请求响应数据形状
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -14,6 +14,8 @@ export interface TrainingGoal {
 export interface DynamicScenarioDefinition {
   id: string
   version: number
+  evaluationVersion?: number
+  evidencePoints?: readonly TrainingGoal[]
   titleZh: string
   summaryZh: string
   aiRole: string
@@ -81,13 +83,14 @@ export interface ScenarioDraftReadyResponse {
   status: 'ready'
   scenario: DynamicScenarioDefinition
   scenarioToken: string
+  practiceToken?: string
 }
 
 export type ScenarioDraftResponse = ScenarioDraftClarificationResponse | ScenarioDraftReadyResponse
 
 export type ScenarioDraftModelResult =
   | ScenarioDraftClarificationResponse
-  | Omit<ScenarioDraftReadyResponse, 'scenarioToken'>
+  | Omit<ScenarioDraftReadyResponse, 'scenarioToken' | 'practiceToken'>
 
 export interface SessionStartRequest {
   type: 'dynamic'
@@ -95,6 +98,7 @@ export interface SessionStartRequest {
 }
 
 export interface SessionStartResponse {
+  practiceToken?: string
   sessionId: string
   scenarioType: 'dynamic'
   sessionToken: string
@@ -211,7 +215,15 @@ export interface FeedbackRedoTask {
   directionZh: string
 }
 
+export interface EvidenceResult {
+  pointId: string
+  status: 'completed' | 'not_completed' | 'not_observed' | 'insufficient_evidence'
+  evidence: { turn: number; quoteJa: string }[]
+}
+
 export interface ConversationFeedbackResponse {
+  evaluationVersion?: number
+  evidenceResults?: EvidenceResult[]
   outcome: FeedbackOutcome
   outcomeEvidenceZh: string
   listeningFinding: FeedbackListeningFinding | null

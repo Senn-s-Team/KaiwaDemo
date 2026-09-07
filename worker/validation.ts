@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 zod、./constants、./types、../shared/listening-scaffold 与 ../shared/speech-assist 的跨端 wire schema
- * [OUTPUT]: 对外提供 Worker 请求、动态场景、反馈、四级听力支架、模型输出与语音续说数据的严格解析和安全规整函数
+ * [OUTPUT]: 校验版本化证据覆盖及确认稿引用； 对外提供 Worker 请求、动态场景、反馈、四级听力支架、模型输出与语音续说数据的严格解析和安全规整函数
  * [POS]: worker 的边界校验层，在路由与模型调用前后统一拒绝无效、越界或非原文协议数据
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -71,6 +71,8 @@ const TrainingGoalSchema = z.object({
 const DynamicScenarioDefinitionSchema = z.object({
   id: z.string().trim().min(1).max(64),
   version: z.number().int().positive(),
+  evaluationVersion: z.number().int().positive().optional(),
+  evidencePoints: z.array(TrainingGoalSchema).min(1).max(5).refine(points => new Set(points.map(p => p.id)).size === points.length).optional(),
   titleZh: z.string().trim().min(1).max(100),
   summaryZh: z.string().trim().min(1).max(300),
   aiRole: z.string().trim().min(1).max(160),
@@ -98,7 +100,7 @@ const DynamicScenarioDefinitionSchema = z.object({
   hintStrategy: z.string().trim().min(1).max(300),
   feedbackFocus: z.array(z.string().trim().min(1).max(160)).min(1).max(5),
   safetyBoundary: z.string().trim().min(1).max(300),
-}).strict()
+}).strict().refine(scenario => (scenario.evaluationVersion === undefined) === (scenario.evidencePoints === undefined), 'Evaluation version and evidence points must be provided together.')
 
 const ScenarioDraftModelResultSchema = z.discriminatedUnion('status', [
   z.object({
@@ -108,7 +110,7 @@ const ScenarioDraftModelResultSchema = z.discriminatedUnion('status', [
   }).strict(),
   z.object({
     status: z.literal('ready'),
-    scenario: DynamicScenarioDefinitionSchema,
+    scenario: DynamicScenarioDefinitionSchema.refine(scenario => Boolean(scenario.evaluationVersion && scenario.evidencePoints), 'New scenarios require versioned evidence points.'),
   }).strict(),
 ])
 
@@ -231,6 +233,12 @@ const ChineseDirectionSchema = evaluationTextSchema().refine(
 
 
 export const ConversationFeedbackResponseSchema = z.object({
+  evaluationVersion: z.number().int().positive().optional(),
+  evidenceResults: z.array(z.object({
+    pointId: z.string().trim().min(1),
+    status: z.enum(['completed', 'not_completed', 'not_observed', 'insufficient_evidence']),
+    evidence: z.array(z.object({turn: z.number().int().min(1).max(5), quoteJa: z.string().trim().min(1)}).strict()).max(5),
+  }).strict()).max(5).optional(),
   outcome: z.enum(['completed', 'partial', 'not_completed', 'insufficient_evidence']),
   outcomeEvidenceZh: evaluationTextSchema(),
   listeningFinding: z.object({
@@ -385,12 +393,36 @@ export function parseConversationFeedbackRequest(value: unknown): ConversationFe
 export function parseConversationFeedbackResponse(
   value: unknown,
   turnRecords: ConversationFeedbackRequest['turnRecords'],
+  scenario?: DynamicScenarioDefinition,
 ): ConversationFeedbackResponse {
   const parsed = ConversationFeedbackResponseSchema.safeParse(value)
   if (!parsed.success) {
     throw new ValidationError('invalid_feedback_output', parsed.error.issues[0]?.message || 'Feedback output is invalid.')
   }
 
+  const { evidenceResults, evaluationVersion } = parsed.data
+  if (scenario?.evidencePoints) {
+    const ids = scenario.evidencePoints.map(point => point.id)
+    if (evaluationVersion !== scenario.evaluationVersion || !evidenceResults
+      || evidenceResults.length !== ids.length
+      || new Set(evidenceResults.map(result => result.pointId)).size !== ids.length
+      || evidenceResults.some(result => !ids.includes(result.pointId))) {
+      throw new ValidationError('invalid_feedback_output', 'Evaluation must cover the exact versioned scenario evidence points.')
+    }
+  } else if (scenario && (evidenceResults || evaluationVersion)) {
+    throw new ValidationError('invalid_feedback_output', 'Legacy scenarios have no evaluation standard.')
+  }
+  for (const result of evidenceResults ?? []) {
+    if (result.status === 'completed' && result.evidence.length === 0) {
+      throw new ValidationError('invalid_feedback_output', 'Completed evidence points require a confirmed quotation.')
+    }
+    for (const quote of result.evidence) {
+      const record = turnRecords.find(record => record.turn === quote.turn)
+      if (!record || !record.userConfirmed.includes(quote.quoteJa)) {
+        throw new ValidationError('invalid_feedback_output', 'Evidence must quote the referenced confirmed utterance.')
+      }
+    }
+  }
   const matchingRecord = (turn: number) => turnRecords.find((record) => record.turn === turn)
   const outcomeHasRealQuote = turnRecords.some((record) => parsed.data.outcomeEvidenceZh.includes(record.userConfirmed))
   if (!outcomeHasRealQuote) {
@@ -522,4 +554,10 @@ export function parseSpeechAssistModelOutput(value: unknown, observedTextJa: str
     cleanedObservedTextJa,
     continuationSuggestionJa,
   })
+}
+
+export function parsePracticeRestartRequest(value: unknown): { practiceToken: string } {
+  const result = z.object({ practiceToken: z.string().trim().min(1) }).strict().safeParse(value)
+  if (!result.success) throw new ValidationError('invalid_practice_restart_request', 'Practice restart request is invalid.')
+  return result.data
 }

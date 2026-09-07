@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖共享听力支架与语音续说契约、Worker 环境、模型配置、场景 prompt、token 校验、mock 回退、领域类型与响应校验器
- * [OUTPUT]: 对外提供场景草拟、流式回复、提示、反馈、重做、四级听力支架与语音辅助的 OpenAI 编排函数及场景草拟错误
+ * [OUTPUT]: 提供按场景版本校验的逐项评价； 对外提供场景草拟、流式回复、提示、反馈、重做、四级听力支架与语音辅助的 OpenAI 编排函数及场景草拟错误
  * [POS]: worker 的模型网关层，负责请求 OpenAI、隔离听力支架上下文、归一化完整场景契约并交由严格校验
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -235,6 +235,8 @@ export function createFallbackReadyScenario(inputZh: string): DynamicScenarioDef
   return {
     id: `dyn_${crypto.randomUUID().slice(0, 8)}`,
     version: 1,
+    evaluationVersion: 1,
+    evidencePoints: [{ id: 'express_need', titleZh: '表达主要需求', descriptionZh: `通过确认稿清楚表达：${userGoal}` }],
     titleZh: inputZh.slice(0, 30) || '日语情境会话',
     summaryZh: inputZh || '根据需求生成的五轮日语口语会话练习。',
     aiRole: '场景中的日语会话对象',
@@ -672,7 +674,7 @@ export async function generateConversationFeedback(
   }
 
   if (!env.OPENAI_API_KEY) {
-    if (env.ALLOW_MOCK === 'true') return createMockFeedback(request)
+    if (env.ALLOW_MOCK === 'true') return createMockFeedback(request, sessionPayload.scenario)
     throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
   }
 
@@ -688,7 +690,7 @@ export async function generateConversationFeedback(
   )
 
   try {
-    return parseConversationFeedbackResponse(parsedJson, request.turnRecords)
+    return parseConversationFeedbackResponse(parsedJson, request.turnRecords, sessionPayload.scenario)
   } catch (error) {
     if (error instanceof ValidationError) {
       throw new ScenarioDraftError('feedback_model_invalid', error.message, 502)

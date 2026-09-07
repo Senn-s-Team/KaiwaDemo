@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 固定五轮会话、模型输出预算和安全边界的产品约定
+ * [OUTPUT]: 提供请求限制、默认模型和全局相手规则
+ * [POS]: worker 的运行时常量边界
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 export const LIMITS = {
   requestBytes: 32_768,
   sessionIdLength: 64,
@@ -9,7 +15,7 @@ export const LIMITS = {
   maxScenarioDraftClarifications: 1,
   scenarioDraftOutputTokens: 2_000,
   hintOutputTokens: 500,
-  feedbackOutputTokens: 1_000,
+  feedbackOutputTokens: 2_000,
   redoFeedbackOutputTokens: 500,
   scenarioTokenTtlMs: 2 * 60 * 60 * 1_000,
   sessionTokenTtlMs: 1 * 60 * 60 * 1_000,

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 Worker 环境、HTTP 边界、token、严格请求校验及各模型编排入口
- * [OUTPUT]: 对外提供配置、场景、会话、回复、反馈、四级听力支架与语音服务的同源 API 路由
+ * [OUTPUT]: 对外提供配置、场景、长期复练凭据续签、会话、回复、反馈、四级听力支架与语音服务的同源 API 路由
  * [POS]: Worker 请求入口，统一执行方法、同源、JSON 大小、鉴权与错误响应边界
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -26,6 +26,8 @@ import {
   streamOpenAiReply,
 } from './openai'
 import {
+  signPracticeToken,
+  verifyPracticeToken,
   signScenarioToken,
   signSessionToken,
   TokenError,
@@ -37,6 +39,7 @@ import {
   parseListeningScaffoldRequest,
   parseRedoFeedbackRequest,
   parseReplyRequest,
+  parsePracticeRestartRequest,
   parseScenarioDraftRequest,
   parseSessionStartRequest,
   parseSpeechAssistRequest,
@@ -98,7 +101,16 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       scenario: draft.scenario,
       expiresAt: Date.now() + LIMITS.scenarioTokenTtlMs,
     })
-    return json({ ...draft, scenarioToken })
+    const practiceToken = await signPracticeToken(env, draft.scenario)
+    return json({ ...draft, scenarioToken, practiceToken })
+  }
+
+  if (url.pathname === '/api/practice/restart') {
+    if (request.method !== 'POST') return methodNotAllowed('POST')
+    const restartRequest = parsePracticeRestartRequest(await readJsonBody(request, LIMITS.requestBytes))
+    const payload = await verifyPracticeToken(env, restartRequest.practiceToken)
+    const scenarioToken = await signScenarioToken(env, { scenario: payload.scenario, expiresAt: Date.now() + LIMITS.scenarioTokenTtlMs })
+    return json({ status: 'ready', scenario: payload.scenario, scenarioToken, practiceToken: restartRequest.practiceToken })
   }
 
   if (url.pathname === '/api/session/start') {
@@ -117,6 +129,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     return json({
       sessionId,
       scenarioType: 'dynamic',
+      ...(scenarioPayload.scenario.evidencePoints ? { practiceToken: await signPracticeToken(env, scenarioPayload.scenario) } : {}),
       sessionToken,
       scenario: scenarioPayload.scenario,
       firstLine: scenarioPayload.scenario.firstLine,

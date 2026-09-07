@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: Worker 反馈路由、模型响应与签名会话
+ * [OUTPUT]: 验证逐项评价版本、真实引用与回退事实
+ * [POS]: tests/worker 的反馈与重做契约测试
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../worker/index'
 import type { Env } from '../../worker/env'
@@ -266,5 +272,25 @@ describe('POST /api/conversation/redo-feedback', () => {
     const rejected = await fetchWorker(post('/api/conversation/redo-feedback', request), env)
     expect(rejected.status).toBe(502)
     await expect(rejected.json()).resolves.toMatchObject({ error: { code: 'redo_feedback_model_invalid' } })
+  })
+})
+
+describe('versioned evidence validation', () => {
+  it('requires complete rubric coverage and exact confirmed quotations', async () => {
+    const { parseConversationFeedbackResponse } = await import('../../worker/validation')
+    const records = [turnRecord(1), turnRecord(2, { listeningScaffoldLevel: 1, ttsReplayCount: 1 })]
+    const rubricScenario = { ...scenario, evaluationVersion: 1, evidencePoints: [scenario.coreGoal] }
+    const feedback = { ...validFeedback(records), evaluationVersion: 1, evidenceResults: [{ pointId: scenario.coreGoal.id, status: 'completed', evidence: [{ turn: 1, quoteJa: records[0]!.userConfirmed }] }] }
+    expect(parseConversationFeedbackResponse(feedback, records, rubricScenario)).toEqual(feedback)
+    for (const changed of [
+      { ...feedback, evaluationVersion: 2 },
+      { ...feedback, evidenceResults: [] },
+      { ...feedback, evidenceResults: [...feedback.evidenceResults, ...feedback.evidenceResults] },
+      { ...feedback, evidenceResults: [{ ...feedback.evidenceResults[0], evidence: [] }] },
+      { ...feedback, evidenceResults: [{ ...feedback.evidenceResults[0], evidence: [{ turn: 1, quoteJa: '架空の発話' }] }] },
+      { ...feedback, evidenceResults: [{ ...feedback.evidenceResults[0], evidence: [{ turn: 1, quoteJa: scenario.firstLine }] }] },
+    ]) expect(() => parseConversationFeedbackResponse(changed, records, rubricScenario)).toThrow()
+    expect(() => parseConversationFeedbackResponse(feedback, records, scenario)).toThrow()
+    expect(parseConversationFeedbackResponse({ ...feedback, evidenceResults: [{ pointId: scenario.coreGoal.id, status: 'not_observed', evidence: [] }] }, records, rubricScenario).evidenceResults?.[0]?.status).toBe('not_observed')
   })
 })

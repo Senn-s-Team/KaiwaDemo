@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 场景与反馈提示词构造器
+ * [OUTPUT]: 验证角色边界、五轮收束和版本化评价示例
+ * [POS]: tests/worker 的提示词契约测试
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { describe, expect, it } from 'vitest'
 import { createMockReply } from '../../worker/mock'
 import { buildDynamicDeveloperPrompt, buildFeedbackPrompt, buildHintPrompt, buildScenarioDraftPrompt } from '../../worker/scenarios'
@@ -128,6 +134,48 @@ describe('dynamic scenario prompts', () => {
     expect(prompt).toContain('「支架なし」「表現支架未使用」')
     expect(prompt).toContain('speechAssistUsed=false')
     expect(prompt).toContain('他フィールド以外の支架もなかった証拠にはならない')
+  })
+
+  it('adds the exact versioned evidence fields to feedback output examples only for rubric scenarios', () => {
+    const rubricScenario: DynamicScenarioDefinition = {
+      ...scenario,
+      evaluationVersion: 3,
+      evidencePoints: [
+        { id: 'propose_time', titleZh: '提出时间', descriptionZh: '从确认稿判断是否提出具体的新时间。' },
+        { id: 'confirm_time', titleZh: '确认时间', descriptionZh: '从确认稿判断是否确认双方理解一致。' },
+      ],
+    }
+    const request = {
+      scenarioType: 'dynamic' as const,
+      sessionToken: 'signed-session-token',
+      turnRecords: [{
+        turn: 1,
+        partnerPromptJa: scenario.firstLine,
+        userOriginal: '金曜日の午後三時に変更したいです。',
+        userCleaned: '金曜日の午後三時に変更したいです。',
+        userConfirmed: '金曜日の午後三時に変更したいです。',
+        inputMode: 'stt' as const,
+        transcriptModified: false,
+        rerecordCount: 0,
+        partnerAudioPlayCount: 1,
+        ttsReplayCount: 0,
+        transcriptRevealed: false,
+        listeningScaffoldLevel: 0 as const,
+        expressionScaffoldLevel: 0 as const,
+        failureCount: 0,
+        retryCount: 0,
+        textFallback: false,
+        speechAssistUsed: false,
+      }],
+    }
+
+    const versionedPrompt = buildFeedbackPrompt(rubricScenario, request)
+    const legacyPrompt = buildFeedbackPrompt(scenario, request)
+
+    expect(versionedPrompt).toContain('"evaluationVersion": 3')
+    expect(versionedPrompt).toContain('"evidenceResults": [{"pointId":"propose_time","status":"insufficient_evidence","evidence":[]},{"pointId":"confirm_time","status":"insufficient_evidence","evidence":[]}]')
+    expect(legacyPrompt).not.toContain('"evaluationVersion":')
+    expect(legacyPrompt).not.toContain('"evidenceResults":')
   })
 
   it('builds a four-field expression scaffold prompt', () => {

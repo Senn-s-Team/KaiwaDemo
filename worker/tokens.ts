@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 zod、Worker 环境密钥与 types 中的动态场景、场景 token、会话 token 契约
- * [OUTPUT]: 对外提供场景与会话 token 的签名、验证、claims 类型和结构化 TokenError
+ * [OUTPUT]: 对外提供场景、会话与独立长期练习 token 的签名、验证、claims 类型和结构化 TokenError
  * [POS]: worker 的可信边界，以严格 schema 保证签名和验签都完整保存五轮动态场景契约并拒绝 legacy claims
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -15,7 +15,7 @@ import type { Env } from './env'
 const TOKEN_SCHEMA_VERSION = 1
 const HMAC_ALGORITHM = { name: 'HMAC', hash: 'SHA-256' } as const
 
-type TokenKind = 'scenario' | 'session'
+type TokenKind = 'scenario' | 'session' | 'practice'
 
 type TokenErrorCode =
   | 'token_secret_missing'
@@ -41,6 +41,8 @@ const completionRulesSchema = z.object({
 const dynamicScenarioSchema = z.object({
   id: z.string().trim().min(1),
   version: z.number().int().positive(),
+  evaluationVersion: z.number().int().positive().optional(),
+  evidencePoints: z.array(trainingGoalSchema).min(1).max(5).refine(points => new Set(points.map(p => p.id)).size === points.length).optional(),
   titleZh: z.string().trim().min(1),
   summaryZh: z.string().trim().min(1),
   aiRole: z.string().trim().min(1),
@@ -64,7 +66,7 @@ const dynamicScenarioSchema = z.object({
   hintStrategy: z.string().trim().min(1),
   feedbackFocus: z.array(z.string().trim().min(1)).min(1),
   safetyBoundary: z.string().trim().min(1),
-}).strict()
+}).strict().refine(scenario => (scenario.evaluationVersion === undefined) === (scenario.evidencePoints === undefined), 'Evaluation version and evidence points must be provided together.')
 
 const scenarioTokenSchema = z.object({
   schemaVersion: z.literal(TOKEN_SCHEMA_VERSION),
@@ -82,6 +84,25 @@ const sessionTokenSchema = z.object({
   scenario: dynamicScenarioSchema,
   startedAt: z.number().int().nonnegative(),
 }).strict().refine(({ issuedAt, expiresAt }) => expiresAt > issuedAt, 'expiresAt must be after issuedAt.')
+
+const practiceTokenSchema = z.object({
+  schemaVersion: z.literal(TOKEN_SCHEMA_VERSION),
+  kind: z.literal('practice'),
+  issuedAt: z.number().int().nonnegative(),
+  scenario: dynamicScenarioSchema.refine(scenario => Boolean(scenario.evaluationVersion && scenario.evidencePoints)),
+}).strict()
+interface PracticeTokenPayload { schemaVersion: 1; kind: 'practice'; issuedAt: number; scenario: DynamicScenarioDefinition }
+function parsePracticeTokenPayload(payload: unknown): PracticeTokenPayload {
+  const result = practiceTokenSchema.safeParse(payload)
+  if (!result.success) throw new TokenError('token_claims_invalid', 'Practice token claims are invalid.', 401)
+  return result.data
+}
+export async function signPracticeToken(env: Env, scenario: DynamicScenarioDefinition): Promise<string> {
+  return signPayload(env, { schemaVersion: 1, kind: 'practice', issuedAt: Date.now(), scenario })
+}
+export async function verifyPracticeToken(env: Env, token: string): Promise<PracticeTokenPayload> {
+  return parsePracticeTokenPayload(await verifyPayload(env, token, 'practice', Date.now()))
+}
 
 function parseScenarioTokenPayload(payload: unknown): ScenarioTokenPayload {
   const result = scenarioTokenSchema.safeParse(payload)
@@ -162,10 +183,12 @@ export async function verifySessionToken(env: Env, token: string, now = Date.now
 
 async function signPayload(
   env: Env,
-  payload: ScenarioTokenPayload | SessionTokenPayload,
+  payload: ScenarioTokenPayload | SessionTokenPayload | PracticeTokenPayload,
 ): Promise<string> {
   if (payload.kind === 'scenario') {
     parseScenarioTokenPayload(payload)
+  } else if (payload.kind === 'practice') {
+    parsePracticeTokenPayload(payload)
   } else {
     parseSessionTokenPayload(payload)
   }
@@ -212,7 +235,7 @@ async function verifyPayload(
   if (!Number.isSafeInteger(now) || now < 0) {
     throw new TokenError('token_claims_invalid', 'Verification time is invalid.', 400)
   }
-  if (payload.expiresAt <= now) {
+  if (expectedKind !== 'practice' && payload.expiresAt <= now) {
     throw new TokenError('token_expired', 'Token has expired.', 401)
   }
 
@@ -255,7 +278,7 @@ function assertPayloadEnvelope(payload: unknown, expectedKind: TokenKind): asser
 } {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)
     || !('schemaVersion' in payload) || !('kind' in payload)
-    || !('issuedAt' in payload) || !('expiresAt' in payload)) {
+    || !('issuedAt' in payload) || (expectedKind !== 'practice' && !('expiresAt' in payload))) {
     throw new TokenError('token_claims_invalid', 'Token claims are invalid.', 401)
   }
   if (payload.schemaVersion !== TOKEN_SCHEMA_VERSION) {

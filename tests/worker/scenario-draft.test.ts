@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 场景生成路由、模型输出与草拟契约
+ * [OUTPUT]: 验证一次澄清与版本化场景生成
+ * [POS]: tests/worker 的场景草拟契约测试
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../worker/index'
 import type { Env } from '../../worker/env'
@@ -13,6 +19,8 @@ const env: Env = {
 const scenario: DynamicScenarioDefinition = {
   id: 'dynamic-cafe-order',
   version: 1,
+  evaluationVersion: 1,
+  evidencePoints: [{ id: "need", titleZh: "说明需求", descriptionZh: "清楚表达主要需求" }],
   titleZh: '咖啡店点单',
   summaryZh: '在咖啡店用日语完成一杯饮品点单。',
   aiRole: '咖啡店店员',

@@ -1,7 +1,13 @@
+/**
+ * [INPUT]: Worker 路由、签名凭据与场景定义
+ * [OUTPUT]: 验证固定五轮会话和原场景复练的信任边界
+ * [POS]: tests/worker 的动态会话集成测试
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { describe, expect, it } from 'vitest'
 import worker from '../../worker/index'
 import { buildDynamicDeveloperPrompt } from '../../worker/scenarios'
-import { signScenarioToken, signSessionToken } from '../../worker/tokens'
+import { signPracticeToken, signScenarioToken, signSessionToken, verifyScenarioToken, verifySessionToken } from '../../worker/tokens'
 import type { DynamicScenarioDefinition } from '../../worker/types'
 
 const API_ORIGIN = 'https://kaiwa.example'
@@ -19,6 +25,10 @@ function post(path: string, body: unknown): Request {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
+}
+
+function request(path: string, method: string, init: RequestInit = {}): Request {
+  return new Request(`${API_ORIGIN}${path}`, { method, ...init })
 }
 
 const scenario: DynamicScenarioDefinition = {
@@ -53,6 +63,15 @@ const scenario: DynamicScenarioDefinition = {
   safetyBoundary: '不索取真实证件号码或支付信息。',
 }
 
+const practiceScenario: DynamicScenarioDefinition = {
+  ...scenario,
+  evaluationVersion: 1,
+  evidencePoints: [
+    { id: 'state_name', titleZh: '说明姓名', descriptionZh: '从确认稿判断是否说明预订姓名。' },
+    { id: 'request_checkin', titleZh: '提出入住', descriptionZh: '从确认稿判断是否明确提出入住请求。' },
+  ],
+}
+
 async function sessionToken(): Promise<string> {
   return signSessionToken(env, {
     scenario,
@@ -84,6 +103,93 @@ describe('dynamic five-turn session', () => {
       firstLine: scenario.firstLine,
       scenario,
     })
+  })
+
+  it('renews an expired scenario through a signed practice token and starts an empty new session', async () => {
+    const firstScenarioToken = await signScenarioToken(env, {
+      scenario: practiceScenario,
+      expiresAt: Date.now() + 3_600_000,
+    })
+    const firstResponse = await fetchWorker(post('/api/session/start', { type: 'dynamic', scenarioToken: firstScenarioToken }), env)
+    const firstSession = await firstResponse.json() as { sessionId: string; sessionToken: string }
+    const oldAnswer = '田中です。チェックインをお願いします。'
+    const oldReply = await fetchWorker(post('/api/respond', {
+      scenarioType: 'dynamic',
+      sessionToken: firstSession.sessionToken,
+      sessionId: firstSession.sessionId,
+      turn: 1,
+      history: [
+        { role: 'assistant', text: practiceScenario.firstLine },
+        { role: 'user', text: oldAnswer },
+      ],
+    }), env)
+    const expiredScenarioToken = await signScenarioToken(env, {
+      scenario: practiceScenario,
+      issuedAt: Date.now() - 60_000,
+      expiresAt: Date.now() - 1,
+    })
+    const expiredResponse = await fetchWorker(post('/api/session/start', { type: 'dynamic', scenarioToken: expiredScenarioToken }), env)
+    const practiceToken = await signPracticeToken(env, practiceScenario)
+
+    expect(oldReply.status).toBe(200)
+    expect(expiredResponse.status).toBe(401)
+    await expect(expiredResponse.json()).resolves.toMatchObject({ error: { code: 'token_expired' } })
+
+    const restartResponse = await fetchWorker(post('/api/practice/restart', { practiceToken }), env)
+    const restart = await restartResponse.json() as {
+      status: string
+      scenario: DynamicScenarioDefinition
+      scenarioToken: string
+      practiceToken: string
+    }
+    const renewedScenario = await verifyScenarioToken(env, restart.scenarioToken)
+
+    expect(restartResponse.status).toBe(200)
+    expect(restart).toMatchObject({ status: 'ready', scenario: practiceScenario, practiceToken })
+    expect(renewedScenario.scenario).toEqual(practiceScenario)
+
+    const renewedResponse = await fetchWorker(post('/api/session/start', { type: 'dynamic', scenarioToken: restart.scenarioToken }), env)
+    const renewedSession = await renewedResponse.json() as { sessionId: string; sessionToken: string; scenario: DynamicScenarioDefinition }
+    const renewedClaims = await verifySessionToken(env, renewedSession.sessionToken)
+
+    expect(renewedResponse.status).toBe(200)
+    expect(renewedSession.sessionId).not.toBe(firstSession.sessionId)
+    expect(renewedSession.sessionToken).not.toBe(firstSession.sessionToken)
+    expect(renewedSession).not.toHaveProperty('history')
+    expect(renewedSession).not.toHaveProperty('turnRecords')
+    expect(JSON.stringify(renewedSession)).not.toContain(oldAnswer)
+    expect(renewedClaims).toMatchObject({ scenario: practiceScenario })
+    expect(renewedClaims).not.toHaveProperty('history')
+  })
+
+  it('rejects wrong-kind and forged practice tokens, disallowed methods, and cross-site restarts', async () => {
+    const scenarioToken = await signScenarioToken(env, {
+      scenario: practiceScenario,
+      expiresAt: Date.now() + 3_600_000,
+    })
+    const practiceToken = await signPracticeToken(env, practiceScenario)
+    const forgedToken = `${practiceToken.slice(0, -1)}${practiceToken.endsWith('a') ? 'b' : 'a'}`
+
+    const wrongKind = await fetchWorker(post('/api/practice/restart', { practiceToken: scenarioToken }), env)
+    const forged = await fetchWorker(post('/api/practice/restart', { practiceToken: forgedToken }), env)
+    const wrongMethod = await fetchWorker(request('/api/practice/restart', 'GET'), env)
+    const crossSite = await fetchWorker(request('/api/practice/restart', 'POST', {
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://attacker.example',
+        'sec-fetch-site': 'cross-site',
+      },
+      body: JSON.stringify({ practiceToken }),
+    }), env)
+
+    expect(wrongKind.status).toBe(401)
+    await expect(wrongKind.json()).resolves.toMatchObject({ error: { code: 'token_kind_mismatch' } })
+    expect(forged.status).toBe(401)
+    await expect(forged.json()).resolves.toMatchObject({ error: { code: 'token_invalid_signature' } })
+    expect(wrongMethod.status).toBe(405)
+    expect(wrongMethod.headers.get('allow')).toBe('POST')
+    expect(crossSite.status).toBe(403)
+    await expect(crossSite.json()).resolves.toMatchObject({ error: { code: 'cross_site_request' } })
   })
 
   it('rejects catalog starts and turns beyond five', async () => {

@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 场景、会话与长期复练的签名和校验器
+ * [OUTPUT]: 验证凭据身份、完整场景、过期与篡改拒绝
+ * [POS]: tests/worker 的签名边界测试
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { describe, expect, it } from 'vitest'
 import type { DynamicScenarioDefinition } from '../../worker/types'
 import {
@@ -145,5 +151,30 @@ describe('dynamic scenario tokens', () => {
       .rejects.toSatisfy(expectTokenError('token_secret_missing'))
     const token = await signScenarioToken(env, { scenario, issuedAt: now, expiresAt: now + 60_000 })
     await expect(verifySessionToken({}, token, now + 1)).rejects.toSatisfy(expectTokenError('token_secret_missing'))
+  })
+})
+
+describe('practice credentials', () => {
+  const practiceScenario = { ...scenario, evaluationVersion: 1, evidencePoints: [scenario.coreGoal] }
+  it('restarts the identical scenario after short-lived credentials expire', async () => {
+    const { signPracticeToken, verifyPracticeToken } = await import('../../worker/tokens')
+    const worker = (await import('../../worker/index')).default
+    const token = await signPracticeToken(env, practiceScenario)
+    const oldScenarioToken = await signScenarioToken(env, { scenario: practiceScenario, issuedAt: 1, expiresAt: 2 })
+    await expect(verifyScenarioToken(env, oldScenarioToken)).rejects.toMatchObject({ code: 'token_expired' })
+    expect((await verifyPracticeToken(env, token)).scenario).toEqual(practiceScenario)
+    const request = new Request('https://kaiwa.example/api/practice/restart', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ practiceToken: token }),
+    })
+    const response = await (worker.fetch as (request: Request, workerEnv: typeof env) => Promise<Response>)(request, env)
+    expect(response.status).toBe(200)
+    const body = await response.json() as { scenario: DynamicScenarioDefinition; scenarioToken: string; practiceToken: string }
+    expect(body.scenario).toEqual(practiceScenario)
+    expect(body.practiceToken).toBe(token)
+    expect((await verifyScenarioToken(env, body.scenarioToken)).scenario).toEqual(practiceScenario)
+    await expect(verifyScenarioToken(env, token)).rejects.toMatchObject({ code: 'token_claims_invalid' })
+    await expect(verifyPracticeToken(env, oldScenarioToken)).rejects.toMatchObject({ code: 'token_kind_mismatch' })
+    await expect(verifyPracticeToken(env, `${token.slice(0, -3)}abc`)).rejects.toMatchObject({ code: 'token_invalid_signature' })
+    await expect(signPracticeToken(env, scenario)).rejects.toMatchObject({ code: 'token_claims_invalid' })
   })
 })
