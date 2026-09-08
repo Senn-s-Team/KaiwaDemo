@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 真实浏览器可见 App DOM、会话快照与 visibilitychange 生命周期事件
- * [OUTPUT]: 锁定 confirming_transcript 草稿、发送控件及前后台切换不误入错误 UI 的集成回归契约
+ * [OUTPUT]: 锁定会话草稿、反馈任务 transport/terminal 重试分流、重做录音及 hint/listening/redo 异步结果只写回其所属 App 会话的集成回归契约
  * [POS]: tests/client/ App 根组件生命周期集成测试
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -9,8 +9,8 @@ import { type ComponentType, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { flushSync } from 'react-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createRoundRecord } from '../../src/lib/metrics'
-import type { SessionScenario } from '../../src/types'
+import { buildSessionReport, createRoundRecord } from '../../src/lib/metrics'
+import type { ConversationFeedbackResponse, SessionScenario } from '../../src/types'
 
 let App: ComponentType
 let fetchConfig: ReturnType<typeof vi.fn>
@@ -55,6 +55,25 @@ function readFailureCount(snapshot: unknown): number {
   return currentRound.failureCount
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((next) => { resolve = next })
+  return { promise, resolve }
+}
+
+function installWaitingSessionSnapshot(listeningScaffoldLevel = 0): void {
+  const round = createRoundRecord(1, scenario.firstLine, 0)
+  round.listeningScaffoldLevel = listeningScaffoldLevel
+  round.timing.audioStartedAt = 1
+  round.timing.audioCompletedAt = 2
+  window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({
+    version: 1, phase: 'waiting_user', sessionId: 'guard-session', scenario,
+    messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }], rounds: [],
+    currentRound: round, turn: 1, sessionStartedAt: 1,
+    transcript: { rawText: '', cleanedText: '', finalText: '' },
+  }))
+}
+
 describe('App lifecycle integration', () => {
   let root: Root
   let container: HTMLDivElement
@@ -71,9 +90,15 @@ describe('App lifecycle integration', () => {
       openai: { available: false, model: 'mock', mockAllowed: true },
     })
     listPracticeAttempts = vi.fn().mockResolvedValue([])
+    const feedbackResult = {
+      outcome: 'partial', outcomeEvidenceZh: '已完成一项沟通目标。', listeningFinding: null, expressionImprovement: null,
+      redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', directionZh: '保留请求并补充细节。' },
+    }
     vi.doMock('../../src/lib/api', async () => ({
       ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
       fetchConfig,
+      submitFeedbackTask: vi.fn().mockResolvedValue({ taskToken: 'feedback-token', expiresAt: Date.now() + 86_400_000 }),
+      getFeedbackTask: vi.fn().mockResolvedValue({ status: 'complete', kind: 'conversation', result: feedbackResult }),
     }))
     vi.doMock('../../src/lib/practice-history', async () => ({
       ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')),
@@ -140,5 +165,484 @@ describe('App lifecycle integration', () => {
     expect((visibleSendButton as HTMLButtonElement).disabled).toBe(false)
     const restored: unknown = JSON.parse(window.sessionStorage.getItem('kaiwa.current-session.v1') ?? 'null')
     expect(readFailureCount(restored)).toBe(0)
+  })
+})
+
+describe('App config lifecycle regression', () => {
+  it('keeps the initial config request and media resources alive across a root rerender', async () => {
+    vi.resetModules()
+    window.sessionStorage.clear()
+    const configRequest = deferred<import('../../src/types').PrototypeConfig>()
+    const configAbort = vi.fn()
+    const releaseMicrophoneStream = vi.fn()
+    const requestConfig = vi.fn((signal?: AbortSignal) => {
+      signal?.addEventListener('abort', configAbort)
+      return configRequest.promise
+    })
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: requestConfig,
+    }))
+    vi.doMock('../../src/lib/practice-history', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')),
+      listPracticeAttempts: vi.fn().mockReturnValue(new Promise(() => undefined)),
+    }))
+    vi.doMock('../../src/lib/audio-engine', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/audio-engine')>('../../src/lib/audio-engine')),
+      releaseMicrophoneStream,
+    }))
+    const container = document.createElement('div')
+    const root = createRoot(container)
+    document.body.appendChild(container)
+    try {
+      const appModule = await import('../../src/App')
+      flushSync(() => root.render(createElement(appModule.default)))
+      await vi.waitFor(() => expect(requestConfig).toHaveBeenCalledOnce(), { interval: 0 })
+      configAbort.mockClear()
+      releaseMicrophoneStream.mockClear()
+
+      flushSync(() => root.render(createElement(appModule.default)))
+
+      expect(configAbort).not.toHaveBeenCalled()
+      expect(releaseMicrophoneStream).not.toHaveBeenCalled()
+      configRequest.resolve({
+        mode: 'mock', limits: { maxTurns: 5 },
+        elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' },
+        openai: { available: false, model: 'mock', mockAllowed: true },
+      })
+      await vi.waitFor(() => {
+        const input = container.querySelector<HTMLTextAreaElement>('#custom-topic-input')
+        expect(input).not.toBeNull()
+        expect(input?.disabled).toBe(false)
+      }, { interval: 0 })
+    } finally {
+      root.unmount()
+      container.remove()
+      window.sessionStorage.clear()
+      vi.doUnmock('../../src/lib/api')
+      vi.doUnmock('../../src/lib/practice-history')
+      vi.doUnmock('../../src/lib/audio-engine')
+      vi.clearAllMocks()
+    }
+  })
+})
+
+describe('App async owner guards', () => {
+  let root: Root | null = null
+  let container: HTMLDivElement | null = null
+  let scrollIntoView: PropertyDescriptor | undefined
+
+  beforeEach(() => {
+    scrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
+  })
+
+  afterEach(() => {
+    root?.unmount()
+    container?.remove()
+    root = null
+    container = null
+    window.sessionStorage.clear()
+    if (scrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollIntoView)
+    else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    vi.doUnmock('../../src/lib/api')
+    vi.doUnmock('../../src/lib/practice-history')
+    vi.clearAllMocks()
+  })
+
+  it('drops late hint and listening scaffold results after the App unmounts', async () => {
+    vi.resetModules()
+    const hint = deferred({ directionZh: '旧提示不得显示', keyPhrasesJa: ['古い'], sentenceStarterJa: '古いです', fullExampleJa: '古い結果です。' })
+    const scaffold = deferred({ keyInformationHintZh: '旧关键信息不得显示', keyPhrasesJa: ['古い'], intentSummaryZh: '旧结果' })
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }),
+      fetchHint: vi.fn().mockImplementation(() => hint.promise),
+      requestListeningScaffold: vi.fn().mockImplementation(() => scaffold.promise),
+    }))
+    vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([]) }))
+    installWaitingSessionSnapshot(1)
+    container = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App')
+    root = createRoot(container); flushSync(() => root?.render(createElement(appModule.default)))
+    const hintButton = await vi.waitFor(() => {
+      const button = container?.querySelector<HTMLButtonElement>('[aria-label="不知道怎么说，查看表达帮助"]')
+      expect(button).not.toBeNull()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    const scaffoldButton = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('查看关键信息'))
+    expect(scaffoldButton).toBeDefined()
+    flushSync(() => { hintButton.click(); (scaffoldButton as HTMLButtonElement).click() })
+    root.unmount(); root = null
+    hint.resolve({ directionZh: '旧提示不得显示', keyPhrasesJa: ['古い'], sentenceStarterJa: '古いです', fullExampleJa: '古い结果です。' })
+    scaffold.resolve({ keyInformationHintZh: '旧关键信息不得显示', keyPhrasesJa: ['古い'], intentSummaryZh: '旧结果' })
+    await flush(); await flush()
+    expect(container.textContent).not.toContain('旧提示不得显示')
+    expect(container.textContent).not.toContain('旧关键信息不得显示')
+  })
+
+  it('shows a listening scaffold response while its App session remains mounted', async () => {
+    vi.resetModules()
+    const scaffold = vi.fn().mockResolvedValue({ keyInformationHintZh: '当前会话关键信息', keyPhrasesJa: ['現在'], intentSummaryZh: '当前结果' })
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }),
+      requestListeningScaffold: scaffold,
+    }))
+    vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([]) }))
+    installWaitingSessionSnapshot(1)
+    container = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App')
+    root = createRoot(container); flushSync(() => root?.render(createElement(appModule.default)))
+    const button = await vi.waitFor(() => {
+      const next = Array.from(container?.querySelectorAll('button') ?? []).find((item) => item.textContent?.includes('查看关键信息'))
+      expect(next).toBeDefined()
+      return next as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => button.click())
+    await vi.waitFor(() => expect(scaffold).toHaveBeenCalledOnce(), { interval: 0 })
+    await vi.waitFor(() => expect(container?.textContent).toContain('当前会话关键信息'), { interval: 0 })
+  })
+})
+
+describe('SessionComplete redo lifecycle', () => {
+  let activeRoot: Root | null = null
+  let activeContainer: HTMLDivElement | null = null
+  let localStorageDescriptor: PropertyDescriptor | undefined
+
+  beforeEach(() => {
+    localStorageDescriptor = Object.getOwnPropertyDescriptor(window, 'localStorage')
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: new (class implements Storage {
+      #entries = new Map<string, string>()
+      get length(): number { return this.#entries.size }
+      clear(): void { this.#entries.clear() }
+      getItem(key: string): string | null { return this.#entries.get(key) ?? null }
+      key(index: number): string | null { return [...this.#entries.keys()][index] ?? null }
+      removeItem(key: string): void { this.#entries.delete(key) }
+      setItem(key: string, value: string): void { this.#entries.set(key, value) }
+    })() })
+  })
+  afterEach(() => {
+    activeRoot?.unmount()
+    activeRoot = null
+    activeContainer?.remove()
+    activeContainer = null
+    window.sessionStorage.clear()
+    window.localStorage.clear()
+    if (localStorageDescriptor) Object.defineProperty(window, 'localStorage', localStorageDescriptor)
+    else delete (window as { localStorage?: Storage }).localStorage
+    vi.doUnmock('../../src/lib/api')
+    vi.doUnmock('../../src/lib/stt')
+    vi.clearAllMocks()
+  })
+
+  function installCompletedConversationTask(status: 'transport_error' | 'failed', taskToken: string): string {
+    const round = createRoundRecord(1, scenario.firstLine, 0)
+    round.userOriginal = '前髪は残してください。'
+    round.userCleaned = round.userOriginal
+    round.userFinal = round.userOriginal
+    round.inputMode = 'text'
+    round.timing.audioStartedAt = 1
+    round.timing.audioCompletedAt = 2
+    const endedAt = Date.now()
+    const requestId = crypto.randomUUID()
+    const report = buildSessionReport('feedback-retry-session', 'mock', scenario, 1, endedAt, [round], [])
+    window.localStorage.setItem('kaiwa.completed-review.v1', JSON.stringify({
+      version: 1, sessionId: 'feedback-retry-session', scenario,
+      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }, { id: 'user-1', turn: 1, role: 'user', text: round.userFinal, transcript: { rawText: round.userOriginal, cleanedText: round.userCleaned, finalText: round.userFinal } }],
+      rounds: [round], startedAt: 1, endedAt, report, feedback: null, redoRecords: [],
+      pending: { conversation: {
+        request: { kind: 'conversation', requestId, createdAt: endedAt, payload: { scenarioType: 'dynamic', sessionToken: scenario.sessionToken, turnRecords: [{ turn: 1, partnerPromptJa: scenario.firstLine, userOriginal: round.userOriginal, userCleaned: round.userCleaned, userConfirmed: round.userFinal, inputMode: 'text', transcriptModified: false, rerecordCount: 0, partnerAudioPlayCount: 1, ttsReplayCount: 0, transcriptRevealed: false, listeningScaffoldLevel: 0, expressionScaffoldLevel: 0, failureCount: 0, retryCount: 0, textFallback: true, speechAssistUsed: false }] } },
+        taskToken, status, error: { code: status, message: '反馈任务暂时不可用。' },
+      } },
+    }))
+    return requestId
+  }
+
+  it('resumes a transport-error conversation feedback task with its original capability', async () => {
+    vi.resetModules()
+    const taskSubmit = vi.fn()
+    const taskGet = vi.fn().mockRejectedValueOnce(new Error('网络中断')).mockRejectedValueOnce(new Error('网络中断')).mockResolvedValue({ status: 'pending' })
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }),
+      submitFeedbackTask: taskSubmit, getFeedbackTask: taskGet, listPracticeAttempts: vi.fn().mockResolvedValue([]),
+    }))
+    installCompletedConversationTask('transport_error', 'original-token')
+    const container = activeContainer = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App'); const root = activeRoot = createRoot(container)
+    flushSync(() => root.render(createElement(appModule.default)))
+    const retry = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent === '重新生成')
+      expect(button, container.textContent).toBeDefined()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => retry.click())
+    await vi.waitFor(() => expect(taskGet).toHaveBeenCalledTimes(3), { interval: 0 })
+    expect(taskSubmit).not.toHaveBeenCalled()
+    expect(taskGet.mock.calls.map(([token]) => token)).toEqual(['original-token', 'original-token', 'original-token'])
+  })
+
+  it('creates a new conversation request only after an explicit terminal-failure retry', async () => {
+    vi.resetModules()
+    const { ApiError } = await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')
+    const taskSubmit = vi.fn().mockResolvedValue({ taskToken: 'replacement-token', expiresAt: Date.now() + 86_400_000 })
+    const taskGet = vi.fn().mockRejectedValueOnce(new ApiError('invalid_token', 'capability 无效', 401)).mockResolvedValue({ status: 'pending' })
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }),
+      submitFeedbackTask: taskSubmit, getFeedbackTask: taskGet, listPracticeAttempts: vi.fn().mockResolvedValue([]),
+    }))
+    const originalRequestId = installCompletedConversationTask('failed', 'invalid-token')
+    const container = activeContainer = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App'); const root = activeRoot = createRoot(container)
+    flushSync(() => root.render(createElement(appModule.default)))
+    const retry = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent === '重新生成')
+      expect(button, container.textContent).toBeDefined()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => retry.click())
+    await vi.waitFor(() => expect(taskSubmit).toHaveBeenCalledOnce(), { interval: 0 })
+    expect(taskSubmit.mock.calls[0][0].requestId).not.toBe(originalRequestId)
+  })
+
+  it('does not start a redo microphone session when the token resolves after unmount', async () => {
+    vi.resetModules()
+    const tokenDeferred = (() => {
+      let resolve!: (value: string) => void
+      const promise = new Promise<string>((next) => { resolve = next })
+      return { promise, resolve }
+    })()
+    const sttStart = vi.fn().mockResolvedValue(undefined)
+    const feedback: ConversationFeedbackResponse = {
+      outcome: 'partial',
+      outcomeEvidenceZh: '已完成一项沟通目标。',
+      listeningFinding: null,
+      expressionImprovement: null,
+      redoTask: {
+        turn: 1,
+        partnerPromptJa: scenario.firstLine,
+        firstConfirmedJa: '前髪は残してください。',
+        directionZh: '保留请求并补充细节。',
+      },
+    }
+    const round = createRoundRecord(1, scenario.firstLine, 0)
+    round.userFinal = '前髪は残してください。'
+    round.timing.audioStartedAt = 1
+    round.timing.audioCompletedAt = 2
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({
+        mode: 'mock', limits: { maxTurns: 5 },
+        elevenlabs: { sttAvailable: true, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' },
+        openai: { available: false, model: 'mock', mockAllowed: true },
+      }),
+      submitFeedbackTask: vi.fn().mockResolvedValue({ taskToken: 'feedback-token', expiresAt: Date.now() + 86_400_000 }),
+      getFeedbackTask: vi.fn().mockResolvedValue({ status: 'complete', kind: 'conversation', result: feedback }),
+      requestElevenLabsToken: vi.fn().mockImplementation(() => tokenDeferred.promise),
+      listPracticeAttempts: vi.fn().mockResolvedValue([]),
+    }))
+    vi.doMock('../../src/lib/stt', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/stt')>('../../src/lib/stt')),
+      RealtimeSttSession: class {
+        start = sttStart
+        stop = vi.fn().mockResolvedValue('')
+        close = vi.fn()
+      },
+    }))
+    window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({
+      version: 1,
+      phase: 'preparing_tts',
+      sessionId: 'session-id',
+      scenario,
+      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }],
+      rounds: [],
+      currentRound: round,
+      turn: 5,
+      sessionStartedAt: 1,
+      transcript: { rawText: '', cleanedText: '', finalText: '' },
+    }))
+    const container = activeContainer = document.createElement('div')
+    document.body.appendChild(container)
+    const appModule = await import('../../src/App')
+    const root = activeRoot = createRoot(container)
+    flushSync(() => root.render(createElement(appModule.default)))
+    const redoButton = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('再练这个回合'))
+      expect(button).toBeDefined()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => redoButton.click())
+    const startButton = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('开始回答'))
+      expect(button).toBeDefined()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => startButton.click())
+    root.unmount()
+    activeRoot = null
+    container.remove()
+    activeContainer = null
+    tokenDeferred.resolve('late-token')
+    await flush()
+    expect(sttStart).not.toHaveBeenCalled()
+  })
+
+  it('starts the redo microphone session when the token resolves while mounted', async () => {
+    vi.resetModules()
+    const sttStart = vi.fn().mockResolvedValue(undefined)
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({
+        mode: 'mock', limits: { maxTurns: 5 },
+        elevenlabs: { sttAvailable: true, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' },
+        openai: { available: false, model: 'mock', mockAllowed: true },
+      }),
+      submitFeedbackTask: vi.fn().mockResolvedValue({ taskToken: 'feedback-token', expiresAt: Date.now() + 86_400_000 }),
+      getFeedbackTask: vi.fn().mockResolvedValue({ status: 'complete', kind: 'conversation', result: { outcome: 'partial', outcomeEvidenceZh: '已完成一项沟通目标。', listeningFinding: null, expressionImprovement: null, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', directionZh: '保留请求并补充细节。' } } }),
+      requestElevenLabsToken: vi.fn().mockResolvedValue('ready-token'),
+      listPracticeAttempts: vi.fn().mockResolvedValue([]),
+    }))
+    vi.doMock('../../src/lib/stt', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/stt')>('../../src/lib/stt')),
+      RealtimeSttSession: class {
+        start = sttStart
+        stop = vi.fn().mockResolvedValue('')
+        close = vi.fn()
+      },
+    }))
+    const round = createRoundRecord(1, scenario.firstLine, 0)
+    round.userFinal = '前髪は残してください。'
+    round.timing.audioStartedAt = 1
+    round.timing.audioCompletedAt = 2
+    window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({
+      version: 1, phase: 'preparing_tts', sessionId: 'session-id', scenario,
+      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }], rounds: [], currentRound: round,
+      turn: 5, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' },
+    }))
+    const container = activeContainer = document.createElement('div')
+    document.body.appendChild(container)
+    const appModule = await import('../../src/App')
+    const root = activeRoot = createRoot(container)
+    flushSync(() => root.render(createElement(appModule.default)))
+    const redoButton = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('再练这个回合'))
+      expect(button).toBeDefined()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => redoButton.click())
+    const startButton = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('开始回答'))
+      expect(button).toBeDefined()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => startButton.click())
+    await vi.waitFor(() => expect(sttStart).toHaveBeenCalledOnce(), { interval: 0 })
+    expect(sttStart).toHaveBeenCalledOnce()
+    root.unmount()
+    activeRoot = null
+    container.remove()
+    activeContainer = null
+  })
+
+  it('restores the completed review redo confirmation draft after refresh without starting a new task', async () => {
+    vi.resetModules()
+    const taskGet = vi.fn().mockResolvedValue({ status: 'pending' })
+    const taskSubmit = vi.fn()
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }),
+      submitFeedbackTask: taskSubmit, getFeedbackTask: taskGet, listPracticeAttempts: vi.fn().mockResolvedValue([]),
+    }))
+    const completedRound = createRoundRecord(1, scenario.firstLine, 1)
+    completedRound.userOriginal = '前髪を少し短くしてください。'
+    completedRound.userCleaned = completedRound.userOriginal
+    completedRound.userFinal = completedRound.userOriginal
+    completedRound.inputMode = 'text'
+    completedRound.timing.audioStartedAt = 1
+    completedRound.timing.audioCompletedAt = 2
+    const endedAt = Date.now()
+    const report = buildSessionReport('completed-session', 'mock', scenario, 1, endedAt, [completedRound], [])
+    window.localStorage.setItem('kaiwa.completed-review.v1', JSON.stringify({
+      version: 1, sessionId: 'completed-session', scenario, messages: [
+        { id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine },
+        { id: 'user-1', turn: 1, role: 'user', text: completedRound.userFinal, transcript: { rawText: completedRound.userOriginal, cleanedText: completedRound.userCleaned, finalText: completedRound.userFinal } },
+      ], rounds: [completedRound],
+      startedAt: 1, endedAt, report, feedback: { outcome: 'partial', outcomeEvidenceZh: '证据', listeningFinding: null, expressionImprovement: null, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', directionZh: '补充细节。' } },
+      redoRecords: [], pending: { redo: { request: { kind: 'redo', requestId: crypto.randomUUID(), createdAt: Date.now(), payload: { scenarioType: 'dynamic', sessionToken: scenario.sessionToken, turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', secondConfirmedJa: '前髪を少し短くしてください。', secondInputMode: 'text', secondListeningScaffoldLevel: 0, secondExpressionScaffoldLevel: 0 } }, status: 'pending', taskToken: 'redo-token' } },
+    }))
+    const container = activeContainer = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App'); const root = activeRoot = createRoot(container)
+    flushSync(() => root.render(createElement(appModule.default)))
+    const draft = await vi.waitFor(() => {
+      const textarea = container.querySelector<HTMLTextAreaElement>('#redo-confirmed'); expect(textarea).not.toBeNull(); return textarea as HTMLTextAreaElement
+    }, { interval: 0 })
+    expect(draft.value).toBe('前髪を少し短くしてください。')
+    expect(taskSubmit).not.toHaveBeenCalled()
+    expect(taskGet).toHaveBeenCalledWith('redo-token', expect.any(AbortSignal))
+  })
+
+  it('does not save a late redo comparison after leaving its completed session', async () => {
+    vi.resetModules()
+    const accepted = deferred<{ taskToken: string; expiresAt: number }>()
+    const taskSubmit = vi.fn().mockImplementation(() => accepted.promise)
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }),
+      submitFeedbackTask: taskSubmit,
+      getFeedbackTask: vi.fn().mockResolvedValue({ status: 'complete', kind: 'redo', result: { comparisonZh: '迟到比较不得写入', referenceExpressionJa: '新しい表現です。' } }),
+      listPracticeAttempts: vi.fn().mockResolvedValue([]),
+    }))
+    const round = createRoundRecord(1, scenario.firstLine, 0)
+    round.userOriginal = '前髪を短くしてください。'
+    round.userCleaned = round.userOriginal
+    round.userFinal = round.userOriginal
+    round.inputMode = 'text'
+    round.timing.audioStartedAt = 1
+    round.timing.audioCompletedAt = 2
+    const endedAt = Date.now()
+    const report = buildSessionReport('redo-owner-session', 'mock', scenario, 1, endedAt, [round], [])
+    window.localStorage.setItem('kaiwa.completed-review.v1', JSON.stringify({
+      version: 1, sessionId: 'redo-owner-session', scenario,
+      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }], rounds: [round], startedAt: 1, endedAt, report,
+      feedback: { outcome: 'partial', outcomeEvidenceZh: '证据', listeningFinding: null, expressionImprovement: null, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', directionZh: '补充细节。' } }, redoRecords: [], pending: {},
+    }))
+    const container = activeContainer = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App'); const root = activeRoot = createRoot(container)
+    flushSync(() => root.render(createElement(appModule.default)))
+    const redoButton = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('再练这个回合'))
+      expect(button).toBeDefined()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => redoButton.click())
+    const textButton = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent === '改用文字')
+      expect(button).toBeDefined()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => textButton.click())
+    const textarea = await vi.waitFor(() => {
+      const input = container.querySelector<HTMLTextAreaElement>('#redo-confirmed')
+      expect(input).not.toBeNull()
+      return input as HTMLTextAreaElement
+    }, { interval: 0 })
+    flushSync(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+      setter?.call(textarea, '前髪をもっと短くしてください。')
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const confirmButton = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('确认回答并查看比较'))
+    expect(confirmButton).toBeDefined()
+    flushSync(() => (confirmButton as HTMLButtonElement).click())
+    await vi.waitFor(() => expect(taskSubmit).toHaveBeenCalled(), { interval: 0 })
+    const leaveButton = Array.from(container.querySelectorAll('button')).find((item) => item.textContent === '开始新场景')
+    expect(leaveButton).toBeDefined()
+    flushSync(() => (leaveButton as HTMLButtonElement).click())
+    accepted.resolve({ taskToken: 'late-redo-token', expiresAt: Date.now() + 86_400_000 })
+    await flush(); await flush()
+    expect(container.textContent).not.toContain('迟到比较不得写入')
+    expect(window.localStorage.getItem('kaiwa.completed-review.v1')).toBeNull()
   })
 })

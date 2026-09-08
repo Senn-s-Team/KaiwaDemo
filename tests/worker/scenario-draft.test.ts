@@ -8,13 +8,30 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../worker/index'
 import type { Env } from '../../worker/env'
 import type { DynamicScenarioDefinition } from '../../worker/types'
+import type { ScenarioDraftTaskRequest } from '../../shared/scenario-draft'
 import { verifyScenarioToken } from '../../worker/tokens'
+import { executeScenarioDraftTask } from '../../worker/scenario-draft-execute'
 
 const API_ORIGIN = 'https://kaiwa.example'
-const env: Env = {
-  OPENAI_API_KEY: 'test-openai-key',
-  SCENARIO_SIGNING_SECRET: 'test-scenario-signing-secret',
+class TestWorkflowInstance {
+  readonly id: string
+  statusValue: { status: string; output?: unknown } = { status: 'queued' }
+  constructor(id: string) { this.id = id }
+  async status(): Promise<{ status: string; output?: unknown }> { return this.statusValue }
 }
+class TestWorkflow {
+  instances = new Map<string, TestWorkflowInstance>()
+  async create(options: { id?: string; params?: ScenarioDraftTaskRequest }) {
+    if (!options.id || this.instances.has(options.id) || !options.params) throw new Error('already exists')
+    const instance = new TestWorkflowInstance(options.id)
+    this.instances.set(instance.id, instance)
+    void executeScenarioDraftTask(env, options.params).then(output => { instance.statusValue = { status: 'complete', output } })
+    return instance
+  }
+  async get(id: string) { const instance = this.instances.get(id); if (!instance) throw new Error('not found'); return instance }
+}
+const workflow = new TestWorkflow()
+const env: Env = { OPENAI_API_KEY: 'test-openai-key', SCENARIO_SIGNING_SECRET: 'test-scenario-signing-secret', SCENARIO_DRAFT: workflow }
 
 const scenario: DynamicScenarioDefinition = {
   id: 'dynamic-cafe-order',
@@ -58,13 +75,27 @@ const readyModelResponse = {
 }
 
 type WorkerFetch = (request: Request, workerEnv: Env) => Response | Promise<Response>
-const fetchWorker = worker.fetch as unknown as WorkerFetch
+const rawFetchWorker = worker.fetch as unknown as WorkerFetch
+const fetchWorker: WorkerFetch = async (request, workerEnv) => {
+  const response = await rawFetchWorker(request, workerEnv)
+  if (response.status !== 202) return response
+  const accepted = await response.json() as { taskToken: string }
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await Promise.resolve()
+    const statusResponse = await rawFetchWorker(new Request(request.url, { headers: { authorization: `Bearer ${accepted.taskToken}` } }), workerEnv)
+    const status = await statusResponse.json() as { status: string; result?: unknown; error?: { code: string; message: string } }
+    if (status.status === 'complete') return new Response(JSON.stringify(status.result), { status: 200, headers: { 'content-type': 'application/json' } })
+    if (status.status === 'failed') return new Response(JSON.stringify({ error: status.error }), { status: 502, headers: { 'content-type': 'application/json' } })
+  }
+  throw new Error('test Workflow did not complete')
+}
 
 function post(body: unknown): Request {
+  const envelope = typeof body === 'object' && body !== null ? { requestId: crypto.randomUUID(), createdAt: Date.now(), ...(body as Record<string, unknown>) } : body
   return new Request(`${API_ORIGIN}/api/scenario/draft`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify(envelope),
   })
 }
 

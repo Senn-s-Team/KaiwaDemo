@@ -6,6 +6,8 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../worker/index'
+import { executeFeedbackTask } from '../../worker/feedback-task-execute'
+import { handleFeedbackTaskGet, handleFeedbackTaskPost } from '../../worker/feedback-task'
 import type { Env } from '../../worker/env'
 import { signSessionToken } from '../../worker/tokens'
 import type {
@@ -24,7 +26,37 @@ const env: Env = {
 }
 
 type WorkerFetch = (request: Request, workerEnv: Env) => Response | Promise<Response>
-const fetchWorker = worker.fetch as unknown as WorkerFetch
+class FeedbackWorkflowAdapter {
+  private readonly outputs = new Map<string, Promise<unknown>>()
+  async create(options: { id?: string; params?: unknown }) {
+    if (!options.id || this.outputs.has(options.id)) throw new Error('already exists')
+    this.outputs.set(options.id, executeFeedbackTask((this as unknown as { env: Env }).env, options.params as never))
+    return { id: options.id, status: async () => ({ status: 'complete', output: await this.outputs.get(options.id!) }) }
+  }
+  async get(id: string) {
+    const output = this.outputs.get(id)
+    if (!output) throw new Error('not found')
+    return { id, status: async () => ({ status: 'complete', output: await output }) }
+  }
+  env!: Env
+}
+const fetchWorker: WorkerFetch = async (request, workerEnv) => {
+  if (!request.url.includes('/api/conversation/feedback') && !request.url.includes('/api/conversation/redo-feedback')) return (worker.fetch as unknown as WorkerFetch)(request, workerEnv)
+  const payload = await request.json() as Record<string, unknown>
+  const adapter = new FeedbackWorkflowAdapter()
+  const env = { ...workerEnv, FEEDBACK_TASK: adapter } as Env
+  adapter.env = env
+  const envelope = {
+    kind: request.url.includes('redo-feedback') ? 'redo' : 'conversation',
+    requestId: crypto.randomUUID(), createdAt: Date.now(), payload,
+  }
+  const accepted = await handleFeedbackTaskPost(new Request(`${API_ORIGIN}/api/feedback/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(envelope) }), env)
+  if (accepted.status !== 202) return accepted
+  const { taskToken } = await accepted.json() as { taskToken: string }
+  const completed = await handleFeedbackTaskGet(new Request(`${API_ORIGIN}/api/feedback/tasks`, { headers: { authorization: `Bearer ${taskToken}` } }), env)
+  const status = await completed.json() as { status: string; result?: unknown; error?: unknown }
+  return new Response(JSON.stringify(status.status === 'complete' ? status.result : { error: status.error }), { status: status.status === 'complete' ? 200 : 502, headers: { 'content-type': 'application/json' } })
+}
 
 function post(path: string, body: unknown, headers: Record<string, string> = {}): Request {
   return new Request(`${API_ORIGIN}${path}`, {
