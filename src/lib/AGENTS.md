@@ -20,6 +20,7 @@ use-listening-scaffold-controller.ts: 会话内听力支架等级、请求状态
 use-speech-assist-controller.ts: 录音续说辅助的请求时机、超时、失败分类、事件写回、可见结果与中止控制器
 use-completed-practice.ts: 完成复盘的 durable feedback/redo 恢复、报告、复练比较、任务启动/重试与复制协调，复用 feedback recovery 唯一轮询
 use-home-practice.ts: 首页草稿恢复、场景准备、本机练习历史、复练、删除与串行持久化协调，复用 scenario draft recovery 唯一轮询
+home-practice-recovery.ts: 首页同场景复练准备数据的严格 sessionStorage 校验、恢复、写入与清理边界
 use-session-snapshot-persistence.ts: 当前会话 sessionStorage 快照写入与清理 lifecycle
 use-session-lifecycle.ts: 在线、离线、可见性与 pagehide 的会话中断、媒体释放和恢复状态监听
 spark-practice.ts: 首页三个可编辑场景例子的抽取、换组避重与动态场景请求描述生成

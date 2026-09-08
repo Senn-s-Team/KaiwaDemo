@@ -1,6 +1,6 @@
 /**
- * [INPUT]: ActiveSession 的中文意图录音、表达提示与参考音频动作
- * [OUTPUT]: 锁定中文录音的输入保全、取消代际、麦克风所有权与参考音频边界
+ * [INPUT]: ActiveSession 的中文意图录音、在线状态切换、表达提示与参考音频动作
+ * [OUTPUT]: 锁定中文录音的输入保全、取消代际、在线离线取消、麦克风所有权与参考音频边界
  * [POS]: tests/components 的活动会话中文意图输入挂载回归
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -26,10 +26,10 @@ import { ActiveSession, type ActiveSessionActions, type ActiveSessionModel } fro
 
 const flush = async () => { await Promise.resolve(); await Promise.resolve() }
 const click = (box: HTMLElement, text: string) => Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes(text)) as HTMLButtonElement
-function Harness({ phase = 'waiting_user' as const, notice = '', previousAdvice = false }: { phase?: ActiveSessionModel['phase']; notice?: string; previousAdvice?: boolean }): React.JSX.Element {
+function Harness({ phase = 'waiting_user' as const, notice = '', previousAdvice = false, online = true }: { phase?: ActiveSessionModel['phase']; notice?: string; previousAdvice?: boolean; online?: boolean }): React.JSX.Element {
   const [sheet, setSheet] = useState(true)
   const model = {
-    phase, scenario: { maxTurns: 5, dynamicData: { aiRole: '店员', titleZh: '测试', summaryZh: '', coreGoal: { titleZh: '', descriptionZh: '' } } }, turn: 1, controlsLocked: false, showGoalsSheet: false, sessionCoreGoal: null, recoveryMessage: '', interruptionRecovery: { status: 'idle' }, interruptionRecoveryAffordances: {}, recoveryTarget: null, online: true, effectiveForegroundNotice: '', messages: [], listeningRequestStates: {}, activeAiMessageId: null, pausedAiMessageId: null, playedAiMessageIds: new Set(), activeError: null, activeFailedStep: null, silenceCountdownSeconds: null, activeAssistIsVisible: false, activeAssistState: null, confirmedTranscript: '', interimTranscript: '', partialTranscript: '', recordingSeconds: 0, dockInputMode: 'voice', dockTextValue: '', hintData: { directionZh: '说明', keyPhrasesJa: ['料金'], sentenceStarterJa: '料金は', fullExampleJa: '追加料金はかかりますか？' }, isLoadingHint: false, hintLevel: 4, showHintSheet: sheet, showTranscriptSheet: false, manualInput: false, transcript: { rawText: '', finalText: '' }, showOriginalTranscript: false, inlineError: '', canConfirmTranscript: false, sttAvailable: true, sttModel: 'scribe', ttsAvailable: true, reviewAudioNotice: notice,
+    phase, scenario: { maxTurns: 5, dynamicData: { aiRole: '店员', titleZh: '测试', summaryZh: '', coreGoal: { titleZh: '', descriptionZh: '' } } }, turn: 1, controlsLocked: false, showGoalsSheet: false, sessionCoreGoal: null, recoveryMessage: '', interruptionRecovery: { status: 'idle' }, interruptionRecoveryAffordances: {}, recoveryTarget: null, online, effectiveForegroundNotice: '', messages: [], listeningRequestStates: {}, activeAiMessageId: null, pausedAiMessageId: null, playedAiMessageIds: new Set(), activeError: null, activeFailedStep: null, silenceCountdownSeconds: null, activeAssistIsVisible: false, activeAssistState: null, confirmedTranscript: '', interimTranscript: '', partialTranscript: '', recordingSeconds: 0, dockInputMode: 'voice', dockTextValue: '', hintData: { directionZh: '说明', keyPhrasesJa: ['料金'], sentenceStarterJa: '料金は', fullExampleJa: '追加料金はかかりますか？' }, isLoadingHint: false, hintLevel: 4, showHintSheet: sheet, showTranscriptSheet: false, manualInput: false, transcript: { rawText: '', cleanedText: '', finalText: '' }, showOriginalTranscript: false, inlineError: '', canConfirmTranscript: false, sttAvailable: true, sttModel: 'scribe', ttsAvailable: true, reviewAudioNotice: notice,
     previousAdvice: previousAdvice ? { expressionImprovement: { turn: 1, userConfirmedJa: 'これをください。', suggestedJa: 'こちらをお願いします。', reasonZh: '更礼貌。' }, sourceSessionId: 'source-session', sourceStartedAt: 1, viewed: false } : undefined,
   } as ActiveSessionModel
   const actions = {
@@ -95,6 +95,16 @@ describe('ActiveSession 中文意图录音', () => {
     document.dispatchEvent(new Event('visibilitychange'))
     await flush()
     expect(mocks.release).toHaveBeenCalledOnce()
+  })
+  it('离线切换会取消中文录音、释放其麦克风并忽略迟到回调', async () => {
+    click(container, '中文语音输入').click(); await flush()
+    await vi.waitFor(() => expect(click(container, '说完了，返回表达帮助')).toBeDefined(), { interval: 0 })
+    flushSync(() => root.render(createElement(Harness, { online: false })))
+    await flush()
+    expect(mocks.release).toHaveBeenCalledOnce()
+    flushSync(() => mocks.handlers?.onPartial('迟到结果'))
+    expect(container.querySelector<HTMLTextAreaElement>('.im-hint-intention-field textarea')?.value).toBe('')
+    expect(container.textContent).not.toContain('正在连接，取消')
   })
 
   it('日语录音中禁用中文录音，并通过既有控制器播放参考音频和显示错误', () => {

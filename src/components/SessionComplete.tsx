@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 完成页 view model、反馈恢复状态与完成页用户动作
- * [OUTPUT]: 渲染证据反馈、重做练习、报告操作与本机练习状态
- * [POS]: src/components 的完成页视图；不拥有反馈任务轮询、持久化或会话编排
+ * [OUTPUT]: 对外提供完成页证据反馈、重做练习、报告操作与历史状态纯视图；独立拥有重做媒体生命周期
+ * [POS]: src/components 的完成页，接收 recovery 驱动的任务状态和动作，并负责重做 STT/token 的代际隔离与资源释放
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { Mic, Volume2 } from 'lucide-react'
@@ -34,6 +34,7 @@ interface SessionCompleteProps {
   scenario: SessionScenario
   reveal: SessionScenario['reveal']
   config: PrototypeConfig | null
+  online: boolean
   feedbackData: ConversationFeedbackResponse | null
   feedbackStatus: FeedbackLoadingState
   feedbackErrorMsg: string
@@ -63,6 +64,7 @@ export function SessionComplete({
   scenario,
   reveal,
   config,
+  online,
   feedbackData,
   feedbackStatus,
   feedbackErrorMsg,
@@ -94,11 +96,34 @@ export function SessionComplete({
   const [redoScaffoldLoading, setRedoScaffoldLoading] = useState(false)
   const [redoScaffoldError, setRedoScaffoldError] = useState('')
   const redoSttRef = useRef<RealtimeSttSession | null>(null)
+  const redoTokenAbortRef = useRef<AbortController | null>(null)
   const redoScaffoldRequestInFlightRef = useRef(false)
   const redoGenerationRef = useRef(0)
   const redoMountedRef = useRef(true)
   const redoStartLockRef = useRef(false)
   const redoSubmitLockRef = useRef(false)
+
+  const cancelRedo = (updateState = true) => {
+    redoGenerationRef.current += 1
+    redoTokenAbortRef.current?.abort()
+    redoTokenAbortRef.current = null
+    redoSttRef.current?.close()
+    redoSttRef.current = null
+    redoStartLockRef.current = false
+    const activeRedo = ['ready', 'recording', 'confirming'].includes(redoState)
+    if (!updateState || !redoMountedRef.current || !activeRedo) {
+      if (!updateState) redoSubmitLockRef.current = false
+      return
+    }
+    redoSubmitLockRef.current = false
+    setRedoInputMode('text')
+    setRedoState('confirming')
+    setRedoError('网络已断开，已切换为文字输入。')
+  }
+
+  useEffect(() => {
+    if (!online) cancelRedo()
+  }, [online])
 
   useEffect(() => {
     if (!restoredRedoTask || restoredRedoTask.request.kind !== 'redo') return
@@ -121,11 +146,7 @@ export function SessionComplete({
 
   useEffect(() => () => {
     redoMountedRef.current = false
-    redoGenerationRef.current += 1
-    redoStartLockRef.current = false
-    redoSubmitLockRef.current = false
-    redoSttRef.current?.close()
-    redoSttRef.current = null
+    cancelRedo(false)
   }, [])
   const redoAssistantMessage = feedbackData
     ? messages.find((message) => message.role === 'assistant' && message.turn === feedbackData.redoTask.turn)
@@ -135,11 +156,20 @@ export function SessionComplete({
 
   const startRedo = () => {
     if (!feedbackData) return
+    if (!online) {
+      setRedoInputMode('text')
+      setRedoState('confirming')
+      setRedoError('网络已断开，已切换为文字输入。')
+      return
+    }
     redoGenerationRef.current += 1
+    redoTokenAbortRef.current?.abort()
+    redoTokenAbortRef.current = null
     redoStartLockRef.current = false
     redoSubmitLockRef.current = false
     onStopAudio()
     redoSttRef.current?.close()
+    redoSttRef.current = null
     setRedoState('ready')
     setRedoInputMode('stt')
     setRedoListeningLevel(1)
@@ -200,20 +230,27 @@ export function SessionComplete({
 
   const startRedoRecording = async () => {
     if (redoStartLockRef.current || !redoMountedRef.current || !feedbackData) return
+    if (!online) {
+      cancelRedo()
+      return
+    }
     redoStartLockRef.current = true
     const generation = ++redoGenerationRef.current
     const expectedSessionToken = scenario.sessionToken
     const expectedSessionId = sessionId
     const expectedTurn = feedbackData.redoTask.turn
+    const tokenAbort = new AbortController()
+    redoTokenAbortRef.current = tokenAbort
     setRedoError('')
     if (!config?.elevenlabs.sttAvailable) {
       setRedoInputMode('text')
       setRedoState('confirming')
       redoStartLockRef.current = false
+      redoTokenAbortRef.current = null
       return
     }
     try {
-      const token = await requestElevenLabsToken('realtime_scribe')
+      const token = await requestElevenLabsToken('realtime_scribe', tokenAbort.signal)
       if (!redoMountedRef.current || generation !== redoGenerationRef.current || !feedbackData || sessionId !== expectedSessionId || scenario.sessionToken !== expectedSessionToken || feedbackData.redoTask.turn !== expectedTurn) return
       const session = new RealtimeSttSession()
       redoSttRef.current = session
@@ -234,6 +271,7 @@ export function SessionComplete({
       setRedoState('confirming')
       setRedoError(error instanceof Error ? error.message : '麦克风不可用，已切换为文字输入。')
     } finally {
+      if (redoTokenAbortRef.current === tokenAbort) redoTokenAbortRef.current = null
       if (generation === redoGenerationRef.current) redoStartLockRef.current = false
     }
   }

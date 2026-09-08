@@ -10,6 +10,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { flushSync } from 'react-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildSessionReport, createRoundRecord } from '../../src/lib/metrics'
+import { writePreparedRestart, type PreparedRestartData } from '../../src/lib/home-practice-recovery'
 import type { ConversationFeedbackResponse, SessionScenario } from '../../src/types'
 import type { StoredPracticeAttempt } from '../../src/lib/practice-history'
 
@@ -207,6 +208,32 @@ describe('App config lifecycle regression', () => {
     expect(box.textContent).not.toContain('上次建议')
     appRoot.unmount(); box.remove(); vi.doUnmock('../../src/lib/api'); vi.doUnmock('../../src/lib/practice-history')
   })
+  it('restores a prepared same-scenario restart and clears it when starting', async () => {
+    vi.resetModules()
+    window.sessionStorage.clear()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
+    const previousAdvice = { expressionImprovement: { turn: 1, userConfirmedJa: 'これをください。', suggestedJa: 'こちらをお願いします。', reasonZh: '更礼貌。' }, sourceSessionId: 'source-session', sourceStartedAt: 123, viewed: false }
+    const prepared: PreparedRestartData = { scenario: scenario.dynamicData, scenarioToken: 'prepared-token', practiceToken: 'practice-token', previousAdvice }
+    writePreparedRestart(prepared)
+    const fetchConfigMock = vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } })
+    const startScenarioSessionMock = vi.fn().mockResolvedValue({ ...scenario, scenarioToken: 'prepared-token' })
+    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: fetchConfigMock, startScenarioSession: startScenarioSessionMock }))
+    vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([]) }))
+    const box = document.createElement('div'); document.body.appendChild(box)
+    const appModule = await import('../../src/App'); const appRoot = createRoot(box); flushSync(() => appRoot.render(createElement(appModule.default)))
+    await vi.waitFor(() => { const button = Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes('查看上次建议')); expect(button).toBeDefined(); return button as HTMLButtonElement }, { interval: 0 })
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    flushSync(() => (Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes('查看上次建议')) as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+    expect(box.textContent).toContain('こちらをお願いします。')
+    const startButton = Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes('开始对话')) as HTMLButtonElement | undefined
+    expect(startButton).toBeDefined()
+    flushSync(() => startButton?.click())
+    expect(window.sessionStorage.getItem('kaiwa.home-practice-restart.v1')).toBeNull()
+    await vi.waitFor(() => expect(startScenarioSessionMock).toHaveBeenCalledWith('prepared-token', expect.any(AbortSignal)), { interval: 0 })
+    appRoot.unmount(); box.remove(); vi.doUnmock('../../src/lib/api'); vi.doUnmock('../../src/lib/practice-history')
+  })
+
 
   it('恢复带建议的快照，且兼容旧快照并拒绝无效建议', async () => {
     vi.resetModules(); window.sessionStorage.clear(); Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
@@ -225,6 +252,49 @@ describe('App config lifecycle regression', () => {
     expect(readSessionSnapshot()).toBeNull()
     window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({ ...snapshot, scenario }))
     expect(readSessionSnapshot()).not.toBeNull()
+  })
+  it('关闭提示 sheet 会中止请求，且迟到失败不显示前台提示', async () => {
+    vi.resetModules()
+    window.sessionStorage.clear()
+    installWaitingSessionSnapshot()
+    let rejectHint!: (error: Error) => void
+    const hintRequest = new Promise<never>((_, reject) => { rejectHint = reject })
+    const fetchHint = vi.fn((_scenario: SessionScenario, _aiText: string, _messages: unknown[], _intention: string | undefined, signal: AbortSignal) => {
+      signal.addEventListener('abort', () => undefined)
+      return hintRequest
+    })
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }),
+      fetchHint,
+    }))
+    vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([]) }))
+    const box = document.createElement('div')
+    document.body.appendChild(box)
+    const appModule = await import('../../src/App')
+    const appRoot = createRoot(box)
+    try {
+      flushSync(() => appRoot.render(createElement(appModule.default)))
+      const hintButton = await vi.waitFor(() => {
+        const button = box.querySelector<HTMLButtonElement>('[aria-label="怎么说，查看表达帮助"]')
+        expect(button).not.toBeNull()
+        return button as HTMLButtonElement
+      }, { interval: 0 })
+      flushSync(() => hintButton.click())
+      await vi.waitFor(() => expect(fetchHint).toHaveBeenCalledOnce(), { interval: 0 })
+      flushSync(() => box.querySelector<HTMLButtonElement>('.im-sheet-close-btn')?.click())
+      expect(fetchHint.mock.calls[0]?.[4]?.aborted).toBe(true)
+      rejectHint(new Error('late hint failure'))
+      await flush()
+      expect(box.textContent).not.toContain('获取提示暂时失败')
+    } finally {
+      appRoot.unmount()
+      box.remove()
+      window.sessionStorage.clear()
+      vi.doUnmock('../../src/lib/api')
+      vi.doUnmock('../../src/lib/practice-history')
+      vi.clearAllMocks()
+    }
   })
   it('点击开始语音时先释放已完成的相手播放器，再申请麦克风', async () => {
     vi.resetModules()

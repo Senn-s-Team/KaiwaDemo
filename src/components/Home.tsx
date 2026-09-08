@@ -116,6 +116,10 @@ export function Home({
   useEffect(() => {
     if (shouldCancelHomeSttForTransition(Boolean(readyScenarioData), Boolean(pendingClarification), busy)) cancelHomeStt()
   }, [busy, cancelHomeStt, pendingClarification, readyScenarioData])
+
+  useEffect(() => {
+    if (!online) cancelHomeStt()
+  }, [cancelHomeStt, online])
   const startHomeStt = useCallback(async () => {
     if (!sttAvailable || !sttModel || homeSttState !== 'idle' || readyScenarioData || pendingClarification || busy) return
     const generation = ++homeSttGenerationRef.current

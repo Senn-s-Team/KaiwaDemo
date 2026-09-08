@@ -99,13 +99,14 @@ function App() {
   const roundsRef = useRef<RoundRecord[]>([])
   const currentRoundRef = useRef<RoundRecord | null>(null)
   const sessionStartLockRef = useRef(false)
-  const submitLockRef = useRef(false)
   const operationIdRef = useRef(0)
+  const preparedStartRef = useRef<{ scenarioToken: string; draftRequestId?: string; previousAdvice?: PreviousAdvice } | null>(null)
+  const submitLockRef = useRef(false)
   const messageListRef = useRef<HTMLDivElement | null>(null)
   const sessionSnapshotRef = useRef<SessionSnapshot | null>(readSessionSnapshot())
   const homePractice = useHomePractice({ online, activeSession: scenario !== null || sessionSnapshotRef.current !== null, resetSession: () => resetSessionRef.current(), setUiError })
   const { customInputZh, clarifications, pendingClarification, readyScenarioData, isDraftingScenario, draftState, practiceHistory, recentPractices, historyNotice, historySaving, historySaveFailed } = homePractice.model
-  const { setCustomInputZh, submitDraft: handleDraftScenario, answerClarification: handleAnswerClarification, resetCustom, retryDraftTransport, discardDraft, persistPractice, preparePracticeAgain, markReadyAdviceViewed, removePractice } = homePractice.actions
+  const { setCustomInputZh, submitDraft: handleDraftScenario, answerClarification: handleAnswerClarification, resetCustom, retryDraftTransport, discardDraft, persistPractice, preparePracticeAgain, markReadyAdviceViewed, consumeReadyScenario, removePractice } = homePractice.actions
   const chatBottomRef = useRef<HTMLDivElement | null>(null)
   const restoredTranscriptRef = useRef<TranscriptText | null>(null)
   const abortSpeechAssistRef = useRef<(reason: import('../shared/speech-assist').SpeechAssistAbortReason) => void>(() => undefined)
@@ -113,7 +114,12 @@ function App() {
   const hintSheetVisibleRef = useRef(false)
   const hintedTurnRef = useRef(1)
   const setHintSheetVisible = useCallback((value: SetStateAction<boolean>) => {
-    const next = typeof value === 'function' ? value(hintSheetVisibleRef.current) : value
+    const previous = hintSheetVisibleRef.current
+    const next = typeof value === 'function' ? value(previous) : value
+    if (previous && !next) {
+      hintRequestRef.current?.abort('sheet_closed')
+      setIsLoadingHint(false)
+    }
     hintSheetVisibleRef.current = next
     setShowHintSheet(next)
   }, [])
@@ -483,6 +489,7 @@ function App() {
       setAppForegroundNotice('')
       clearVoiceNotice()
       await initFirstLine(nextScenario.firstLine, operationId, firstMessage.id)
+      preparedStartRef.current = null
     } catch (error) {
       if (controller.signal.aborted || !isCurrentOperation(operationId)) return
       setUiError(toUiError(error))
@@ -633,10 +640,11 @@ function App() {
       return
     }
     if (activeFailedStep === 'config' || activeFailedStep === 'scenario') {
-      if (readyScenarioData) await startSession(readyScenarioData.scenarioToken)
+      if (preparedStartRef.current) await startSession(preparedStartRef.current.scenarioToken, preparedStartRef.current.draftRequestId, preparedStartRef.current.previousAdvice)
+      else if (readyScenarioData) await startSession(readyScenarioData.scenarioToken)
       else await loadConfig()
     }
-  }, [activeFailedStep, aiTurn.actions, aiTurn.meta.pendingAdvanceReply, currentAiText, generateNextReply, interruptionRecovery, loadConfig, playAiText, pendingHistory, readyScenarioData, startRecording, startSession, touchRound, transitionTo, voiceTurn.actions])
+  }, [activeFailedStep, aiTurn.actions, aiTurn.meta.pendingAdvanceReply, currentAiText, generateNextReply, interruptionRecovery, loadConfig, pendingHistory, playAiText, readyScenarioData, startSession, startRecording, touchRound, transitionTo, voiceTurn.actions])
   const enterLifecycleTextInput = useCallback(() => {
     setUiError(null)
     voiceTurn.actions.clearVoiceError()
@@ -699,6 +707,12 @@ function App() {
     ? Math.max(1, SILENCE_AUTO_STOP_SECONDS - silentSeconds)
     : null
   const effectiveForegroundNotice = voiceForegroundNotice.trim() || appForegroundNotice.trim()
+  const handleStartDynamic = useCallback((token: string, previousAdvice?: PreviousAdvice) => {
+    const draftRequestId = draftState.request?.requestId
+    consumeReadyScenario()
+    preparedStartRef.current = { scenarioToken: token, draftRequestId, previousAdvice }
+    void startSession(token, draftRequestId, previousAdvice)
+  }, [consumeReadyScenario, draftState.request?.requestId, startSession])
   useEffect(() => {
     if (
       phase !== 'recording'
@@ -732,6 +746,7 @@ function App() {
               customInputZh={customInputZh}
               setCustomInputZh={setCustomInputZh}
               clarifications={clarifications}
+              onStartDynamic={handleStartDynamic}
               pendingClarification={pendingClarification}
               readyScenarioData={readyScenarioData}
               isDraftingScenario={isDraftingScenario}
@@ -740,7 +755,6 @@ function App() {
               onInputEdited={discardDraft}
               onDraftScenario={handleDraftScenario}
               onAnswerClarification={handleAnswerClarification}
-              onStartDynamic={(token, previousAdvice) => void startSession(token, draftState.request?.requestId, previousAdvice)}
               onPreviousAdviceViewed={markReadyAdviceViewed}
               onResetCustom={resetCustom}
               recentPractices={recentPractices}
@@ -762,6 +776,7 @@ function App() {
               scenario={scenario}
               reveal={reveal}
               config={config}
+              online={online}
               feedbackData={feedbackData}
               feedbackStatus={feedbackStatus}
               feedbackErrorMsg={feedbackErrorMsg}

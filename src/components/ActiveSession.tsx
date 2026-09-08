@@ -180,6 +180,9 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
     return () => document.removeEventListener('visibilitychange', stop)
   }, [cancelIntentionRecording])
   useEffect(() => {
+    if (!online) cancelIntentionRecording()
+  }, [cancelIntentionRecording, online])
+  useEffect(() => {
     const stop = () => cancelIntentionRecording()
     window.addEventListener('pagehide', stop)
     return () => window.removeEventListener('pagehide', stop)
