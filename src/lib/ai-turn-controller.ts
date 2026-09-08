@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 ./api 的 streamReply 与 ReplyResult，./tts 的 CachedTtsPlayer/TtsCancelledError，./session 的 decideNextSessionStep/createMessageId，./metrics 的 createRoundRecord，./ui 的 toUiError
- * [OUTPUT]: 对外提供 useAiTurnController 自定义 Hook、createAiTurnRuntime（支持运行时依赖快照实时同步）、aiTurnReducer 纯状态机、含暂停/继续的播放动作及相关类型
+ * [OUTPUT]: 对外提供 useAiTurnController 自定义 Hook、createAiTurnRuntime（支持运行时依赖快照实时同步）、aiTurnReducer 纯状态机、含暂停/继续与录音前播放器释放的动作及相关类型
  * [POS]: src/lib 的相手 AI 回合控制器深模块，闭环拥有 LLM 流式应答、TTS 语音播放/暂停/继续/降级、五回合自然判定与回合流转
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -185,6 +185,7 @@ export interface AiTurnActions {
     messageId?: string,
   ) => Promise<void>
   stopAiPlayback: () => void
+  releaseAiPlayback: () => void
   pauseAiPlayback: () => void
   resumeAiPlayback: () => Promise<void>
   skipFailedTts: () => void
@@ -454,6 +455,15 @@ export function createAiTurnRuntime(
     }
   }
 
+  // 录音切换前只释放已完成或暂停的播放资源，不推进回合或改写当前阶段。
+  const releaseAiPlayback = () => {
+    playbackGeneration += 1
+    ttsPlayer.stop()
+    ttsActionLock = false
+    dispatch({ type: 'SET_ACTIVE_AI_MESSAGE', messageId: null })
+    dispatch({ type: 'SET_PAUSED_AI_MESSAGE', messageId: null })
+  }
+
   const skipFailedTts = () => {
     playbackGeneration += 1
     const pendingReply = pendingAdvanceReply
@@ -586,6 +596,7 @@ export function createAiTurnRuntime(
     generateNextReply,
     playAiText,
     stopAiPlayback,
+    releaseAiPlayback,
     pauseAiPlayback,
     resumeAiPlayback,
     skipFailedTts,

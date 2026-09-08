@@ -698,3 +698,74 @@ describe('SttTokenManager production single-flight & caching', () => {
     expect(manager.getCached()?.token).toBe('new_token_123')
   })
 })
+
+describe('录音入口权限预检回归', () => {
+  it('获取硬件流前查询当前权限，已拒绝时不再次申请', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+    let queries = 0
+    let requests = 0
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+      permissions: { query: async () => { queries += 1; return { state: 'denied' } } },
+      mediaDevices: { getUserMedia: async () => { requests += 1; throw new DOMException('Permission denied', 'NotAllowedError') } },
+    } })
+    releaseMicrophoneStream()
+    try {
+      await expect(requestMicrophoneStream()).rejects.toMatchObject({ code: 'permission_denied' })
+      expect(queries).toBe(1)
+      expect(requests).toBe(0)
+    } finally {
+      releaseMicrophoneStream()
+      if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor)
+      else Reflect.deleteProperty(globalThis, 'navigator')
+    }
+  })
+
+  it('已授权时预检后只申请一次硬件流，并发调用复用同一预检', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+    let queries = 0
+    let requests = 0
+    const track = { readyState: 'live', enabled: true, muted: false, stop: () => undefined }
+    const stream = {
+      active: true,
+      getAudioTracks: () => [track],
+      getTracks: () => [track],
+    }
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+      permissions: { query: async () => { queries += 1; return { state: 'granted' } } },
+      mediaDevices: { getUserMedia: async () => { requests += 1; return stream } },
+    } })
+    releaseMicrophoneStream()
+    try {
+      const [first, second] = await Promise.all([requestMicrophoneStream(), requestMicrophoneStream()])
+      expect(first).toBe(second)
+      expect(queries).toBe(1)
+      expect(requests).toBe(1)
+    } finally {
+      releaseMicrophoneStream()
+      if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor)
+      else Reflect.deleteProperty(globalThis, 'navigator')
+    }
+  })
+
+  it('权限查询挂起期间取消，不会在迟到查询完成后申请硬件流', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+    const queryGate = Promise.withResolvers<{ state: 'granted' }>()
+    let requests = 0
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+      permissions: { query: () => queryGate.promise },
+      mediaDevices: { getUserMedia: async () => { requests += 1; throw new Error('unreachable') } },
+    } })
+    releaseMicrophoneStream()
+    try {
+      const request = requestMicrophoneStream()
+      releaseMicrophoneStream()
+      queryGate.resolve({ state: 'granted' })
+      await expect(request).rejects.toThrow('麦克风请求已被取消或重置。')
+      expect(requests).toBe(0)
+    } finally {
+      releaseMicrophoneStream()
+      if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor)
+      else Reflect.deleteProperty(globalThis, 'navigator')
+    }
+  })
+})

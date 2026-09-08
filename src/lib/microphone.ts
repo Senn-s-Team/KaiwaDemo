@@ -38,22 +38,12 @@ export async function preflightMicrophone(forceRequest = false): Promise<Microph
     return 'unavailable'
   }
 
-  // 1. 如果此前已被明确拒绝，直接返回 denied
-  if (cachedPermissionStatus === 'denied' && !forceRequest) {
-    return 'denied'
-  }
-
-  // 2. 如果此前已授权且不强制重新取流，返回 granted
-  if (cachedPermissionStatus === 'granted' && !forceRequest) {
-    return 'granted'
-  }
-
-  // 3. 不强制请求硬件时，如果支持 Permissions API 则静默查询；不支持或异常时返回 'unknown'（允许后续用户点击时请求）
+  // 1. 不申请硬件时，优先读取浏览器当前授权，避免以旧缓存覆盖用户刚刚变更的设置。
   if (!forceRequest) {
     return queryMicrophonePermission()
   }
 
-  // 4. 用户主动手势触发强制请求
+  // 2. 用户主动手势触发取流；requestMicrophoneStream 会在真正申请前再次检查当前权限。
   try {
     const stream = await requestMicrophoneStream()
     const [track] = stream.getAudioTracks()

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 首页、会话、复盘与本机历史界面的类名和状态
- * [OUTPUT]: 提供响应式布局、主题、交互与表现比较样式
+ * [OUTPUT]: 提供响应式布局、主题、交互、语音准备状态与表现比较样式
  * [POS]: src 的应用级样式入口
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -936,6 +936,7 @@
   align-items: center;
   gap: 8px;
 }
+.im-working-hint { display: block; margin-top: 1px; color: var(--muted); font-size: 0.68rem; font-weight: 500; line-height: 1.2; }
 
 .im-working-actions-mini {
   display: flex;
@@ -1640,11 +1641,20 @@
   resize: vertical;
 }
 .custom-textarea::placeholder { color: var(--muted); opacity: 1; }
-.topic-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.topic-stt-row { display: flex; align-items: center; gap: 10px; min-height: 40px; margin-top: 10px; }
+.home-stt-button { flex: 0 0 auto; min-height: 40px; padding-inline: 8px; }
+.home-stt-button.is-recording { color: var(--ink); background: var(--mint); }
+.home-stt-level { display: inline-flex; align-items: center; gap: 2px; width: 25px; height: 18px; flex: 0 0 25px; }
+.home-stt-level i { display: block; width: 3px; height: 7px; border-radius: 2px; background: var(--recording); transform: scaleY(calc(0.35 + var(--home-stt-level) * 0.65)); transform-origin: center; }
+.home-stt-level i:nth-child(2) { height: 11px; }
+.home-stt-level i:nth-child(3) { height: 16px; }
+.home-stt-level i:nth-child(4) { height: 11px; }
+.home-stt-level i:nth-child(5) { height: 7px; }
+.topic-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
 .char-count { color: var(--muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 .topic-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .topic-actions .text-button { min-height: 40px; padding-inline: 8px; }
-.topic-stt-status { margin: 8px 0 0; color: var(--muted); font-size: 0.85rem; line-height: 1.7; }
+.topic-stt-status { display: inline-flex; align-items: center; gap: 8px; min-width: 0; margin: 0; color: var(--muted); font-size: 0.85rem; line-height: 1.7; }
 .topic-stt-status[role="alert"] { color: var(--ink); }
 .intro-block.home-launch-layout > .topic-help { max-width: none; margin: 12px 0 0; color: var(--muted); font-size: 0.85rem; line-height: 1.7; }
 .practice-examples { margin-top: 28px; }
@@ -1692,6 +1702,9 @@
   .home-header { margin-bottom: 20px; }
   .custom-scenario-box, .ready-scenario-card { padding: 16px; }
   .practice-examples { margin-top: 24px; }
+  .topic-stt-row { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .home-stt-button { width: 100%; justify-content: center; }
+  .topic-stt-status { width: 100%; }
 }
 
 /* ==========================================================================

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 在线/可见性事件与会话中断、媒体释放、恢复状态动作
- * [OUTPUT]: 安装并清理会话前后台与网络 lifecycle 监听
+ * [OUTPUT]: 安装并清理会话前后台与网络 lifecycle 监听，回到前台时静默保留当前交互状态
  * [POS]: src/lib 的 session lifecycle 监听边界；不拥有会话数据或 controller 实现
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -74,8 +74,7 @@ export function useSessionLifecycle(options: SessionLifecycleOptions) {
           return
         }
         interruptActiveSession('background_interruption')
-      } else if (document.visibilityState === 'visible') {
-        options.setNotice('已回到页面，请确认当前状态后继续。')
+
       }
     }
     const handlePageHide = () => latestOptionsRef.current.stopResources()

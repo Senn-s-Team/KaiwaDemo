@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 lib/scenario-draft-task 首页恢复、lib/feedback-task-recovery 完成复盘恢复、lib/practice-history 本机历史、lib/practice-progress 表现比较、lib/api 接口请求、shared/listening-scaffold 内部四级听力协议、lib/stt 中文场景输入识别、lib/voice-turn-controller 语音回合控制器深模块、lib/ai-turn-controller 相手回合控制器深模块、lib/microphone 权限探测、lib/session 会话状态与显式中断恢复状态机
- * [OUTPUT]: 对外提供 App 根组件，驱动可编辑中文语音场景输入、原场景复练与证据对比、统一 recovery 反馈任务展示、KaiwaDemo 固定五回合会话、渐进帮助、可暂停继续的相手语音与安全生命周期交互
- * [POS]: src/ 核心入口与主控制器，编排可持久化会话业务状态、内部四级帮助、不可恢复媒体资源的显式释放与 offline/background 业务中断恢复；pagehide 仅释放资源，真实活动阶段才回滚业务状态
+ * [OUTPUT]: 对外提供 App 根组件，驱动可编辑中文语音场景输入、原场景复练与证据对比、统一 recovery 反馈任务展示、KaiwaDemo 固定五回合会话、渐进帮助、可暂停继续的相手语音、录音前播放资源释放与安全生命周期交互
+ * [POS]: src/ 核心入口与主控制器，编排可持久化会话业务状态、内部四级帮助、不可恢复媒体资源的显式释放与 offline/background 业务中断恢复，成功恢复不显示内部状态横幅；pagehide 仅释放资源，真实活动阶段才回滚业务状态
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
@@ -45,7 +45,7 @@ function recoveryStatusText(status: 'idle' | 'interrupted' | 'retrying' | 'recov
     case 'idle': return ''
     case 'interrupted': return '当前步骤已中断，请选择重试或安全回退。'
     case 'retrying': return '正在重新建立当前步骤，请稍候。'
-    case 'recovered': return '当前步骤已恢复，可以继续会话。'
+    case 'recovered': return ''
     case 'failed': return '恢复当前步骤失败，请重试或改用文字回答。'
   }
 }
@@ -164,6 +164,7 @@ function App() {
     })
     roundsRef.current = next; setRounds(next)
   }, [touchRound])
+  const releaseAiPlaybackRef = useRef<() => void>(() => undefined)
   const voiceTurn = useVoiceTurnController({
     sttAvailable: Boolean(config?.elevenlabs.sttAvailable),
     sttModel: config?.elevenlabs.sttModel ?? '',
@@ -173,6 +174,7 @@ function App() {
     transitionTo,
     touchRound,
     abortSpeechAssist: (reason) => abortSpeechAssistRef.current(reason),
+    releaseAiPlayback: () => releaseAiPlaybackRef.current(),
   })
   const {
     confirmedTranscript,
@@ -267,6 +269,7 @@ function App() {
     generateNextReply,
     playAiText,
     stopAiPlayback,
+    releaseAiPlayback,
     pauseAiPlayback,
     resumeAiPlayback,
     skipFailedTts,
@@ -276,6 +279,7 @@ function App() {
     dispose: disposeAiTurn,
     unlockAudio,
   } = aiTurn.actions
+  releaseAiPlaybackRef.current = releaseAiPlayback
   const stopReviewAudio = useCallback(() => {
     if (phaseRef.current === 'session_complete') {
       disposeAiTurn()
@@ -298,7 +302,7 @@ function App() {
     persistPractice,
     restoreCompletedSession: (record) => {
       setSessionId(record.sessionId); setScenario(structuredClone(record.scenario)); setSessionStartedAt(record.startedAt); setSessionEndedAt(record.endedAt)
-      replaceMessages(structuredClone(record.messages)); roundsRef.current = structuredClone(record.rounds); setRounds(structuredClone(record.rounds)); setPhase('session_complete'); phaseRef.current = 'session_complete'; sessionSnapshotRef.current = null; setAppForegroundNotice('已恢复上一场复盘。未重放录音、网络请求或语音。')
+      replaceMessages(structuredClone(record.messages)); roundsRef.current = structuredClone(record.rounds); setRounds(structuredClone(record.rounds)); setPhase('session_complete'); phaseRef.current = 'session_complete'; sessionSnapshotRef.current = null; setAppForegroundNotice('')
     },
   })
   const { feedbackData, feedbackStatus, feedbackErrorMsg, report, currentPractice, practiceComparison, restoredRedoTask } = completedPractice.model
@@ -375,9 +379,7 @@ function App() {
         if (restoredPhase === 'confirming_transcript') openTranscriptSheet()
         phaseRef.current = restoredPhase
         setPhase(restoredPhase)
-        setAppForegroundNotice(restoredPhase === 'session_complete'
-          ? '已恢复并完成上一轮。未重放网络请求或语音。'
-          : '已从本次标签页的会话快照安全恢复。未重放录音、网络请求或语音。')
+        setAppForegroundNotice('')
       } else {
         if (phaseRef.current !== 'session_complete') transitionTo('idle')
       }

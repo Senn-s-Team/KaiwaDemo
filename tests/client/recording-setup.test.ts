@@ -250,4 +250,34 @@ describe('coordinateRecordingSetup deep module', () => {
       }
     }
   })
+
+  it('已由上层释放的取消 setup 不会二次停止随后复用的共享流', async () => {
+    const originalNavigatorDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+    releaseMicrophoneStream()
+    let stopped = false
+    const track = { readyState: 'live', enabled: true, muted: false, stop: () => { stopped = true } }
+    const stream = { active: true, getAudioTracks: () => [track], getTracks: () => [track] }
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      writable: true,
+      value: { mediaDevices: { getUserMedia: async () => stream } },
+    })
+    try {
+      await expect(coordinateRecordingSetup({
+        acquireToken: async () => 'old-token',
+        connectStt: async () => undefined,
+        isCancelled: () => true,
+        releaseOnCancelled: false,
+      })).rejects.toThrow('Recording setup cancelled')
+      expect(stopped).toBe(false)
+
+      const reused = await requestMicrophoneStream()
+      expect(reused).toBe(stream as unknown as MediaStream)
+      expect(stopped).toBe(false)
+    } finally {
+      releaseMicrophoneStream()
+      if (originalNavigatorDesc) Object.defineProperty(globalThis, 'navigator', originalNavigatorDesc)
+      else Reflect.deleteProperty(globalThis, 'navigator')
+    }
+  })
 })

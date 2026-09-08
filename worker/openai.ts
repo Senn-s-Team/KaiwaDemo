@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖共享听力支架与语音续说契约、Worker 环境、模型配置、场景 prompt、token 校验、mock 回退、领域类型与响应校验器
- * [OUTPUT]: 提供按场景版本校验的逐项评价； 对外提供场景草拟、流式回复、提示、反馈、重做、四级听力支架与语音辅助的 OpenAI 编排函数及场景草拟错误
+ * [INPUT]: 依赖共享听力支架、语音续说与场景润色契约、Worker 环境、模型配置、场景 prompt、token 校验、mock 回退、领域类型与响应校验器
+ * [OUTPUT]: 提供按场景版本校验的逐项评价； 对外提供场景草拟、流式回复、提示、反馈、重做、四级听力支架、语音辅助与场景润色的 OpenAI 编排函数及场景草拟错误
  * [POS]: worker 的模型网关层，负责请求 OpenAI、隔离听力支架上下文、归一化完整场景契约并交由严格校验
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -20,11 +20,13 @@ import {
   buildListeningScaffoldPrompt,
   buildRedoFeedbackPrompt,
   buildScenarioDraftPrompt,
+  buildScenarioPolishPrompt,
   buildSpeechAssistPrompt,
 } from './scenarios'
 import { verifySessionToken } from './tokens'
 import type { ListeningScaffoldRequest, ListeningScaffoldResponse } from '../shared/listening-scaffold'
 import type { SpeechAssistRequest, SpeechAssistResponse } from '../shared/speech-assist'
+import type { ScenarioPolishRequest, ScenarioPolishResponse } from '../shared/scenario-polish'
 import type {
   ConversationFeedbackRequest,
   ConversationFeedbackResponse,
@@ -46,6 +48,7 @@ import {
   parseListeningScaffoldModelOutput,
   parseRedoFeedbackResponse,
   parseScenarioDraftModelResult,
+  parseScenarioPolishResponse,
   parseSpeechAssistModelOutput,
   validateAssistantReply,
   ValidationError,
@@ -812,6 +815,35 @@ export async function generateSpeechAssist(
   )
 
   return parseSpeechAssistModelOutput(parsedJson, request.observedTextJa)
+}
+
+export async function polishScenarioText(
+  env: Env,
+  request: ScenarioPolishRequest,
+  signal?: AbortSignal,
+): Promise<ScenarioPolishResponse> {
+  if (!env.OPENAI_API_KEY) {
+    throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
+  }
+  const parsedJson = await generateStructuredFeedbackJson(
+    env,
+    buildScenarioPolishPrompt(request),
+    1_200,
+    'scenario_polish_request_failed',
+    'OpenAI scenario text polish failed.',
+    'scenario_polish_model_invalid',
+    'Scenario polish model output is invalid.',
+    DEADLINES.interactiveModelMs,
+    signal,
+  )
+  try {
+    return parseScenarioPolishResponse(parsedJson)
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      throw new ScenarioDraftError('scenario_polish_model_invalid', error.message, 502)
+    }
+    throw error
+  }
 }
 
 async function generateStructuredFeedbackJson(

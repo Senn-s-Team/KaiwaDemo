@@ -17,15 +17,11 @@ interface ListeningRequestState {
 }
 
 const STATUS_LABELS: Record<AppPhase, string> = {
-  loading_config: '正在准备练习', idle: '准备开始', fetching_token: '正在连接麦克风',
-  connecting_stt: '正在准备录音', waiting_user: '轮到你回答', recording: '正在听你说话',
+  loading_config: '正在准备练习', idle: '准备开始', fetching_token: '正在准备语音识别连接…',
+  connecting_stt: '正在启动语音输入', waiting_user: '轮到你回答', recording: '正在听你说话',
   finalizing_transcript: '正在整理你的回答', confirming_transcript: '确认你的回答',
   requesting_llm: '正在等待相手回复', preparing_tts: '正在准备相手语音', playing_ai: '相手正在说话',
   round_complete: '本轮完成', session_complete: '会话完成', error: '需要处理',
-}
-
-const LISTENING_LEVEL_LABELS: Record<ListeningScaffoldLevel, string> = {
-  0: '未查看帮助', 1: '已重听', 2: '已查看关键信息', 3: '已查看日语台词', 4: '已查看中文意图',
 }
 
 function nextListeningAction(level: ListeningScaffoldLevel): string | null {
@@ -234,7 +230,6 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                             </button>
 
                             <div className="im-listening-controls" aria-live="polite">
-                              <span className="im-listening-level">{LISTENING_LEVEL_LABELS[listeningLevel]}</span>
                               {nextAction && (
                                 <button
                                   className="im-voice-expand-toggle"
@@ -472,10 +467,10 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                   </button>
                 </div>
               ) : (
-                <div className="im-dock-working-bar">
+                <div className="im-dock-working-bar" role="status" aria-live="polite">
                   <div className="im-dock-working-left">
                     <span className="pulse-dot" />
-                    <span>{STATUS_LABELS[phase]}</span>
+                    <span>{STATUS_LABELS[phase]}{phase === 'connecting_stt' && <small className="im-working-hint">首次连接可能需要几秒</small>}</span>
                   </div>
                   {(phase === 'preparing_tts' || phase === 'playing_ai') && (
                     <div className="im-working-actions-mini">

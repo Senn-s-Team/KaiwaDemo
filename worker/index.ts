@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 Worker 环境、HTTP 边界、token、严格请求校验及各模型编排入口
- * [OUTPUT]: 对外提供配置、场景、长期复练凭据续签、会话、回复、反馈、四级听力支架与语音服务的同源 API 路由
+ * [OUTPUT]: 对外提供配置、场景、长期复练凭据续签、会话、回复、反馈、四级听力支架、场景润色与语音服务的同源 API 路由
  * [POS]: Worker 请求入口，统一执行方法、同源、JSON 大小、鉴权与错误响应边界
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -18,6 +18,7 @@ import {
 import {
   generateHint,
   generateListeningScaffold,
+  polishScenarioText,
   generateSpeechAssist,
   ScenarioDraftError,
   streamOpenAiReply,
@@ -34,6 +35,7 @@ import {
   parseHintRequest,
   parseListeningScaffoldRequest,
   parseReplyRequest,
+  parseScenarioPolishRequest,
   parsePracticeRestartRequest,
   parseSessionStartRequest,
   parseSpeechAssistRequest,
@@ -156,6 +158,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     if (request.method !== 'POST') return methodNotAllowed('POST')
     const body = await readJsonBody(request, LIMITS.requestBytes)
     return json(await generateSpeechAssist(env, parseSpeechAssistRequest(body), request.signal))
+  }
+
+  if (url.pathname === '/api/scenario/polish') {
+    if (request.method !== 'POST') return methodNotAllowed('POST')
+    const body = await readJsonBody(request, LIMITS.requestBytes)
+    return json(await polishScenarioText(env, parseScenarioPolishRequest(body), request.signal))
   }
 
   return errorJson(404, 'not_found', 'API route not found.')

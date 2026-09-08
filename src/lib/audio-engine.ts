@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 Web AudioContext 与 navigator.mediaDevices 录音硬件流
- * [OUTPUT]: 对外提供 requestMicrophoneStream（含 single-flight 与取消废弃防护）、releaseMicrophoneStream、isPermissionRequesting、shouldTeardownOnVisibility、MicrophoneAudioPipeline、AudioRingBuffer、isMicrophoneTrackReady 等音频底层接口
+ * [OUTPUT]: 对外提供 requestMicrophoneStream（含当前权限预检、single-flight 与取消废弃防护）、releaseMicrophoneStream、isPermissionRequesting、shouldTeardownOnVisibility、MicrophoneAudioPipeline、AudioRingBuffer、isMicrophoneTrackReady 等音频底层接口
  * [POS]: src/lib 的音频底层引擎，管理全局共享 AudioContext/MediaStream 生命周期并挂载重采样与采样处理器
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -83,6 +83,25 @@ export async function requestMicrophoneStream(): Promise<MediaStream> {
 
   const executeRequest = async (): Promise<MediaStream> => {
     try {
+      // Permissions API 可用时，每次新硬件请求前读取浏览器的当前状态。
+      // 这既避免对已拒绝权限重复弹窗，也不依赖可能过期的内存缓存。
+      if (typeof navigator.permissions?.query === 'function') {
+        try {
+          const permission = await navigator.permissions.query({ name: 'microphone' as PermissionName })
+          if (permission.state === 'denied') {
+            throw new SttError('permission_denied', '麦克风权限被拒绝。请在浏览器设置中允许麦克风。')
+          }
+        } catch (error) {
+          // Safari 与 Firefox 可能不支持 microphone descriptor；继续由 getUserMedia 完成兼容回退。
+          if (error instanceof SttError) throw error
+        }
+      }
+
+      // 权限查询本身也可能挂起；取消后不得再触发迟到的硬件申请。
+      if (currentEpoch !== micRequestEpoch) {
+        throw new SttError('device_missing', '麦克风请求已被取消或重置。')
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,

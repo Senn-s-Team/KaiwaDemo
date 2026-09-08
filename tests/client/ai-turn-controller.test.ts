@@ -41,6 +41,43 @@ const dummyScenario: SessionScenario = {
 }
 
 describe('ai-turn-controller production orchestration contracts', () => {
+  it('进入录音前释放相手播放资源，不触发额外播放或阶段切换', async () => {
+    let currentOperationId = 1
+    let stops = 0
+    let speaks = 0
+    let transitions = 0
+    const mockTts: TtsPlayerLike = {
+      speak: async (options) => {
+        speaks += 1
+        options.onAudioStarted()
+        options.onAudioEnded()
+      },
+      stop: () => { stops += 1 },
+      unlock: async () => undefined,
+    }
+    const runtime = createAiTurnRuntime({
+      config: { ttsAvailable: true, voiceId: 'v_1', ttsModel: 'm_1' },
+      sessionId: 'sess_1', scenario: dummyScenario, turn: 1,
+      operation: { begin: () => ++currentOperationId, isCurrent: (id) => id === currentOperationId },
+      transitionTo: () => { transitions += 1; return true },
+      touchRound: () => undefined,
+      commitCurrentRound: () => undefined,
+      replaceCurrentRound: () => undefined,
+      commitAssistantMessage: () => undefined,
+      advanceTurn: () => undefined,
+      adapters: { createTtsPlayer: () => mockTts },
+    })
+
+    await runtime.actions.playAiText('最初の相手発話', false)
+    const transitionsAfterPlayback = transitions
+    runtime.actions.releaseAiPlayback()
+
+    expect(stops).toBe(1)
+    expect(speaks).toBe(1)
+    expect(transitions).toBe(transitionsAfterPlayback)
+    expect(runtime.getState().activeAiMessageId).toBeNull()
+  })
+
   it('stale-deps 桥接更新: 首次 render 依赖为 null/初始值，更新后能够精准消费最新 session/scenario/turn，且第 5 轮走 complete', async () => {
     let committedRoundCount = 0
     let sessionCompleted = false

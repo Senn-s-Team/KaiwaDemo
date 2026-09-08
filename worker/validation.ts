@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 zod、./constants、./types，以及 ../shared/scenario-draft、../shared/feedback-task、../shared/listening-scaffold 与 ../shared/speech-assist 的跨端 wire schema
- * [OUTPUT]: 对外提供 scenario-draft、feedback-task、动态会话、四级听力支架、模型输出与语音续说数据的严格解析；校验版本化证据覆盖、确认稿引用及跨字段协议约束
+ * [INPUT]: 依赖 zod、./constants、./types，以及 shared 下场景草拟、反馈、听力支架、语音续说与场景润色的跨端 wire schema
+ * [OUTPUT]: 对外提供 scenario-draft、feedback-task、动态会话、四级听力支架、语音续说与场景润色数据的严格解析；校验版本化证据覆盖、确认稿引用及跨字段协议约束
  * [POS]: worker 的边界校验层，在路由与模型调用前后统一拒绝无效、越界或非原文协议数据
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -17,6 +17,12 @@ import {
   type SpeechAssistRequest,
   type SpeechAssistResponse,
 } from '../shared/speech-assist'
+import {
+  ScenarioPolishRequestSchema,
+  ScenarioPolishResponseSchema,
+  type ScenarioPolishRequest,
+  type ScenarioPolishResponse,
+} from '../shared/scenario-polish'
 import { ScenarioDraftTaskRequestSchema, ScenarioDraftModelResultSchema as SharedScenarioDraftModelResultSchema, DynamicScenarioDefinitionSchema as SharedDynamicScenarioDefinitionSchema } from '../shared/scenario-draft'
 import {
   ConversationFeedbackRequestSchema,
@@ -337,6 +343,22 @@ export function parseSpeechAssistRequest(value: unknown): SpeechAssistRequest {
   const parsed = SpeechAssistRequestSchema.safeParse(value)
   if (!parsed.success) {
     throw new ValidationError('invalid_speech_assist_request', parsed.error.issues[0]?.message || 'Speech assist request is invalid.')
+  }
+  return parsed.data
+}
+
+export function parseScenarioPolishRequest(value: unknown): ScenarioPolishRequest {
+  const parsed = ScenarioPolishRequestSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new ValidationError('invalid_scenario_polish_request', parsed.error.issues[0]?.message || 'Scenario polish request is invalid.')
+  }
+  return parsed.data
+}
+
+export function parseScenarioPolishResponse(value: unknown): ScenarioPolishResponse {
+  const parsed = ScenarioPolishResponseSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new ValidationError('invalid_scenario_polish_output', parsed.error.issues[0]?.message || 'Scenario polish model output is invalid.')
   }
   return parsed.data
 }

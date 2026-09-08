@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 ./recording-setup、./stt、./api、./audio-engine、./text-cleaner、./ui、../types 与 ../../shared/speech-assist 的固定中止原因契约
- * [OUTPUT]: 对外提供 useVoiceTurnController 语音回合 Hook、voiceTurnReducer 状态纯机、parseFinalTranscript 校验及 RecordingStartLock 所有权锁契约
+ * [INPUT]: 依赖 ./recording-setup、./stt、./api、./audio-engine、./text-cleaner、./ui、../types、相手播放资源释放回调与 ../../shared/speech-assist 的固定中止原因契约
+ * [OUTPUT]: 对外提供 useVoiceTurnController 语音回合 Hook、录音前相手播放资源释放接缝、voiceTurnReducer 状态纯机、parseFinalTranscript 校验及 RecordingStartLock 所有权锁契约
  * [POS]: src/lib 的用户语音回合核心控制器，内聚麦克风、转写、语音辅助中止、文本回退、资源释放与单轮生命周期闭环
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -27,6 +27,7 @@ export interface VoiceTurnDependencies {
   transitionTo: (nextPhase: AppPhase) => boolean
   touchRound: (update: (round: RoundRecord) => void) => void
   abortSpeechAssist?: (reason: SpeechAssistAbortReason) => void
+  releaseAiPlayback?: () => void
 }
 
 export interface VoiceTurnState {
@@ -385,6 +386,7 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
     if (!deps.online) return
     const recordingStartOwner = recordingStartLockRef.current.tryAcquire()
     if (recordingStartOwner === null) return
+    deps.releaseAiPlayback?.()
     const operationId = deps.operation.begin()
     const recordingStartedAt = Date.now()
 
@@ -399,10 +401,12 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
       round.timing.transcriptConfirmedAt = null
     })
 
-    if (!deps.sttAvailable || state.microphoneReadiness === 'denied') {
+    // 内存中的 denied 只用于展示上次结果；用户可能已在浏览器设置中改回授权，
+    // 所以每次点击都交由唯一取流入口读取当前权限。
+    if (!deps.sttAvailable) {
       dispatch({
         type: 'FALLBACK_TO_MANUAL_INPUT',
-        readiness: state.microphoneReadiness === 'denied' ? 'denied' : 'unavailable',
+        readiness: 'unavailable',
         notice: '',
       })
       deps.touchRound((round) => {

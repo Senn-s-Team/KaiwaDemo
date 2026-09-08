@@ -1,14 +1,15 @@
 /**
- * [INPUT]: 首页场景草稿 view model、语音输入动作与结构化本机练习历史
- * [OUTPUT]: 渲染首页场景准备、澄清、中文语音输入与示例入口
+ * [INPUT]: 首页场景草稿 view model、中文语音识别/可取消润色动作与结构化本机练习历史
+ * [OUTPUT]: 渲染首页场景准备、澄清、实时中文语音输入、可撤回润色与示例入口
  * [POS]: src/components 的首页纯视图；不拥有任务持久化或场景会话编排
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { ArrowRight, Mic } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { requestElevenLabsToken } from '../lib/api'
-import { releaseMicrophoneStream } from '../lib/audio-engine'
+import { polishScenarioText, requestElevenLabsToken } from '../lib/api'
+import { releaseMicrophoneStream, shouldTeardownOnVisibility } from '../lib/audio-engine'
 import { appendHomeSttText, shouldApplyHomeSttResult, shouldCancelHomeSttForTransition } from '../lib/home-stt'
+import { coordinateRecordingSetup } from '../lib/recording-setup'
 import type { ScenarioDraftRecoveryState } from '../lib/scenario-draft-task'
 import { buildSparkPrompt, drawPracticeExamples } from '../lib/spark-practice'
 import { RealtimeSttSession } from '../lib/stt'
@@ -51,29 +52,55 @@ export function Home({
   const [clarificationInput, setClarificationInput] = useState('')
   const [examples, setExamples] = useState(() => drawPracticeExamples())
   const topicInputRef = useRef<HTMLTextAreaElement>(null)
-  const [homeSttState, setHomeSttState] = useState<'idle' | 'connecting' | 'recording' | 'stopping'>('idle')
+  const [homeSttState, setHomeSttState] = useState<'idle' | 'connecting' | 'recording' | 'stopping' | 'polishing'>('idle')
   const [homeSttText, setHomeSttText] = useState('')
   const [homeSttError, setHomeSttError] = useState('')
+  const [homeSttAudioLevel, setHomeSttAudioLevel] = useState(0)
   const homeSttRef = useRef<RealtimeSttSession | null>(null)
+  const homeSttAbortRef = useRef<AbortController | null>(null)
   const homeSttGenerationRef = useRef(0)
+  const homeSttBaseRef = useRef('')
+  const homePolishAbortRef = useRef<AbortController | null>(null)
+  const homePolishGenerationRef = useRef(0)
+  const homePolishOriginalRef = useRef('')
+  const [homePolishAvailable, setHomePolishAvailable] = useState(false)
   const busy = loading || isDraftingScenario
   const unavailable = busy || !ready || !online
 
   const cancelHomeStt = useCallback(() => {
     homeSttGenerationRef.current += 1
+    homePolishGenerationRef.current += 1
+    homePolishAbortRef.current?.abort()
+    homePolishAbortRef.current = null
     homeSttRef.current?.close()
     homeSttRef.current = null
+    homeSttAbortRef.current?.abort()
+    homeSttAbortRef.current = null
     releaseMicrophoneStream()
+    homeSttBaseRef.current = ''
+    homeSttTextRef.current = ''
     setHomeSttText('')
+    setHomeSttAudioLevel(0)
+    setHomeSttState('idle')
+    setHomePolishAvailable(false)
+  }, [])
+
+  const cancelHomePolish = useCallback(() => {
+    homePolishGenerationRef.current += 1
+    homePolishAbortRef.current?.abort()
+    homePolishAbortRef.current = null
+    setHomePolishAvailable(false)
     setHomeSttState('idle')
   }, [])
+
+  const homeSttTextRef = useRef('')
 
   useEffect(() => cancelHomeStt, [cancelHomeStt])
 
   useEffect(() => {
     const stopForPageExit = () => cancelHomeStt()
     const stopForBackground = () => {
-      if (document.visibilityState === 'hidden') cancelHomeStt()
+      if (document.visibilityState === 'hidden' && shouldTeardownOnVisibility(document.hidden)) cancelHomeStt()
     }
     window.addEventListener('pagehide', stopForPageExit)
     document.addEventListener('visibilitychange', stopForBackground)
@@ -90,29 +117,51 @@ export function Home({
     if (!sttAvailable || !sttModel || homeSttState !== 'idle' || readyScenarioData || pendingClarification || busy) return
     const generation = ++homeSttGenerationRef.current
     const session = new RealtimeSttSession()
+    let controller: AbortController | null = null
     homeSttRef.current = session
     setHomeSttError('')
+    setHomePolishAvailable(false)
     setHomeSttText('')
+    homeSttTextRef.current = ''
+    homeSttBaseRef.current = customInputZh
+    setHomeSttAudioLevel(0)
     setHomeSttState('connecting')
     try {
-      const token = await requestElevenLabsToken('realtime_scribe')
-      if (generation !== homeSttGenerationRef.current) return
-      await session.start(token, sttModel, {
+      const startController = new AbortController()
+      controller = startController
+      homeSttAbortRef.current = startController
+      await coordinateRecordingSetup({
+        acquireToken: () => requestElevenLabsToken('realtime_scribe', startController.signal),
+        isCancelled: () => startController.signal.aborted || generation !== homeSttGenerationRef.current,
+        releaseOnCancelled: false,
+        connectStt: (token) => session.start(token, sttModel, {
         onPartial: (text) => {
-          if (shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden)) setHomeSttText(text)
+          if (shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden)) {
+            if (!homeSttTextRef.current.trim()) onInputEdited()
+            homeSttTextRef.current = text
+            setHomeSttText(text)
+            const merged = appendHomeSttText(homeSttBaseRef.current, text)
+            if (merged.applied) setCustomInputZh(merged.text)
+            else setHomeSttError('输入框已接近 300 字，未写入本次识别结果；原有内容已保留。')
+          }
         },
         onConnectionState: (state) => {
           if (state === 'connected' && shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden)) setHomeSttState('recording')
         },
-        onAudioLevel: () => undefined,
-      }, 'zh')
+        onAudioLevel: (level) => {
+          if (shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden)) setHomeSttAudioLevel(Math.min(1, Math.max(0, level)))
+        },
+        }, 'zh'),
+      })
+      if (homeSttAbortRef.current === controller) homeSttAbortRef.current = null
     } catch (error) {
+      if (homeSttAbortRef.current === controller) homeSttAbortRef.current = null
       if (shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden)) {
         setHomeSttError(error instanceof Error ? error.message : '中文识别暂时无法启动，请改为输入文字。')
         cancelHomeStt()
       }
     }
-  }, [busy, cancelHomeStt, homeSttState, pendingClarification, readyScenarioData, sttAvailable, sttModel])
+  }, [busy, cancelHomeStt, customInputZh, homeSttState, onInputEdited, pendingClarification, readyScenarioData, setCustomInputZh, sttAvailable, sttModel])
 
   const stopHomeStt = useCallback(async () => {
     const session = homeSttRef.current
@@ -123,20 +172,75 @@ export function Home({
       const recognized = await session.stop()
       if (shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden) && recognized.trim()) {
         onInputEdited()
-        setCustomInputZh((current) => {
-          const merged = appendHomeSttText(current, recognized)
-          if (!merged.applied) setHomeSttError('输入框已接近 300 字，未写入本次识别结果；原有内容已保留。')
-          return merged.text
-        })
+        const baseText = homeSttBaseRef.current
+        const merged = appendHomeSttText(baseText, recognized)
+        if (!merged.applied) {
+          setHomeSttError('输入框已接近 300 字，未写入本次识别结果；原有内容已保留。')
+          return
+        }
+        setCustomInputZh(merged.text)
+
+        // 识别完成即释放硬件；润色是纯网络任务，绝不能继续占用麦克风。
+        session.close()
+        if (homeSttRef.current === session) homeSttRef.current = null
+        homeSttAbortRef.current = null
+        releaseMicrophoneStream()
+        homeSttBaseRef.current = ''
+        homeSttTextRef.current = ''
+        setHomeSttText('')
+        setHomeSttAudioLevel(0)
+        setHomeSttState('polishing')
+
+        const polishGeneration = ++homePolishGenerationRef.current
+        const controller = new AbortController()
+        homePolishAbortRef.current = controller
+        try {
+          const polished = await polishScenarioText(recognized.trim(), controller.signal)
+          if (polishGeneration !== homePolishGenerationRef.current || generation !== homeSttGenerationRef.current || controller.signal.aborted || document.hidden) return
+          const polishedMerged = appendHomeSttText(baseText, polished)
+          if (!polishedMerged.applied) return
+          homePolishOriginalRef.current = merged.text
+          setCustomInputZh(polishedMerged.text)
+          setHomePolishAvailable(true)
+        } catch {
+          if (polishGeneration === homePolishGenerationRef.current && generation === homeSttGenerationRef.current && !controller.signal.aborted && !document.hidden) {
+            setHomeSttError('润色暂时失败，已保留原识别内容。')
+          }
+        } finally {
+          if (polishGeneration === homePolishGenerationRef.current) {
+            homePolishAbortRef.current = null
+            if (generation === homeSttGenerationRef.current) setHomeSttState('idle')
+          }
+        }
       }
     } catch (error) {
       if (shouldApplyHomeSttResult(generation, homeSttGenerationRef.current, document.hidden)) {
         setHomeSttError(error instanceof Error ? error.message : '中文识别失败，已保留原有内容。')
       }
     } finally {
-      if (generation === homeSttGenerationRef.current) cancelHomeStt()
+      // stop 出错、空文本和过期操作仍在此结束录音；正常识别已在润色前释放。
+      if (homeSttRef.current === session) {
+        session.close()
+        homeSttRef.current = null
+        homeSttAbortRef.current = null
+        releaseMicrophoneStream()
+        homeSttBaseRef.current = ''
+        homeSttTextRef.current = ''
+        setHomeSttText('')
+        setHomeSttAudioLevel(0)
+        if (generation === homeSttGenerationRef.current) setHomeSttState('idle')
+      }
     }
-  }, [cancelHomeStt, homeSttState, onInputEdited, setCustomInputZh])
+  }, [homeSttState, onInputEdited, setCustomInputZh])
+
+  const skipHomePolish = useCallback(() => {
+    homeSttGenerationRef.current += 1
+    homePolishGenerationRef.current += 1
+    homePolishAbortRef.current?.abort()
+    homePolishAbortRef.current = null
+    setHomeSttState('idle')
+    setHomePolishAvailable(false)
+  }, [])
 
 
   return (
@@ -165,17 +269,19 @@ export function Home({
         </section>
       ) : (
         <>
-          <form className="custom-scenario-box" aria-busy={isDraftingScenario} onSubmit={(event) => { event.preventDefault(); if (!unavailable && customInputZh.trim() && !pendingClarification) { cancelHomeStt(); onDraftScenario() } }}>
+          <form className="custom-scenario-box" aria-busy={isDraftingScenario} onSubmit={(event) => { event.preventDefault(); if (!unavailable && homeSttState === 'idle' && customInputZh.trim() && !pendingClarification) { cancelHomeStt(); onDraftScenario() } }}>
             <label className="visually-hidden" htmlFor="custom-topic-input">想练习的场景</label>
-            <textarea ref={topicInputRef} id="custom-topic-input" className="custom-textarea" rows={3} maxLength={300} aria-describedby="topic-help topic-count" placeholder="比如：明天去剪头发，想说明剪短一点，但不要露出额头。" value={customInputZh} disabled={busy || Boolean(pendingClarification)} onChange={(event) => { onInputEdited(); setCustomInputZh(event.target.value) }} />
+            <textarea ref={topicInputRef} id="custom-topic-input" className="custom-textarea" rows={3} maxLength={300} aria-describedby="topic-help topic-count" placeholder="比如：明天去剪头发，想说明剪短一点，但不要露出额头。" value={customInputZh} readOnly={homeSttState === 'connecting' || homeSttState === 'recording' || homeSttState === 'stopping'} disabled={busy || Boolean(pendingClarification)} onChange={(event) => { onInputEdited(); cancelHomePolish(); setCustomInputZh(event.target.value) }} />
+            <div className="topic-stt-row">
+              {sttAvailable && <button className={`text-button home-stt-button ${homeSttState === 'recording' ? 'is-recording' : ''}`} type="button" disabled={busy || !online || Boolean(pendingClarification) || homeSttState === 'stopping' || homeSttState === 'polishing'} onClick={() => void (homeSttState === 'connecting' ? cancelHomeStt() : homeSttState === 'idle' ? startHomeStt() : stopHomeStt())}><Mic size={16} aria-hidden="true" /> {homeSttState === 'idle' ? '中文语音输入' : homeSttState === 'connecting' ? '正在连接，取消' : homeSttState === 'stopping' ? '正在整理识别结果…' : homeSttState === 'polishing' ? '正在润色…' : '说完了'}</button>}
+              {(homeSttState !== 'idle' || homeSttText || homeSttError || homePolishAvailable) && <div className="topic-stt-status" role={homeSttError ? 'alert' : 'status'}><span className="home-stt-level" style={{ '--home-stt-level': homeSttAudioLevel } as React.CSSProperties} aria-hidden="true"><i /><i /><i /><i /><i /></span><span>{homeSttError || (homeSttState === 'connecting' ? '正在连接中文语音识别…' : homeSttState === 'stopping' ? '正在整理识别结果…' : homeSttState === 'polishing' ? '正在润色，完成后可以继续手动修改。' : homeSttState === 'recording' ? '正在听你说话，文字会实时显示。' : '中文语音已填入输入框。')}</span>{homeSttState === 'polishing' && <button className="text-button" type="button" onClick={skipHomePolish}>跳过润色</button>}{homePolishAvailable && <button className="text-button" type="button" onClick={() => { setCustomInputZh(homePolishOriginalRef.current); setHomePolishAvailable(false) }}>撤回润色</button>}</div>}
+            </div>
             <div className="topic-footer">
               <span id="topic-count" className="char-count">{customInputZh.length} / 300</span>
               <div className="topic-actions">
-                {sttAvailable && <button className="text-button" type="button" disabled={busy || !online || Boolean(pendingClarification) || homeSttState === 'stopping'} onClick={() => void (homeSttState === 'connecting' ? cancelHomeStt() : homeSttState === 'idle' ? startHomeStt() : stopHomeStt())}><Mic size={16} aria-hidden="true" /> {homeSttState === 'idle' ? '中文语音输入' : homeSttState === 'connecting' ? '正在连接，取消' : homeSttState === 'stopping' ? '正在填入输入框…' : '说完了，填入输入框'}</button>}
-                {!pendingClarification && <button className="primary-button" type="submit" disabled={!customInputZh.trim() || unavailable}>{isDraftingScenario ? '正在准备…' : '准备练习'} <ArrowRight size={18} aria-hidden="true" /></button>}
+                {!pendingClarification && <button className="primary-button" type="submit" disabled={!customInputZh.trim() || unavailable || homeSttState !== 'idle'}>{isDraftingScenario ? '正在准备…' : '准备练习'} <ArrowRight size={18} aria-hidden="true" /></button>}
               </div>
             </div>
-            {(homeSttState !== 'idle' || homeSttText || homeSttError) && <div className="topic-stt-status" role={homeSttError ? 'alert' : 'status'}>{homeSttError || (homeSttState === 'connecting' ? '正在连接中文语音识别…' : homeSttState === 'stopping' ? '正在整理识别结果…' : homeSttText || '正在听你说话…')}</div>}
             {draftState.status === 'submitting' || draftState.status === 'pending' ? (
               <p className="topic-stt-status" role="status">{draftState.storageNotice || '正在准备，可以暂时离开；回来后会继续显示结果。'}</p>
             ) : null}

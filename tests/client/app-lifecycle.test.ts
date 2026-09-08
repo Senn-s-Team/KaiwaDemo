@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 真实浏览器可见 App DOM、会话快照与 visibilitychange 生命周期事件
- * [OUTPUT]: 锁定会话草稿、反馈任务 transport/terminal 重试分流、重做录音及 hint/listening/redo 异步结果只写回其所属 App 会话的集成回归契约
+ * [OUTPUT]: 锁定会话草稿、录音前相手播放器释放顺序、反馈任务 transport/terminal 重试分流、重做录音及 hint/listening/redo 异步结果只写回其所属 App 会话的集成回归契约
  * [POS]: tests/client/ App 根组件生命周期集成测试
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -137,6 +137,10 @@ describe('App lifecycle integration', () => {
   })
 
   it('keeps the restored draft and send action when hidden then visible', async () => {
+    expect(container.querySelector('.im-notice-banner.info')).toBeNull()
+    expect(container.textContent).not.toContain('未查看帮助')
+    expect(container.textContent).not.toContain('已查看关键信息')
+    expect(container.querySelector('.im-listening-controls button')).not.toBeNull()
     expect(container.querySelector<HTMLTextAreaElement>('#transcript-sheet-input')?.value).toBe('前髪は残して、少し短くしてください。')
 
     flushSync(() => {
@@ -160,6 +164,7 @@ describe('App lifecycle integration', () => {
     await flush()
     expect(container.textContent).not.toContain('连接已在后台停止')
     expect(container.querySelector<HTMLTextAreaElement>('#transcript-sheet-input')?.value).toBe('前髪は残して、少し短くしてください。')
+    expect(container.querySelector('.im-notice-banner.info')).toBeNull()
     const visibleSendButton = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('确认发送'))
     expect(visibleSendButton).toBeDefined()
     expect((visibleSendButton as HTMLButtonElement).disabled).toBe(false)
@@ -169,6 +174,66 @@ describe('App lifecycle integration', () => {
 })
 
 describe('App config lifecycle regression', () => {
+  it('点击开始语音时先释放已完成的相手播放器，再申请麦克风', async () => {
+    vi.resetModules()
+    window.sessionStorage.clear()
+    installWaitingSessionSnapshot()
+    const events: string[] = []
+    const micGate = deferred<MediaStream>()
+    const requestMicrophoneStream = vi.fn(() => {
+      events.push('microphone')
+      return micGate.promise
+    })
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({
+        mode: 'mock', limits: { maxTurns: 5 },
+        elevenlabs: { sttAvailable: true, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' },
+        openai: { available: false, model: 'mock', mockAllowed: true },
+      }),
+    }))
+    vi.doMock('../../src/lib/practice-history', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')),
+      listPracticeAttempts: vi.fn().mockResolvedValue([]),
+    }))
+    vi.doMock('../../src/lib/audio-engine', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/audio-engine')>('../../src/lib/audio-engine')),
+      requestMicrophoneStream,
+    }))
+    const scrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
+    const { CachedTtsPlayer } = await import('../../src/lib/tts')
+    const stop = vi.spyOn(CachedTtsPlayer.prototype, 'stop').mockImplementation(() => {
+      events.push('release-ai')
+    })
+    const container = document.createElement('div')
+    const root = createRoot(container)
+    document.body.appendChild(container)
+    try {
+      const appModule = await import('../../src/App')
+      flushSync(() => root.render(createElement(appModule.default)))
+      await vi.waitFor(() => expect(container.textContent).toContain('点击开始回答 (语音)'), { interval: 0 })
+      stop.mockClear()
+      events.length = 0
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('点击开始回答'))
+      expect(button).toBeDefined()
+      ;(button as HTMLButtonElement).click()
+      await vi.waitFor(() => expect(requestMicrophoneStream).toHaveBeenCalledOnce(), { interval: 0 })
+      expect(events.slice(0, 2)).toEqual(['release-ai', 'microphone'])
+    } finally {
+      stop.mockRestore()
+      root.unmount()
+      container.remove()
+      window.sessionStorage.clear()
+      if (scrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollIntoView)
+      else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
+      vi.doUnmock('../../src/lib/api')
+      vi.doUnmock('../../src/lib/practice-history')
+      vi.doUnmock('../../src/lib/audio-engine')
+      vi.clearAllMocks()
+    }
+  })
+
   it('keeps the initial config request and media resources alive across a root rerender', async () => {
     vi.resetModules()
     window.sessionStorage.clear()

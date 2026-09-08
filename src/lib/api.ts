@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 zod、../types 与 shared/ 下跨端 wire schema
- * [OUTPUT]: 提供配置、动态会话、可恢复场景草稿、回复、提示、durable 反馈任务、听力支架与语音续说辅助请求函数及响应校验
+ * [OUTPUT]: 提供配置、动态会话、可恢复场景草稿、回复、提示、durable 反馈任务、听力支架、语音续说辅助与场景润色请求函数及响应校验
  * [POS]: src/lib 的 HTTP 通信边界，负责序列化前端请求并严格验证服务端结构化响应
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -15,6 +15,7 @@ import {
   type SpeechAssistRequest,
   type SpeechAssistResponse,
 } from '../../shared/speech-assist'
+import { ScenarioPolishResponseSchema } from '../../shared/scenario-polish'
 import {
   ScenarioDraftTaskAcceptedSchema,
   ScenarioDraftTaskRequestSchema,
@@ -352,6 +353,17 @@ export async function requestSpeechAssist(
   })
   if (!response.ok) throw await errorFromResponse(response)
   return SpeechAssistResponseSchema.parse(await response.json())
+}
+
+export async function polishScenarioText(textZh: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch('/api/scenario/polish', {
+    method: 'POST',
+    signal,
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ textZh }),
+  })
+  if (!response.ok) throw await errorFromResponse(response)
+  return ScenarioPolishResponseSchema.parse(await response.json()).textZh
 }
 
 export async function restartPractice(practiceToken: string, signal?: AbortSignal): Promise<import('../types').ScenarioDraftReadyResponse> {
