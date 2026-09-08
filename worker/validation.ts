@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 zod、./constants、./types、../shared/listening-scaffold 与 ../shared/speech-assist 的跨端 wire schema
- * [OUTPUT]: 校验版本化证据覆盖及确认稿引用； 对外提供 Worker 请求、动态场景、反馈、四级听力支架、模型输出与语音续说数据的严格解析和安全规整函数
+ * [INPUT]: 依赖 zod、./constants、./types，以及 ../shared/scenario-draft、../shared/feedback-task、../shared/listening-scaffold 与 ../shared/speech-assist 的跨端 wire schema
+ * [OUTPUT]: 对外提供 scenario-draft、feedback-task、动态会话、四级听力支架、模型输出与语音续说数据的严格解析；校验版本化证据覆盖、确认稿引用及跨字段协议约束
  * [POS]: worker 的边界校验层，在路由与模型调用前后统一拒绝无效、越界或非原文协议数据
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -17,6 +17,13 @@ import {
   type SpeechAssistRequest,
   type SpeechAssistResponse,
 } from '../shared/speech-assist'
+import { ScenarioDraftTaskRequestSchema, ScenarioDraftModelResultSchema as SharedScenarioDraftModelResultSchema, DynamicScenarioDefinitionSchema as SharedDynamicScenarioDefinitionSchema } from '../shared/scenario-draft'
+import {
+  ConversationFeedbackRequestSchema,
+  ConversationFeedbackResponseSchema,
+  RedoFeedbackRequestSchema,
+  RedoFeedbackResponseSchema,
+} from '../shared/feedback-task'
 import { LIMITS } from './constants'
 import type {
   ConversationFeedbackRequest,
@@ -51,68 +58,9 @@ const SessionStartRequestSchema = z.object({
   scenarioToken: z.string().trim().min(1),
 }).strict()
 
-const ScenarioDraftClarificationSchema = z.object({
-  questionZh: z.string().trim().min(1).max(120),
-  answerZh: z.string().trim().min(1).max(300),
-}).strict()
-
-const ScenarioDraftRequestSchema = z.object({
-  inputZh: z.string().trim().min(1).max(300),
-  clarifications: z.array(ScenarioDraftClarificationSchema).max(LIMITS.maxScenarioDraftClarifications),
-  forceGenerate: z.boolean().optional(),
-}).strict()
-
-const TrainingGoalSchema = z.object({
-  id: z.string().trim().min(1).max(64),
-  titleZh: z.string().trim().min(1).max(80),
-  descriptionZh: z.string().trim().min(1).max(240),
-}).strict()
-
-const DynamicScenarioDefinitionSchema = z.object({
-  id: z.string().trim().min(1).max(64),
-  version: z.number().int().positive(),
-  evaluationVersion: z.number().int().positive().optional(),
-  evidencePoints: z.array(TrainingGoalSchema).min(1).max(5).refine(points => new Set(points.map(p => p.id)).size === points.length).optional(),
-  titleZh: z.string().trim().min(1).max(100),
-  summaryZh: z.string().trim().min(1).max(300),
-  aiRole: z.string().trim().min(1).max(160),
-  userRole: z.string().trim().min(1).max(160),
-  relationship: z.string().trim().min(1).max(160),
-  tone: z.string().trim().min(1).max(100),
-  firstLine: z.string().trim().min(1).max(LIMITS.maxAssistantCharacters),
-  userGoal: z.string().trim().min(1).max(240),
-  coreGoal: TrainingGoalSchema,
-  communicationFunction: z.string().trim().min(1).max(300),
-  initialFacts: z.array(z.string().trim().min(1).max(240)).min(1).max(8),
-  partnerPrivateFacts: z.array(z.string().trim().min(1).max(240)).max(8),
-  keyIntents: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
-  keyInformation: z.array(z.string().trim().min(1).max(240)).min(1).max(8),
-  completionRules: z.object({
-    completed: z.array(z.string().trim().min(1).max(240)).min(1).max(6),
-    partial: z.array(z.string().trim().min(1).max(240)).min(1).max(6),
-    notCompleted: z.array(z.string().trim().min(1).max(240)).min(1).max(6),
-  }).strict(),
-  closingRules: z.array(z.string().trim().min(1).max(240)).min(1).max(5),
-  maxTurns: z.literal(5),
-  partnerOpeningPlan: z.string().trim().min(1).max(300),
-  worldAnchors: z.array(z.string().trim().min(1).max(240)).min(1).max(6),
-  followUpPrinciples: z.array(z.string().trim().min(1).max(240)).min(1).max(5),
-  hintStrategy: z.string().trim().min(1).max(300),
-  feedbackFocus: z.array(z.string().trim().min(1).max(160)).min(1).max(5),
-  safetyBoundary: z.string().trim().min(1).max(300),
-}).strict().refine(scenario => (scenario.evaluationVersion === undefined) === (scenario.evidencePoints === undefined), 'Evaluation version and evidence points must be provided together.')
-
-const ScenarioDraftModelResultSchema = z.discriminatedUnion('status', [
-  z.object({
-    status: z.literal('needs_clarification'),
-    questionZh: z.string().trim().min(1).max(120),
-    optionsZh: z.array(z.string().trim().min(1).max(120)).min(2).max(4),
-  }).strict(),
-  z.object({
-    status: z.literal('ready'),
-    scenario: DynamicScenarioDefinitionSchema.refine(scenario => Boolean(scenario.evaluationVersion && scenario.evidencePoints), 'New scenarios require versioned evidence points.'),
-  }).strict(),
-])
+const ScenarioDraftRequestSchema = ScenarioDraftTaskRequestSchema
+const DynamicScenarioDefinitionSchema = SharedDynamicScenarioDefinitionSchema
+const ScenarioDraftModelResultSchema = SharedScenarioDraftModelResultSchema
 
 const ConversationMessageSchema = z.object({
   role: z.enum(['assistant', 'user']),
@@ -163,118 +111,6 @@ const HintResponseSchema = z.object({
   keyPhrasesJa: z.array(z.string().trim().min(1)).min(2).max(5),
   sentenceStarterJa: z.string().trim().min(1),
   fullExampleJa: z.string().trim().min(1),
-}).strict()
-
-const InputModeSchema = z.enum(['stt', 'text'])
-const ListeningScaffoldLevelSchema = z.union([
-  z.literal(0), z.literal(1), z.literal(2), z.literal(3), z.literal(4),
-])
-const ExpressionScaffoldLevelSchema = z.union([
-  z.literal(0), z.literal(1), z.literal(2), z.literal(3), z.literal(4),
-])
-
-const FeedbackTurnRecordSchema = z.object({
-  turn: z.number().int().min(1).max(LIMITS.maxTurns),
-  partnerPromptJa: z.string().trim().min(1).max(LIMITS.maxAssistantCharacters),
-  userOriginal: z.string().max(LIMITS.maxUserCharacters),
-  userCleaned: z.string().max(LIMITS.maxUserCharacters),
-  userConfirmed: z.string().trim().min(1).max(LIMITS.maxUserCharacters),
-  inputMode: InputModeSchema,
-  transcriptModified: z.boolean(),
-  rerecordCount: z.number().int().nonnegative().max(50),
-  partnerAudioPlayCount: z.number().int().nonnegative().max(100),
-  ttsReplayCount: z.number().int().nonnegative().max(99),
-  transcriptRevealed: z.boolean(),
-  listeningScaffoldLevel: ListeningScaffoldLevelSchema,
-  expressionScaffoldLevel: ExpressionScaffoldLevelSchema,
-  failureCount: z.number().int().nonnegative().max(50),
-  retryCount: z.number().int().nonnegative().max(50),
-  textFallback: z.boolean(),
-  speechAssistUsed: z.boolean(),
-}).strict().superRefine((record, context) => {
-  if (record.transcriptRevealed !== (record.listeningScaffoldLevel >= 3)) {
-    context.addIssue({ code: 'custom', message: 'Transcript reveal must match listening scaffold level 3 or 4.' })
-  }
-  if (record.listeningScaffoldLevel === 1 && record.ttsReplayCount < 1) {
-    context.addIssue({ code: 'custom', message: 'Listening scaffold level 1 requires a recorded replay.' })
-  }
-  if (!record.textFallback && record.partnerAudioPlayCount < 1) {
-    context.addIssue({ code: 'custom', message: 'Audio-first rounds require at least one partner audio play.' })
-  }
-  if (record.textFallback && record.inputMode !== 'text') {
-    context.addIssue({ code: 'custom', message: 'Text fallback rounds must record text input mode.' })
-  }
-})
-
-const ConversationFeedbackRequestSchema = z.object({
-  scenarioType: z.literal('dynamic'),
-  sessionToken: z.string().trim().min(1),
-  turnRecords: z.array(FeedbackTurnRecordSchema).min(1).max(LIMITS.maxTurns),
-}).strict().superRefine((request, context) => {
-  request.turnRecords.forEach((record, index) => {
-    if (record.turn !== index + 1) {
-      context.addIssue({ code: 'custom', message: `Turn record must be numbered ${index + 1}.` })
-    }
-  })
-})
-
-const FORBIDDEN_EVALUATION_PATTERNS = /(?:发音|声调|口音|语调|情绪|能力(?:水平|等级)|掌握|熟练度|肌肉记忆|発音|声調|アクセント|イントネーション|能力レベル|習得|マスター|筋肉記憶|\b(?:[1-9]\d?|100)分\b|★|⭐|星[1-5一二三四五]|得分)/
-
-function evaluationTextSchema() {
-  return z.string().trim().min(1).refine(
-    (value) => !FORBIDDEN_EVALUATION_PATTERNS.test(value),
-    'Forbidden evaluation dimension in feedback output.',
-  )
-}
-const ChineseDirectionSchema = evaluationTextSchema().refine(
-  (value) => !KANA_REGEX.test(value),
-  'Redo direction must be Chinese guidance without Japanese words or sentences.',
-)
-
-
-export const ConversationFeedbackResponseSchema = z.object({
-  evaluationVersion: z.number().int().positive().optional(),
-  evidenceResults: z.array(z.object({
-    pointId: z.string().trim().min(1),
-    status: z.enum(['completed', 'not_completed', 'not_observed', 'insufficient_evidence']),
-    evidence: z.array(z.object({turn: z.number().int().min(1).max(5), quoteJa: z.string().trim().min(1)}).strict()).max(5),
-  }).strict()).max(5).optional(),
-  outcome: z.enum(['completed', 'partial', 'not_completed', 'insufficient_evidence']),
-  outcomeEvidenceZh: evaluationTextSchema(),
-  listeningFinding: z.object({
-    turn: z.number().int().min(1).max(LIMITS.maxTurns),
-    findingZh: evaluationTextSchema(),
-    evidenceZh: evaluationTextSchema(),
-  }).strict().nullable(),
-  expressionImprovement: z.object({
-    turn: z.number().int().min(1).max(LIMITS.maxTurns),
-    userConfirmedJa: z.string().trim().min(1),
-    suggestedJa: evaluationTextSchema(),
-    reasonZh: evaluationTextSchema(),
-  }).strict().nullable(),
-  redoTask: z.object({
-    turn: z.number().int().min(1).max(LIMITS.maxTurns),
-    partnerPromptJa: z.string().trim().min(1),
-    firstConfirmedJa: z.string().trim().min(1),
-    directionZh: ChineseDirectionSchema,
-  }).strict(),
-}).strict()
-
-const RedoFeedbackRequestSchema = z.object({
-  scenarioType: z.literal('dynamic'),
-  sessionToken: z.string().trim().min(1),
-  turn: z.number().int().min(1).max(LIMITS.maxTurns),
-  partnerPromptJa: z.string().trim().min(1).max(LIMITS.maxAssistantCharacters),
-  firstConfirmedJa: z.string().trim().min(1).max(LIMITS.maxUserCharacters),
-  secondConfirmedJa: z.string().trim().min(1).max(LIMITS.maxUserCharacters),
-  secondInputMode: InputModeSchema,
-  secondListeningScaffoldLevel: ListeningScaffoldLevelSchema,
-  secondExpressionScaffoldLevel: ExpressionScaffoldLevelSchema,
-}).strict()
-
-export const RedoFeedbackResponseSchema = z.object({
-  comparisonZh: evaluationTextSchema(),
-  referenceExpressionJa: evaluationTextSchema(),
 }).strict()
 
 export function parseTokenRequest(value: unknown): TokenRequest {

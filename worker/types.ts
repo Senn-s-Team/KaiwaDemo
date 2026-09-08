@@ -5,6 +5,17 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 
+export type {
+  FeedbackTurnRecord,
+  ConversationFeedbackRequest,
+  ConversationFeedbackResponse,
+  RedoFeedbackRequest,
+  RedoFeedbackResponse,
+} from '../shared/feedback-task'
+import type {
+  FeedbackTurnRecord,
+} from '../shared/feedback-task'
+
 export interface TrainingGoal {
   id: string
   titleZh: string
@@ -51,6 +62,22 @@ export interface ScenarioTokenPayload {
   issuedAt: number
   expiresAt: number
   scenario: DynamicScenarioDefinition
+}
+
+export interface ScenarioDraftCapabilityPayload {
+  schemaVersion: 1
+  kind: 'scenario_draft'
+  issuedAt: number
+  expiresAt: number
+  taskId: string
+}
+
+export interface FeedbackTaskCapabilityPayload {
+  schemaVersion: 1
+  kind: 'feedback_task'
+  issuedAt: number
+  expiresAt: number
+  taskId: string
 }
 
 export interface SessionTokenPayload {
@@ -163,35 +190,9 @@ export type ReplyStreamEvent =
   | ReplyDoneEvent
   | { type: 'error'; code: string; message: string }
 
-export type InputMode = 'stt' | 'text'
-export type ListeningScaffoldLevel = 0 | 1 | 2 | 3 | 4
-export type ExpressionScaffoldLevel = 0 | 1 | 2 | 3 | 4
-
-export interface FeedbackTurnRecord {
-  turn: number
-  partnerPromptJa: string
-  userOriginal: string
-  userCleaned: string
-  userConfirmed: string
-  inputMode: InputMode
-  transcriptModified: boolean
-  rerecordCount: number
-  partnerAudioPlayCount: number
-  ttsReplayCount: number
-  transcriptRevealed: boolean
-  listeningScaffoldLevel: ListeningScaffoldLevel
-  expressionScaffoldLevel: ExpressionScaffoldLevel
-  failureCount: number
-  retryCount: number
-  textFallback: boolean
-  speechAssistUsed: boolean
-}
-
-export interface ConversationFeedbackRequest {
-  scenarioType: 'dynamic'
-  sessionToken: string
-  turnRecords: FeedbackTurnRecord[]
-}
+export type InputMode = FeedbackTurnRecord['inputMode']
+export type ListeningScaffoldLevel = FeedbackTurnRecord['listeningScaffoldLevel']
+export type ExpressionScaffoldLevel = FeedbackTurnRecord['expressionScaffoldLevel']
 
 export type FeedbackOutcome = 'completed' | 'partial' | 'not_completed' | 'insufficient_evidence'
 
@@ -220,31 +221,3 @@ export interface EvidenceResult {
   status: 'completed' | 'not_completed' | 'not_observed' | 'insufficient_evidence'
   evidence: { turn: number; quoteJa: string }[]
 }
-
-export interface ConversationFeedbackResponse {
-  evaluationVersion?: number
-  evidenceResults?: EvidenceResult[]
-  outcome: FeedbackOutcome
-  outcomeEvidenceZh: string
-  listeningFinding: FeedbackListeningFinding | null
-  expressionImprovement: FeedbackExpressionImprovement | null
-  redoTask: FeedbackRedoTask
-}
-
-export interface RedoFeedbackRequest {
-  scenarioType: 'dynamic'
-  sessionToken: string
-  turn: number
-  partnerPromptJa: string
-  firstConfirmedJa: string
-  secondConfirmedJa: string
-  secondInputMode: InputMode
-  secondListeningScaffoldLevel: ListeningScaffoldLevel
-  secondExpressionScaffoldLevel: ExpressionScaffoldLevel
-}
-
-export interface RedoFeedbackResponse {
-  comparisonZh: string
-  referenceExpressionJa: string
-}
-

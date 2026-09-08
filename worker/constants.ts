@@ -20,6 +20,13 @@ export const LIMITS = {
   scenarioTokenTtlMs: 2 * 60 * 60 * 1_000,
   sessionTokenTtlMs: 1 * 60 * 60 * 1_000,
 } as const
+export const DEADLINES = {
+  interactiveModelMs: 20_000,
+  feedbackWorkflowModelMs: 25_000,
+  feedbackWorkflowStepMs: 30_000,
+  streamReplyMs: 30_000,
+  elevenLabsTokenMs: 10_000,
+} as const
 export const DEFAULT_MODELS = {
   openai: 'gpt-5.6-luna',
   stt: 'scribe_v2_realtime',

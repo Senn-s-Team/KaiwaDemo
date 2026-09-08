@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 zod、../types、../../shared/listening-scaffold 与 ../../shared/speech-assist 的跨端 API 协议
- * [OUTPUT]: 提供原场景复练请求及版本化证据响应； 对外提供配置、动态会话、回复、提示、反馈、重做、四级听力支架与语音续说辅助请求函数及响应校验
+ * [INPUT]: 依赖 zod、../types 与 shared/ 下跨端 wire schema
+ * [OUTPUT]: 提供配置、动态会话、可恢复场景草稿、回复、提示、durable 反馈任务、听力支架与语音续说辅助请求函数及响应校验
  * [POS]: src/lib 的 HTTP 通信边界，负责序列化前端请求并严格验证服务端结构化响应
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -15,13 +15,26 @@ import {
   type SpeechAssistRequest,
   type SpeechAssistResponse,
 } from '../../shared/speech-assist'
+import {
+  ScenarioDraftTaskAcceptedSchema,
+  ScenarioDraftTaskRequestSchema,
+  ScenarioDraftTaskStatusSchema,
+  type ScenarioDraftTaskAccepted,
+  type ScenarioDraftTaskRequest,
+  type ScenarioDraftTaskStatus,
+} from '../../shared/scenario-draft'
+import {
+  FeedbackTaskAcceptedSchema,
+  FeedbackTaskRequestSchema,
+  FeedbackTaskStatusSchema,
+  type FeedbackTaskAccepted,
+  type FeedbackTaskRequest,
+  type FeedbackTaskStatus,
+} from '../../shared/feedback-task'
 import type {
   ConversationFeedbackRequest,
-  ConversationFeedbackResponse,
   ConversationMessage,
   PrototypeConfig,
-  RedoFeedbackRequest,
-  RedoFeedbackResponse,
   RoundRecord,
   SessionScenario,
   UsageSummary,
@@ -61,45 +74,6 @@ const StreamEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('error'), code: z.string(), message: z.string() }),
 ])
 
-const FORBIDDEN_EVALUATION_PATTERNS = /(?:能力等级|掌握|肌肉记忆|发音|声调|口音|语调|情绪|発音|声調|アクセント|イントネーション|得分|评分|★|⭐)/
-
-const FeedbackTextSchema = z.string().trim().min(1).refine(
-  (value) => !FORBIDDEN_EVALUATION_PATTERNS.test(value),
-  'Feedback contains a forbidden ability or pronunciation claim.',
-)
-
-export const FeedbackResponseSchema = z.object({
-  evaluationVersion: z.number().int().positive().optional(),
-  evidenceResults: z.array(z.object({
-    pointId: z.string().min(1),
-    status: z.enum(['completed', 'not_completed', 'not_observed', 'insufficient_evidence']),
-    evidence: z.array(z.object({turn: z.number().int().min(1).max(5), quoteJa: z.string().trim().min(1)}).strict()),
-  }).strict()).optional(),
-  outcome: z.enum(['completed', 'partial', 'not_completed', 'insufficient_evidence']),
-  outcomeEvidenceZh: FeedbackTextSchema,
-  listeningFinding: z.object({
-    turn: z.number().int().min(1).max(5),
-    findingZh: FeedbackTextSchema,
-    evidenceZh: FeedbackTextSchema,
-  }).strict().nullable(),
-  expressionImprovement: z.object({
-    turn: z.number().int().min(1).max(5),
-    userConfirmedJa: z.string().trim().min(1),
-    suggestedJa: z.string().trim().min(1),
-    reasonZh: FeedbackTextSchema,
-  }).strict().nullable(),
-  redoTask: z.object({
-    turn: z.number().int().min(1).max(5),
-    partnerPromptJa: z.string().trim().min(1),
-    firstConfirmedJa: z.string().trim().min(1),
-    directionZh: FeedbackTextSchema,
-  }).strict(),
-}).strict()
-
-const RedoFeedbackResponseSchema = z.object({
-  comparisonZh: FeedbackTextSchema,
-  referenceExpressionJa: z.string().trim().min(1),
-}).strict()
 export class ApiError extends Error {
   readonly code: string
   readonly status: number
@@ -236,24 +210,30 @@ export async function streamReply(
 
   throw new ApiError('incomplete_stream', 'The model response ended before completion.', 502)
 }
-export async function draftScenario(
-  inputZh: string,
-  clarifications: readonly { questionZh: string; answerZh: string }[] = [],
-  forceGenerate = false,
+export async function submitScenarioDraft(
+  request: ScenarioDraftTaskRequest,
   signal?: AbortSignal,
-): Promise<import('../types').ScenarioDraftResponse> {
+): Promise<ScenarioDraftTaskAccepted> {
   const response = await fetch('/api/scenario/draft', {
     method: 'POST',
     signal,
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({
-      inputZh,
-      clarifications,
-      forceGenerate,
-    }),
+    body: JSON.stringify(ScenarioDraftTaskRequestSchema.parse(request)),
   })
   if (!response.ok) throw await errorFromResponse(response)
-  return response.json() as Promise<import('../types').ScenarioDraftResponse>
+  return ScenarioDraftTaskAcceptedSchema.parse(await response.json())
+}
+
+export async function getScenarioDraftTask(
+  taskToken: string,
+  signal?: AbortSignal,
+): Promise<ScenarioDraftTaskStatus> {
+  const response = await fetch('/api/scenario/draft', {
+    signal,
+    headers: { accept: 'application/json', authorization: `Bearer ${taskToken}` },
+  })
+  if (!response.ok) throw await errorFromResponse(response)
+  return ScenarioDraftTaskStatusSchema.parse(await response.json())
 }
 
 export async function fetchHint(
@@ -314,7 +294,7 @@ export function buildFeedbackRequestPayload(
       ttsReplayCount: record.ttsReplayCount,
       transcriptRevealed: record.transcriptRevealed,
       listeningScaffoldLevel: record.listeningScaffoldLevel,
-      expressionScaffoldLevel: record.expressionScaffoldLevel,
+      expressionScaffoldLevel: normalizeExpressionScaffoldLevel(record.expressionScaffoldLevel),
       failureCount: record.failureCount,
       retryCount: record.retryCount,
       textFallback: record.inputMode === 'text',
@@ -323,33 +303,40 @@ export function buildFeedbackRequestPayload(
   }
 }
 
-export async function requestConversationFeedback(
-  scenario: Pick<SessionScenario, 'sessionToken'>,
-  rounds: RoundRecord[],
-  signal?: AbortSignal,
-): Promise<ConversationFeedbackResponse> {
-  const response = await fetch('/api/conversation/feedback', {
-    method: 'POST',
-    signal,
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(buildFeedbackRequestPayload(scenario, rounds)),
-  })
-  if (!response.ok) throw await errorFromResponse(response)
-  return FeedbackResponseSchema.parse(await response.json())
+function normalizeExpressionScaffoldLevel(value: number): 0 | 1 | 2 | 3 | 4 {
+  if (!Number.isFinite(value) || value <= 0) return 0
+  const level = Math.floor(value)
+  if (level >= 4) return 4
+  if (level === 3) return 3
+  if (level === 2) return 2
+  if (level === 1) return 1
+  return 0
 }
 
-export async function requestRedoFeedback(
-  request: RedoFeedbackRequest,
+export async function submitFeedbackTask(
+  request: FeedbackTaskRequest,
   signal?: AbortSignal,
-): Promise<RedoFeedbackResponse> {
-  const response = await fetch('/api/conversation/redo-feedback', {
+): Promise<FeedbackTaskAccepted> {
+  const response = await fetch('/api/feedback/tasks', {
     method: 'POST',
     signal,
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(request),
+    body: JSON.stringify(FeedbackTaskRequestSchema.parse(request)),
   })
   if (!response.ok) throw await errorFromResponse(response)
-  return RedoFeedbackResponseSchema.parse(await response.json())
+  return FeedbackTaskAcceptedSchema.parse(await response.json())
+}
+
+export async function getFeedbackTask(
+  taskToken: string,
+  signal?: AbortSignal,
+): Promise<FeedbackTaskStatus> {
+  const response = await fetch('/api/feedback/tasks', {
+    signal,
+    headers: { accept: 'application/json', authorization: `Bearer ${taskToken}` },
+  })
+  if (!response.ok) throw await errorFromResponse(response)
+  return FeedbackTaskStatusSchema.parse(await response.json())
 }
 
 

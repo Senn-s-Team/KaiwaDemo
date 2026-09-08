@@ -16,11 +16,8 @@ import {
   RequestBodyError,
 } from './http'
 import {
-  draftScenario,
-  generateConversationFeedback,
   generateHint,
   generateListeningScaffold,
-  generateRedoFeedback,
   generateSpeechAssist,
   ScenarioDraftError,
   streamOpenAiReply,
@@ -34,19 +31,17 @@ import {
   verifyScenarioToken,
 } from './tokens'
 import {
-  parseConversationFeedbackRequest,
   parseHintRequest,
   parseListeningScaffoldRequest,
-  parseRedoFeedbackRequest,
   parseReplyRequest,
   parsePracticeRestartRequest,
-  parseScenarioDraftRequest,
   parseSessionStartRequest,
   parseSpeechAssistRequest,
   parseTokenRequest,
   ValidationError,
 } from './validation'
-
+import { handleScenarioDraftGet, handleScenarioDraftPost, ScenarioDraftTaskError } from './scenario-draft-task'
+import { handleFeedbackTaskGet, handleFeedbackTaskPost, FeedbackTaskError } from './feedback-task'
 function configResponse(env: Env): Response {
   const elevenlabsConfigured = Boolean(env.ELEVENLABS_API_KEY)
   const ttsConfigured = elevenlabsConfigured && Boolean(env.ELEVENLABS_VOICE_ID)
@@ -88,21 +83,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   if (url.pathname === '/api/elevenlabs/token') {
     if (request.method !== 'POST') return methodNotAllowed('POST')
     const body = await readJsonBody(request, LIMITS.requestBytes)
-    return createElevenLabsToken(env, parseTokenRequest(body))
+    return createElevenLabsToken(env, parseTokenRequest(body), request.signal)
   }
 
   if (url.pathname === '/api/scenario/draft') {
-    if (request.method !== 'POST') return methodNotAllowed('POST')
-    const body = await readJsonBody(request, LIMITS.requestBytes)
-    const draft = await draftScenario(env, parseScenarioDraftRequest(body))
-    if (draft.status === 'needs_clarification') return json(draft)
-
-    const scenarioToken = await signScenarioToken(env, {
-      scenario: draft.scenario,
-      expiresAt: Date.now() + LIMITS.scenarioTokenTtlMs,
-    })
-    const practiceToken = await signPracticeToken(env, draft.scenario)
-    return json({ ...draft, scenarioToken, practiceToken })
+    if (request.method === 'POST') return handleScenarioDraftPost(request, env)
+    if (request.method === 'GET') return handleScenarioDraftGet(request, env)
+    return methodNotAllowed('GET, POST')
   }
 
   if (url.pathname === '/api/practice/restart') {
@@ -144,37 +131,31 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   if (url.pathname === '/api/respond') {
     if (request.method !== 'POST') return methodNotAllowed('POST')
     const body = await readJsonBody(request, LIMITS.requestBytes)
-    return streamOpenAiReply(env, parseReplyRequest(body))
+    return streamOpenAiReply(env, parseReplyRequest(body), request.signal)
   }
 
   if (url.pathname === '/api/hint') {
     if (request.method !== 'POST') return methodNotAllowed('POST')
     const body = await readJsonBody(request, LIMITS.requestBytes)
-    return json(await generateHint(env, parseHintRequest(body)))
+    return json(await generateHint(env, parseHintRequest(body), request.signal))
   }
 
   if (url.pathname === '/api/listening-scaffold') {
     if (request.method !== 'POST') return methodNotAllowed('POST')
     const body = await readJsonBody(request, LIMITS.requestBytes)
-    return json(await generateListeningScaffold(env, parseListeningScaffoldRequest(body)))
+    return json(await generateListeningScaffold(env, parseListeningScaffoldRequest(body), request.signal))
   }
 
-  if (url.pathname === '/api/conversation/feedback') {
-    if (request.method !== 'POST') return methodNotAllowed('POST')
-    const body = await readJsonBody(request, LIMITS.requestBytes)
-    return json(await generateConversationFeedback(env, parseConversationFeedbackRequest(body)))
-  }
-
-  if (url.pathname === '/api/conversation/redo-feedback') {
-    if (request.method !== 'POST') return methodNotAllowed('POST')
-    const body = await readJsonBody(request, LIMITS.requestBytes)
-    return json(await generateRedoFeedback(env, parseRedoFeedbackRequest(body)))
+  if (url.pathname === '/api/feedback/tasks') {
+    if (request.method === 'POST') return handleFeedbackTaskPost(request, env)
+    if (request.method === 'GET') return handleFeedbackTaskGet(request, env)
+    return methodNotAllowed('GET, POST')
   }
 
   if (url.pathname === '/api/speech/assist') {
     if (request.method !== 'POST') return methodNotAllowed('POST')
     const body = await readJsonBody(request, LIMITS.requestBytes)
-    return json(await generateSpeechAssist(env, parseSpeechAssistRequest(body)))
+    return json(await generateSpeechAssist(env, parseSpeechAssistRequest(body), request.signal))
   }
 
   return errorJson(404, 'not_found', 'API route not found.')
@@ -191,7 +172,7 @@ export default {
       if (error instanceof ValidationError) {
         return errorJson(400, error.code, error.message)
       }
-      if (error instanceof TokenError || error instanceof ScenarioDraftError) {
+      if (error instanceof TokenError || error instanceof ScenarioDraftError || error instanceof ScenarioDraftTaskError || error instanceof FeedbackTaskError) {
         return errorJson(error.status, error.code, error.message)
       }
       return errorJson(500, 'internal_error', 'The prototype could not complete this request. Retry the current step.')

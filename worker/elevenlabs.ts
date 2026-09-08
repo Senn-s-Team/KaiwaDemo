@@ -1,7 +1,14 @@
+/**
+ * [INPUT]: 依赖 Env 配置、TokenRequest、DEADLINES 与 fetch；接收 STT/TTS 类型及可选调用方 AbortSignal
+ * [OUTPUT]: 对外提供 ElevenLabs STT/TTS 临时 token 代理和上游错误归一化函数
+ * [POS]: Worker 的语音供应商边界，负责临时令牌请求、上游错误映射及调用方取消与 deadline 的联合终止
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { z } from 'zod'
 import type { Env } from './env'
 import { errorJson, json } from './http'
 import type { TokenRequest } from './types'
+import { DEADLINES } from './constants'
 
 const ElevenLabsErrorSchema = z.object({
   detail: z
@@ -69,7 +76,7 @@ export function tokenFailureFromUpstream(
   }
 }
 
-export async function createElevenLabsToken(env: Env, request: TokenRequest): Promise<Response> {
+export async function createElevenLabsToken(env: Env, request: TokenRequest, callerSignal?: AbortSignal): Promise<Response> {
   if (!env.ELEVENLABS_API_KEY) {
     return errorJson(503, 'elevenlabs_unconfigured', 'ElevenLabs is not configured for this deployment.')
   }
@@ -80,6 +87,7 @@ export async function createElevenLabsToken(env: Env, request: TokenRequest): Pr
       'xi-api-key': env.ELEVENLABS_API_KEY,
       accept: 'application/json',
     },
+    signal: AbortSignal.any([callerSignal ?? new AbortController().signal, AbortSignal.timeout(DEADLINES.elevenLabsTokenMs)]),
   })
 
   const payload: unknown = await upstream.json().catch(() => null)

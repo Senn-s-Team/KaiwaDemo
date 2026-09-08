@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "kaiwa-demo",
-  "main": "./worker/index.ts",
+  "main": "./worker/entry.ts",
   "compatibility_date": "2026-09-01",
   "assets": {
     "not_found_handling": "single-page-application",
@@ -14,5 +14,9 @@
     "ELEVENLABS_TTS_MODEL": "eleven_flash_v2_5",
     "ELEVENLABS_VOICE_ID": "Hdr5XDtXP7R1qHDNSwll",
     "ALLOW_MOCK": "false"
-  }
+  },
+  "workflows": [
+    { "binding": "SCENARIO_DRAFT", "name": "scenario-draft", "class_name": "ScenarioDraftWorkflow" },
+    { "binding": "FEEDBACK_TASK", "name": "feedback-task", "class_name": "FeedbackWorkflow" }
+  ]
 }

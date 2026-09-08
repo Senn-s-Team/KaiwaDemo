@@ -1,12 +1,14 @@
 /**
  * [INPUT]: 依赖 zod、Worker 环境密钥与 types 中的动态场景、场景 token、会话 token 契约
- * [OUTPUT]: 对外提供场景、会话与独立长期练习 token 的签名、验证、claims 类型和结构化 TokenError
- * [POS]: worker 的可信边界，以严格 schema 保证签名和验签都完整保存五轮动态场景契约并拒绝 legacy claims
+ * [OUTPUT]: 对外提供场景、会话、长期复练 token，以及绑定 scenario-draft 与 feedback-task task identity 的短期 capability 签发、验证、claims 类型和结构化 TokenError
+ * [POS]: worker 的可信边界，以 HMAC、严格 schema、task identity 绑定和 expiresAt 验证保护五轮动态场景与短期任务凭据，并拒绝 legacy claims
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { z } from 'zod'
 import type {
   DynamicScenarioDefinition,
+  ScenarioDraftCapabilityPayload,
+  FeedbackTaskCapabilityPayload,
   ScenarioTokenPayload,
   SessionTokenPayload,
 } from './types'
@@ -15,7 +17,7 @@ import type { Env } from './env'
 const TOKEN_SCHEMA_VERSION = 1
 const HMAC_ALGORITHM = { name: 'HMAC', hash: 'SHA-256' } as const
 
-type TokenKind = 'scenario' | 'session' | 'practice'
+type TokenKind = 'scenario' | 'session' | 'practice' | 'scenario_draft' | 'feedback_task'
 
 type TokenErrorCode =
   | 'token_secret_missing'
@@ -183,21 +185,42 @@ export async function verifySessionToken(env: Env, token: string, now = Date.now
 
 async function signPayload(
   env: Env,
-  payload: ScenarioTokenPayload | SessionTokenPayload | PracticeTokenPayload,
+  payload: ScenarioTokenPayload | SessionTokenPayload | PracticeTokenPayload | ScenarioDraftCapabilityPayload | FeedbackTaskCapabilityPayload,
 ): Promise<string> {
-  if (payload.kind === 'scenario') {
-    parseScenarioTokenPayload(payload)
-  } else if (payload.kind === 'practice') {
-    parsePracticeTokenPayload(payload)
-  } else {
-    parseSessionTokenPayload(payload)
-  }
+  if (payload.kind === 'scenario') parseScenarioTokenPayload(payload)
+  else if (payload.kind === 'practice') parsePracticeTokenPayload(payload)
+  else if (payload.kind === 'session') parseSessionTokenPayload(payload)
 
-  const signingKey = await getSigningKey(env)
+  const signingKey = await getSigningKey(env, payload.kind)
   const encodedPayload = encodeBase64Url(new TextEncoder().encode(JSON.stringify(payload)))
   const signature = await crypto.subtle.sign(HMAC_ALGORITHM, signingKey, new TextEncoder().encode(encodedPayload))
-
   return `${encodedPayload}.${encodeBase64Url(new Uint8Array(signature))}`
+}
+
+export async function signScenarioDraftCapability(env: Env, taskId: string, expiresAt: number, issuedAt = Date.now()): Promise<string> {
+  if (!taskId || !Number.isSafeInteger(expiresAt) || expiresAt <= issuedAt) throw new TokenError('token_claims_invalid', 'Task capability claims are invalid.', 400)
+  return signPayload(env, { schemaVersion: 1, kind: 'scenario_draft', issuedAt, expiresAt, taskId })
+}
+
+export async function verifyScenarioDraftCapability(env: Env, token: string, now = Date.now()): Promise<ScenarioDraftCapabilityPayload> {
+  const payload = await verifyPayload(env, token, 'scenario_draft', now)
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload) || typeof (payload as Record<string, unknown>).taskId !== 'string' || !(payload as Record<string, unknown>).taskId) {
+    throw new TokenError('token_claims_invalid', 'Task capability claims are invalid.', 401)
+  }
+  return payload as ScenarioDraftCapabilityPayload
+}
+
+export async function signFeedbackTaskCapability(env: Env, taskId: string, expiresAt: number, issuedAt = Date.now()): Promise<string> {
+  if (!taskId || !Number.isSafeInteger(expiresAt) || expiresAt <= issuedAt) throw new TokenError('token_claims_invalid', 'Task capability claims are invalid.', 400)
+  return signPayload(env, { schemaVersion: 1, kind: 'feedback_task', issuedAt, expiresAt, taskId })
+}
+
+export async function verifyFeedbackTaskCapability(env: Env, token: string, now = Date.now()): Promise<FeedbackTaskCapabilityPayload> {
+  const payload = await verifyPayload(env, token, 'feedback_task', now)
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload) || typeof (payload as Record<string, unknown>).taskId !== 'string' || !(payload as Record<string, unknown>).taskId) {
+    throw new TokenError('token_claims_invalid', 'Task capability claims are invalid.', 401)
+  }
+  return payload as FeedbackTaskCapabilityPayload
 }
 
 async function verifyPayload(
@@ -218,7 +241,7 @@ async function verifyPayload(
     throw new TokenError('token_malformed', 'Token signature encoding is invalid.', 400)
   }
 
-  const signingKey = await getSigningKey(env)
+  const signingKey = await getSigningKey(env, expectedKind)
   const isValid = await crypto.subtle.verify(
     HMAC_ALGORITHM,
     signingKey,
@@ -242,7 +265,7 @@ async function verifyPayload(
   return payload
 }
 
-async function getSigningKey(env: Env): Promise<CryptoKey> {
+async function getSigningKey(env: Env, kind: TokenKind = 'scenario'): Promise<CryptoKey> {
   let secret = env.SCENARIO_SIGNING_SECRET?.trim() || env.OPENAI_API_KEY?.trim()
   if (!secret) {
     if (env.ALLOW_MOCK === 'true') {
@@ -254,7 +277,7 @@ async function getSigningKey(env: Env): Promise<CryptoKey> {
 
   return crypto.subtle.importKey(
     'raw',
-    new TextEncoder().encode(`kaiwa_scenario_${secret}`),
+    new TextEncoder().encode(`${kind === 'feedback_task' ? 'kaiwa_feedback_task' : 'kaiwa_scenario'}_${secret}`),
     HMAC_ALGORITHM,
     false,
     ['sign', 'verify'],

@@ -4,7 +4,7 @@
  * [POS]: worker 的模型网关层，负责请求 OpenAI、隔离听力支架上下文、归一化完整场景契约并交由严格校验
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
-import { DEFAULT_MODELS, LIMITS } from './constants'
+import { DEFAULT_MODELS, LIMITS, DEADLINES } from './constants'
 import type { Env } from './env'
 import {
   createMockFeedback,
@@ -435,7 +435,7 @@ function streamResponse(stream: ReadableStream<Uint8Array>): Response {
   })
 }
 
-export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promise<Response> {
+export async function streamOpenAiReply(env: Env, request: ReplyRequest, callerSignal?: AbortSignal): Promise<Response> {
   const sessionPayload = await verifySessionToken(env, request.sessionToken)
   if (request.history[0]?.text !== sessionPayload.scenario.firstLine) {
     throw new ValidationError('scenario_context_mismatch', 'Conversation history does not start with the scenario first line.')
@@ -495,6 +495,10 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
         stream: true,
       }
 
+  const streamController = new AbortController()
+  const streamTimer = setTimeout(() => streamController.abort('reply_timeout'), DEADLINES.streamReplyMs)
+  const abortUpstream = () => streamController.abort(callerSignal?.reason)
+  callerSignal?.addEventListener('abort', abortUpstream, { once: true })
   const upstream = await fetch(responsesUrl, {
     method: 'POST',
     headers: {
@@ -503,6 +507,7 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
       accept: 'text/event-stream',
     },
     body: JSON.stringify(streamBody),
+    signal: streamController.signal,
   })
   if (!upstream.ok || !upstream.body) {
     let upstreamError = ''
@@ -528,6 +533,8 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = upstreamBody.getReader()
+      const cancelReader = () => { void reader.cancel() }
+      streamController.signal.addEventListener('abort', cancelReader, { once: true })
       const decoder = new TextDecoder()
       let buffer = ''
       let output = ''
@@ -556,14 +563,14 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
 
               if (parsed.type === 'response.output_text.delta' && typeof parsed.delta === 'string') {
                 output += parsed.delta
-                controller.enqueue(ndjson({ type: 'delta', text: parsed.delta }))
+                if (!streamController.signal.aborted) controller.enqueue(ndjson({ type: 'delta', text: parsed.delta }))
               } else if (Array.isArray(parsed.choices) && parsed.choices.length > 0) {
                 // Standard ChatCompletions streaming chunk: { choices: [{ delta: { content: "..." } }] }
                 const choice = parsed.choices[0] as Record<string, unknown>
                 const deltaContent = (choice?.delta as { content?: string })?.content
                 if (typeof deltaContent === 'string' && deltaContent.length > 0) {
                   output += deltaContent
-                  controller.enqueue(ndjson({ type: 'delta', text: deltaContent }))
+                  if (!streamController.signal.aborted) controller.enqueue(ndjson({ type: 'delta', text: deltaContent }))
                 }
               } else if (parsed.type === 'response.completed') {
                 completedResponse = parsed.response
@@ -575,7 +582,7 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
         }
 
         const text = validateAssistantReply(output, request.turn)
-        controller.enqueue(
+        if (!streamController.signal.aborted) controller.enqueue(
           ndjson({
             type: 'done',
             text,
@@ -587,7 +594,7 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
         controller.close()
       } catch (error) {
         const code = error instanceof ValidationError ? error.code : 'openai_stream_failed'
-        controller.enqueue(
+        if (!streamController.signal.aborted) controller.enqueue(
           ndjson({
             type: 'error',
             code,
@@ -596,17 +603,19 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest): Promis
         )
         controller.close()
       } finally {
+        streamController.signal.removeEventListener('abort', cancelReader)
         reader.releaseLock()
+        clearTimeout(streamTimer)
       }
     },
     cancel() {
-      void upstreamBody.cancel()
+      void streamController.abort('consumer_cancel')
     },
   })
 
   return streamResponse(stream)
 }
-export async function generateHint(env: Env, request: HintRequest): Promise<HintResponse> {
+export async function generateHint(env: Env, request: HintRequest, signal?: AbortSignal): Promise<HintResponse> {
   const sessionPayload = await verifySessionToken(env, request.sessionToken)
   if (request.history[0]?.text !== sessionPayload.scenario.firstLine) {
     throw new ValidationError('scenario_context_mismatch', 'Hint history does not start with the scenario first line.')
@@ -653,6 +662,7 @@ export async function generateHint(env: Env, request: HintRequest): Promise<Hint
       accept: 'application/json',
     },
     body: JSON.stringify(requestBody),
+    signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(DEADLINES.interactiveModelMs)]),
   })
 
   if (!upstream.ok) {
@@ -667,6 +677,7 @@ export async function generateHint(env: Env, request: HintRequest): Promise<Hint
 export async function generateConversationFeedback(
   env: Env,
   request: ConversationFeedbackRequest,
+  signal?: AbortSignal,
 ): Promise<ConversationFeedbackResponse> {
   const sessionPayload = await verifySessionToken(env, request.sessionToken)
   if (request.turnRecords[0]?.partnerPromptJa !== sessionPayload.scenario.firstLine) {
@@ -687,6 +698,8 @@ export async function generateConversationFeedback(
     'OpenAI conversation feedback generation failed.',
     'feedback_model_invalid',
     'Feedback model output is invalid. Retry this request.',
+    DEADLINES.feedbackWorkflowModelMs,
+    signal,
   )
 
   try {
@@ -702,6 +715,7 @@ export async function generateConversationFeedback(
 export async function generateRedoFeedback(
   env: Env,
   request: RedoFeedbackRequest,
+  signal?: AbortSignal,
 ): Promise<RedoFeedbackResponse> {
   const sessionPayload = await verifySessionToken(env, request.sessionToken)
   if (request.turn === 1 && request.partnerPromptJa !== sessionPayload.scenario.firstLine) {
@@ -722,6 +736,8 @@ export async function generateRedoFeedback(
     'OpenAI redo feedback generation failed.',
     'redo_feedback_model_invalid',
     'Redo feedback model output is invalid. Retry this request.',
+    DEADLINES.feedbackWorkflowModelMs,
+    signal,
   )
 
   try {
@@ -737,6 +753,7 @@ export async function generateRedoFeedback(
 export async function generateListeningScaffold(
   env: Env,
   request: ListeningScaffoldRequest,
+  signal?: AbortSignal,
 ): Promise<ListeningScaffoldResponse> {
   const session = await verifySessionToken(env, request.sessionToken)
   if (!env.OPENAI_API_KEY) {
@@ -755,6 +772,8 @@ export async function generateListeningScaffold(
     'OpenAI listening scaffold generation failed.',
     'listening_scaffold_model_invalid',
     'Listening scaffold model output is invalid.',
+    DEADLINES.interactiveModelMs,
+    signal,
   )
 
   try {
@@ -770,6 +789,7 @@ export async function generateListeningScaffold(
 export async function generateSpeechAssist(
   env: Env,
   request: SpeechAssistRequest,
+  signal?: AbortSignal,
 ): Promise<SpeechAssistResponse> {
   const session = await verifySessionToken(env, request.sessionToken)
   if (!env.OPENAI_API_KEY) {
@@ -787,6 +807,8 @@ export async function generateSpeechAssist(
     'OpenAI speech assist generation failed.',
     'speech_assist_model_invalid',
     'Speech assist model output is invalid.',
+    DEADLINES.interactiveModelMs,
+    signal,
   )
 
   return parseSpeechAssistModelOutput(parsedJson, request.observedTextJa)
@@ -800,6 +822,8 @@ async function generateStructuredFeedbackJson(
   requestErrorMessage: string,
   modelErrorCode: string,
   modelErrorMessage: string,
+  deadlineMs: number = DEADLINES.interactiveModelMs,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   let responsesUrl: string
   try {
@@ -835,6 +859,7 @@ async function generateStructuredFeedbackJson(
       accept: 'application/json',
     },
     body: JSON.stringify(requestBody),
+    signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(deadlineMs)]),
   })
   if (!upstream.ok) {
     throw new ScenarioDraftError(requestErrorCode, requestErrorMessage, 502)
