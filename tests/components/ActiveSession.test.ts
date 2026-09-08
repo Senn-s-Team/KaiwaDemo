@@ -116,7 +116,7 @@ describe('ActiveSession 中文意图录音', () => {
     flushSync(() => root.render(createElement(Harness)))
     click(container, '听一听').click()
     expect(mocks.play).toHaveBeenCalledWith('追加料金はかかりますか？')
-    click(container, '点击开始回答').click()
+    click(container, '开始回答').click()
     expect(mocks.startJapanese).toHaveBeenCalledOnce()
   })
 

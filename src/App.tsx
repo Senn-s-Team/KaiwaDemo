@@ -16,7 +16,7 @@ import {
   requestListeningScaffold,
   startScenarioSession,
 } from './lib/api'
-import { createRoundRecord, downloadReport } from './lib/metrics'
+import { createRoundRecord } from './lib/metrics'
 import { queryMicrophonePermission } from './lib/microphone'
 import { createMessageId, createSessionId, decideInterruptionRecoveryAffordances, executeInterruptionRecovery, INITIAL_INTERRUPTION_RECOVERY_STATE, reduceInterruptionRecovery } from './lib/session'
 import { toUiError } from './lib/ui'
@@ -83,7 +83,6 @@ function App() {
   const [uiError, setUiError] = useState<UiError | null>(null)
   const [inlineError, setInlineError] = useState('')
   const [lastFailedStep, setLastFailedStep] = useState<'config' | 'scenario' | 'token' | 'stt' | 'llm' | 'tts' | null>(null)
-  const [copyStatus, setCopyStatus] = useState('')
   const [pendingHistory, setPendingHistory] = useState<ConversationMessage[]>([])
   const requestAbortRef = useRef<AbortController | null>(null)
   const resetSessionRef = useRef<() => void>(() => undefined)
@@ -320,7 +319,7 @@ function App() {
     },
   })
   const { feedbackData, feedbackStatus, feedbackErrorMsg, report, currentPractice, practiceComparison, restoredRedoTask } = completedPractice.model
-  const { retryConversationFeedback, startRedoTask, copyReport } = completedPractice.actions
+  const { retryConversationFeedback, startRedoTask } = completedPractice.actions
   const listeningScaffold = useListeningScaffoldController({
     messagesRef, rounds, currentRound: currentRoundView, scenario, sessionId,
     activeAiMessageId, pausedAiMessageId, isTtsActionLocked: aiTurn.meta.isTtsActionLocked,
@@ -450,7 +449,6 @@ function App() {
     resetAiTurn()
     setUiError(null)
     setInlineError('')
-    setCopyStatus('')
     completedPractice.actions.reset()
     const controller = new AbortController()
     requestAbortRef.current = controller
@@ -682,7 +680,6 @@ function App() {
     resetAiTurn()
     replaceCurrentRound(null)
     setInlineError('')
-    setCopyStatus('')
     listeningScaffold.reset()
     resetCustom()
     setHintData(null)
@@ -694,7 +691,6 @@ function App() {
     transitionTo(config ? 'idle' : 'loading_config')
   }, [completedPractice.actions, config, replaceCurrentRound, replaceMessages, resetAiTurn, resetCustom, resetVoiceTurn, setHintSheetVisible, stopActiveResources, syncMicrophoneReadiness, transitionTo])
   resetSessionRef.current = resetSession
-  const copyCompletedReport = useCallback(async () => { await copyReport(); setCopyStatus('JSON 已复制') }, [copyReport])
   const sessionCoreGoal = scenario?.dynamicData.coreGoal ?? null
   const recoveryMessage = recoveryStatusText(interruptionRecovery.status)
   const isSessionActive = sessionStartedAt !== null && sessionEndedAt === null
@@ -782,9 +778,6 @@ function App() {
               feedbackErrorMsg={feedbackErrorMsg}
               restoredRedoTask={restoredRedoTask}
               onRetryFeedback={retryConversationFeedback}
-              copyStatus={copyStatus}
-              onCopy={() => void copyCompletedReport()}
-              onDownload={() => downloadReport(report)}
               onReplayAi={(text) => void playReviewAudio(text)}
               onStopAudio={stopReviewAudio}
               onRequestRedo={startRedoTask}

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 完成页 view model、反馈恢复状态与完成页用户动作
- * [OUTPUT]: 对外提供完成页证据反馈、重做练习、报告操作与历史状态纯视图；独立拥有重做媒体生命周期
+ * [OUTPUT]: 对外提供完成页证据反馈、重做练习、表现比较与历史状态纯视图；独立拥有重做媒体生命周期
  * [POS]: src/components 的完成页，接收 recovery 驱动的任务状态和动作，并负责重做 STT/token 的代际隔离与资源释放
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -40,9 +40,6 @@ interface SessionCompleteProps {
   feedbackErrorMsg: string
   restoredRedoTask?: StoredFeedbackTask
   onRetryFeedback: () => void
-  copyStatus: string
-  onCopy: () => void
-  onDownload: () => void
   onReplayAi: (text: string) => void
   onStopAudio: () => void
   onRequestRedo: (request: RedoFeedbackRequest) => void
@@ -70,9 +67,6 @@ export function SessionComplete({
   feedbackErrorMsg,
   restoredRedoTask,
   onRetryFeedback,
-  copyStatus,
-  onCopy,
-  onDownload,
   onReplayAi,
   onStopAudio,
   onRequestRedo,
@@ -445,11 +439,6 @@ export function SessionComplete({
         </div>
       )}
 
-      <details className="developer-disclosure">
-        <summary>开发信息</summary>
-        <p>会话 {messages.length} 条消息，{rounds.length} 个原始回合，{report.redos.length} 个重做记录。</p>
-        <div className="developer-actions"><button className="secondary-button" type="button" onClick={onCopy}>复制 JSON</button><button className="text-button" type="button" onClick={onDownload}>下载 JSON</button>{copyStatus && <span role="status">{copyStatus}</span>}</div>
-      </details>
       {historyNotice && <p role="status" className="practice-storage-note">{historyNotice}</p>}
       {onRetrySave && <button className="secondary-button" type="button" onClick={onRetrySave}>重试保存</button>}
       <div className="complete-actions">

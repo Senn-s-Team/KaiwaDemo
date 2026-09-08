@@ -526,7 +526,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                       disabled={!online}
                     >
                       <MicIcon />
-                      <span>点击开始回答 (语音)</span>
+                      <span>开始回答</span>
                     </button>
                   ) : (
                     <form

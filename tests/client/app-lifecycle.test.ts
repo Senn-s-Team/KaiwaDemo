@@ -334,10 +334,10 @@ describe('App config lifecycle regression', () => {
     try {
       const appModule = await import('../../src/App')
       flushSync(() => root.render(createElement(appModule.default)))
-      await vi.waitFor(() => expect(container.textContent).toContain('点击开始回答 (语音)'), { interval: 0 })
+      await vi.waitFor(() => expect(container.textContent).toContain('开始回答'), { interval: 0 })
       stop.mockClear()
       events.length = 0
-      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('点击开始回答'))
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('开始回答'))
       expect(button).toBeDefined()
       ;(button as HTMLButtonElement).click()
       await vi.waitFor(() => expect(requestMicrophoneStream).toHaveBeenCalledOnce(), { interval: 0 })
