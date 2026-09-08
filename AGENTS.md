@@ -9,7 +9,7 @@ shared/ - 浏览器与 Worker 共用的 wire schema 与推导类型 (5成员)
 worker/ - Cloudflare Worker 服务端路由、模型代理、校验、签名与 Workflow 持久任务边界 (18成员)
 scripts/ - 构建期依赖校验与产物清洗脚本 (2成员)
 tests/ - 客户端、Worker 与组件契约测试 (3子目录: client/、worker/、components/)
-docs/ - 产品基线、理论依据、延期边界、验证材料与讨论交接 (7成员)
+docs/ - 产品基线、理论依据、延期边界、验证材料与讨论交接 (8成员)
 </directory>
 
 <config>

@@ -63,6 +63,48 @@ const EvaluationTextSchema = z.string().trim().min(1).refine(
 )
 const ChineseDirectionSchema = EvaluationTextSchema.refine(value => !/[ぁ-ゟ゠-ヿ]/.test(value), 'Redo direction must be Chinese guidance without Japanese words or sentences.')
 
+const PerformanceEvidenceSchema = z.object({
+  turn: z.number().int().min(1).max(5),
+  role: z.enum(['assistant', 'user']),
+  quoteJa: z.string().trim().min(1),
+}).strict()
+const PerformanceDimensionBaseSchema = z.object({
+  rating: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]).nullable(),
+  reasonZh: EvaluationTextSchema,
+  evidence: z.array(PerformanceEvidenceSchema).max(5),
+}).strict()
+const PerformanceDimensionSchema = PerformanceDimensionBaseSchema.extend({ status: z.enum(['observed', 'unobserved']) }).superRefine((dimension, context) => {
+  if (dimension.status === 'observed' && (dimension.rating === null || dimension.evidence.length === 0)) {
+    context.addIssue({ code: 'custom', message: 'Observed performance dimensions require a rating and evidence.' })
+  }
+  if (dimension.status === 'unobserved' && (dimension.rating !== null || dimension.evidence.length !== 0)) {
+    context.addIssue({ code: 'custom', message: 'Unobserved performance dimensions must be null without evidence.' })
+  }
+})
+const ClarificationRepairDimensionSchema = PerformanceDimensionBaseSchema.extend({
+  status: z.enum(['observed', 'unobserved', 'not_needed']),
+}).superRefine((dimension, context) => {
+  if (dimension.status === 'observed' && (dimension.rating === null || dimension.evidence.length === 0)) {
+    context.addIssue({ code: 'custom', message: 'Observed clarification repair requires a rating and evidence.' })
+  }
+  if (dimension.status === 'unobserved' && (dimension.rating !== null || dimension.evidence.length !== 0)) {
+    context.addIssue({ code: 'custom', message: 'Unobserved clarification repair must be null without evidence.' })
+  }
+  if (dimension.status === 'not_needed' && dimension.rating !== null) {
+    context.addIssue({ code: 'custom', message: 'Not-needed clarification repair must have a null rating.' })
+  }
+})
+export const ConversationPerformanceSchema = z.object({
+  version: z.literal(1),
+  dimensions: z.object({
+    communicationAchievement: PerformanceDimensionSchema,
+    responseRelevance: PerformanceDimensionSchema,
+    expressionClarity: PerformanceDimensionSchema,
+    clarificationRepair: ClarificationRepairDimensionSchema,
+  }).strict(),
+}).strict()
+export type ConversationPerformance = z.infer<typeof ConversationPerformanceSchema>
+
 export const ConversationFeedbackResponseSchema = z.object({
   evaluationVersion: z.number().int().positive().optional(),
   evidenceResults: z.array(z.object({
@@ -70,6 +112,7 @@ export const ConversationFeedbackResponseSchema = z.object({
     status: z.enum(['completed', 'not_completed', 'not_observed', 'insufficient_evidence']),
     evidence: z.array(z.object({ turn: z.number().int().min(1).max(5), quoteJa: z.string().trim().min(1) }).strict()).max(5),
   }).strict()).max(5).optional(),
+  performance: ConversationPerformanceSchema.optional(),
   outcome: z.enum(['completed', 'partial', 'not_completed', 'insufficient_evidence']),
   outcomeEvidenceZh: EvaluationTextSchema,
   listeningFinding: z.object({

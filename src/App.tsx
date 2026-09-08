@@ -4,7 +4,7 @@
  * [POS]: src/ 核心入口与主控制器，编排可持久化会话业务状态、内部四级帮助、不可恢复媒体资源的显式释放与 offline/background 业务中断恢复，成功恢复不显示内部状态横幅；pagehide 仅释放资源，真实活动阶段才回滚业务状态
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type SetStateAction } from 'react'
 import './App.css'
 import { ActiveSession } from './components/ActiveSession'
 import { Home } from './components/Home'
@@ -36,6 +36,7 @@ import type {
   PrototypeConfig,
   RoundRecord,
   SessionScenario,
+  PreviousAdvice,
   UiError,
   TranscriptText,
 } from './types'
@@ -104,11 +105,18 @@ function App() {
   const sessionSnapshotRef = useRef<SessionSnapshot | null>(readSessionSnapshot())
   const homePractice = useHomePractice({ online, activeSession: scenario !== null || sessionSnapshotRef.current !== null, resetSession: () => resetSessionRef.current(), setUiError })
   const { customInputZh, clarifications, pendingClarification, readyScenarioData, isDraftingScenario, draftState, practiceHistory, recentPractices, historyNotice, historySaving, historySaveFailed } = homePractice.model
-  const { setCustomInputZh, submitDraft: handleDraftScenario, answerClarification: handleAnswerClarification, resetCustom, retryDraftTransport, discardDraft, persistPractice, preparePracticeAgain, removePractice } = homePractice.actions
+  const { setCustomInputZh, submitDraft: handleDraftScenario, answerClarification: handleAnswerClarification, resetCustom, retryDraftTransport, discardDraft, persistPractice, preparePracticeAgain, markReadyAdviceViewed, removePractice } = homePractice.actions
   const chatBottomRef = useRef<HTMLDivElement | null>(null)
   const restoredTranscriptRef = useRef<TranscriptText | null>(null)
   const abortSpeechAssistRef = useRef<(reason: import('../shared/speech-assist').SpeechAssistAbortReason) => void>(() => undefined)
   const hintRequestRef = useRef<AbortController | null>(null)
+  const hintSheetVisibleRef = useRef(false)
+  const hintedTurnRef = useRef(1)
+  const setHintSheetVisible = useCallback((value: SetStateAction<boolean>) => {
+    const next = typeof value === 'function' ? value(hintSheetVisibleRef.current) : value
+    hintSheetVisibleRef.current = next
+    setShowHintSheet(next)
+  }, [])
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
     if (chatBottomRef.current) {
@@ -397,18 +405,30 @@ function App() {
     const timer = window.setTimeout(() => void loadConfig(), 0)
     return () => window.clearTimeout(timer)
   }, [loadConfig])
+  useEffect(() => {
+    if (hintedTurnRef.current === turn) return
+    hintedTurnRef.current = turn
+    hintRequestRef.current?.abort('turn_changed')
+    hintRequestRef.current = null
+    setHintData(null)
+    setHintLevel(0)
+    setIsLoadingHint(false)
+    setHintSheetVisible(false)
+  }, [setHintSheetVisible, turn])
   useSessionSnapshotPersistence({ reading: sessionSnapshotRef.current !== null, phase, sessionId, scenario, messages, rounds, currentRound: currentRoundView, turn, startedAt: sessionStartedAt, endedAt: sessionEndedAt, transcript })
   useSessionLifecycle({ phaseRef, setOnline, setNotice: setAppForegroundNotice, beginOperation, abortSpeechAssist, interruptPlayback: aiTurn.actions.interruptPlaybackForBackground, disposeVoice: disposeVoiceTurn, dispatch: dispatchInterruptionRecovery, touchRound, setUiError, transitionTo, stopResources: stopActiveResources })
 
-  const startSession = useCallback(async (scenarioToken: string, draftRequestId?: string) => {
+  const startSession = useCallback(async (scenarioToken: string, draftRequestId?: string, previousAdvice?: PreviousAdvice) => {
     if (!config || !online || sessionStartLockRef.current) return
     dispatchInterruptionRecovery({ type: 'reset' })
     clearSessionSnapshot()
     sessionStartLockRef.current = true
     const operationId = beginOperation()
+    hintRequestRef.current?.abort('session_started')
+    hintRequestRef.current = null
     setHintData(null)
     setHintLevel(0)
-    setShowHintSheet(false)
+    setHintSheetVisible(false)
     setSessionId('')
     setScenario(null)
     setSessionStartedAt(null)
@@ -450,13 +470,16 @@ function App() {
         role: 'assistant',
         text: nextScenario.firstLine,
       }
-      setScenario(nextScenario)
+      const localScenario = previousAdvice ? { ...nextScenario, previousAdvice } : nextScenario
+      setScenario(localScenario)
       if (draftRequestId) discardDraft()
       setSessionId(id)
       setSessionStartedAt(startedAt)
       setTurn(1)
       replaceMessages([firstMessage])
-      replaceCurrentRound(createRoundRecord(1, nextScenario.firstLine, 0))
+      const firstRound = createRoundRecord(1, nextScenario.firstLine, 0)
+      if (previousAdvice?.viewed) firstRound.expressionScaffoldLevel = 4
+      replaceCurrentRound(firstRound)
       setAppForegroundNotice('')
       clearVoiceNotice()
       await initFirstLine(nextScenario.firstLine, operationId, firstMessage.id)
@@ -469,10 +492,11 @@ function App() {
       if (requestAbortRef.current === controller) requestAbortRef.current = null
       sessionStartLockRef.current = false
     }
-  }, [beginOperation, clearVoiceNotice, config, discardDraft, initFirstLine, isCurrentOperation, online, replaceCurrentRound, replaceMessages, resetAiTurn, resetVoiceTurn, syncMicrophoneReadiness, transitionTo, unlockAudio])
-  const handleRequestHint = useCallback(async () => {
+  }, [beginOperation, clearVoiceNotice, config, discardDraft, initFirstLine, isCurrentOperation, online, replaceCurrentRound, replaceMessages, resetAiTurn, resetVoiceTurn, setHintSheetVisible, syncMicrophoneReadiness, transitionTo, unlockAudio])
+  const handleRequestHint = useCallback(async (intentionZh?: string) => {
+    const trimmedIntention = intentionZh?.trim()
     const nextLevel = Math.min(4, hintLevel + 1) as 0 | 1 | 2 | 3 | 4
-    if (hintData) {
+    if (hintData && !trimmedIntention) {
       setHintLevel(nextLevel)
       touchRound((round) => {
         if (nextLevel > round.expressionScaffoldLevel) {
@@ -488,19 +512,25 @@ function App() {
     const requestOperation = operationIdRef.current
     const requestSessionId = sessionId
     const requestTurn = turn
+    if (trimmedIntention) {
+      setHintData(null)
+      setHintLevel(0)
+    }
     setIsLoadingHint(true)
     try {
-      const res = await fetchHint(scenario, currentAiText, messagesRef.current, controller.signal)
-      if (controller.signal.aborted || !isCurrentOperation(requestOperation) || sessionId !== requestSessionId || turn !== requestTurn) return
+      const res = await fetchHint(scenario, currentAiText, messagesRef.current, trimmedIntention, controller.signal)
+      if (controller.signal.aborted || hintRequestRef.current !== controller || !hintSheetVisibleRef.current || !isCurrentOperation(requestOperation) || sessionId !== requestSessionId || turn !== requestTurn || currentRoundRef.current?.turn !== requestTurn) return
       setHintData(res)
-      setHintLevel(1)
+      // 明确说出想表达的意思后，直接给完整例句；泛化求助仍按四级渐进。
+      const resolvedLevel = trimmedIntention ? 4 : 1
+      setHintLevel(resolvedLevel)
       touchRound((round) => {
-        if (round.expressionScaffoldLevel < 1) {
-          round.expressionScaffoldLevel = 1
+        if (round.expressionScaffoldLevel < resolvedLevel) {
+          round.expressionScaffoldLevel = resolvedLevel
         }
       })
     } catch {
-      if (controller.signal.aborted || !isCurrentOperation(requestOperation) || sessionId !== requestSessionId) return
+      if (controller.signal.aborted || hintRequestRef.current !== controller || !isCurrentOperation(requestOperation) || sessionId !== requestSessionId || currentRoundRef.current?.turn !== requestTurn) return
       setAppForegroundNotice('获取提示暂时失败，可继续自行回答。')
     } finally {
       if (hintRequestRef.current === controller) {
@@ -649,12 +679,12 @@ function App() {
     resetCustom()
     setHintData(null)
     setHintLevel(0)
-    setShowHintSheet(false)
+    setHintSheetVisible(false)
     setShowGoalsSheet(false)
     sessionStartLockRef.current = false
     submitLockRef.current = false
     transitionTo(config ? 'idle' : 'loading_config')
-  }, [completedPractice.actions, config, replaceCurrentRound, replaceMessages, resetAiTurn, resetCustom, resetVoiceTurn, stopActiveResources, syncMicrophoneReadiness, transitionTo])
+  }, [completedPractice.actions, config, replaceCurrentRound, replaceMessages, resetAiTurn, resetCustom, resetVoiceTurn, setHintSheetVisible, stopActiveResources, syncMicrophoneReadiness, transitionTo])
   resetSessionRef.current = resetSession
   const copyCompletedReport = useCallback(async () => { await copyReport(); setCopyStatus('JSON 已复制') }, [copyReport])
   const sessionCoreGoal = scenario?.dynamicData.coreGoal ?? null
@@ -710,7 +740,8 @@ function App() {
               onInputEdited={discardDraft}
               onDraftScenario={handleDraftScenario}
               onAnswerClarification={handleAnswerClarification}
-              onStartDynamic={(token) => void startSession(token, draftState.request?.requestId)}
+              onStartDynamic={(token, previousAdvice) => void startSession(token, draftState.request?.requestId, previousAdvice)}
+              onPreviousAdviceViewed={markReadyAdviceViewed}
               onResetCustom={resetCustom}
               recentPractices={recentPractices}
               practiceHistory={practiceHistory}
@@ -760,14 +791,15 @@ function App() {
             activeAiMessageId, pausedAiMessageId, playedAiMessageIds, activeError, activeFailedStep, silenceCountdownSeconds, activeAssistIsVisible,
             activeAssistState, confirmedTranscript, interimTranscript, partialTranscript, recordingSeconds, dockInputMode,
             dockTextValue, hintData, isLoadingHint, hintLevel, showHintSheet, showTranscriptSheet, manualInput, transcript,
-            showOriginalTranscript, inlineError, canConfirmTranscript,
+            showOriginalTranscript, inlineError, canConfirmTranscript, sttAvailable: Boolean(config?.elevenlabs.sttAvailable), sttModel: config?.elevenlabs.sttModel ?? '', ttsAvailable: Boolean(config?.elevenlabs.ttsAvailable), reviewAudioNotice,
+            previousAdvice: scenario?.previousAdvice,
           }}
           actions={{
             endSession, setShowGoalsSheet, dispatchInterruptionRecovery, setAppForegroundNotice, clearVoiceNotice,
             getListeningLevel, replayPartnerMessage, advanceListeningScaffold, setDockInputMode, startRecording, enterTextInput, enterLifecycleTextInput,
-            updateFinalText, setDockTextValue, openTranscriptSheet, handleRequestHint, setShowHintSheet, stopRecording,
-            skipFailedTts, retryFailedStep, resetSession, stopAiPlayback, closeTranscriptSheet, rerecord, confirmTranscript,
-            setInlineError, toggleOriginalTranscript,
+            updateFinalText, setDockTextValue, openTranscriptSheet, handleRequestHint, setShowHintSheet: setHintSheetVisible, stopRecording,
+            skipFailedTts, retryFailedStep, resetSession, stopAiPlayback, releaseAiPlayback, playReviewAudio, closeTranscriptSheet, rerecord, confirmTranscript,
+            setInlineError, toggleOriginalTranscript, onPreviousAdviceViewed: () => { if (!scenario?.previousAdvice) return; touchRound((round) => { round.expressionScaffoldLevel = 4 }); setScenario((current) => current?.previousAdvice && !current.previousAdvice.viewed ? { ...current, previousAdvice: { ...current.previousAdvice, viewed: true } } : current) },
           }}
           messageListRef={messageListRef}
           chatBottomRef={chatBottomRef}

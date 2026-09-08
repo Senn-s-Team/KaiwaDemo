@@ -5,6 +5,7 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import type { RoundRecord } from '../types'
+import { ConversationPerformanceSchema, type ConversationPerformance } from '../../shared/feedback-task'
 import { getPracticeScenarioKey, type PracticeAttempt, type StoredPracticeAttempt } from './practice-history'
 
 export interface PracticePerformance {
@@ -18,6 +19,8 @@ export interface PracticePerformance {
   observedAssistance: { listening: number; expression: number }
   evidence: { turn: number; quoteJa: string }[]
   validEvaluation: boolean
+  dimensions: Record<'communicationAchievement' | 'responseRelevance' | 'expressionClarity' | 'clarificationRepair', 0 | 1 | 2 | 3 | null>
+  validPerformance: boolean
 }
 
 function expressionHelpUsed(round: RoundRecord): boolean {
@@ -31,9 +34,26 @@ function uncertainRound(round: RoundRecord): boolean {
     || round.timing.audioCompletedAt === null
 }
 
+function validatedPerformance(attempt: PracticeAttempt): ConversationPerformance | null {
+  const parsed = ConversationPerformanceSchema.safeParse(attempt.feedback?.performance)
+  if (!parsed.success) return null
+  const dimensions = Object.values(parsed.data.dimensions)
+  if (!dimensions.some(dimension => dimension.rating !== null)) return null
+  const citationsValid = dimensions.every((dimension) => {
+    return dimension.evidence.every((evidence) => {
+      const round = attempt.report.rounds.find(item => item.turn === evidence.turn)
+      const source = evidence.role === 'assistant' ? round?.aiPrompt : round?.userFinal
+      return Boolean(source?.includes(evidence.quoteJa))
+    })
+  })
+  if (!citationsValid || !dimensions.every(dimension => dimension.rating === null || dimension.evidence.some(item => item.role === 'user'))) return null
+  return parsed.data
+}
+
 export function summarizePracticeAttempt(attempt: PracticeAttempt): PracticePerformance {
   const points = attempt.scenario.evidencePoints ?? []
   const feedback = attempt.feedback
+  const performance = validatedPerformance(attempt)
   const results = feedback?.evidenceResults ?? []
   const versionMatches = typeof attempt.scenario.evaluationVersion === 'number'
     && feedback?.evaluationVersion === attempt.scenario.evaluationVersion
@@ -43,6 +63,13 @@ export function summarizePracticeAttempt(attempt: PracticeAttempt): PracticePerf
     observedAssistance: { listening: 0, expression: 0 }, evidence: [],
     validEvaluation: versionMatches && points.length > 0 && results.length === points.length
       && new Set(results.map((result) => result.pointId)).size === points.length,
+    dimensions: {
+      communicationAchievement: performance?.dimensions.communicationAchievement.rating ?? null,
+      responseRelevance: performance?.dimensions.responseRelevance.rating ?? null,
+      expressionClarity: performance?.dimensions.expressionClarity.rating ?? null,
+      clarificationRepair: performance?.dimensions.clarificationRepair.rating ?? null,
+    },
+    validPerformance: performance !== null,
   }
   for (const point of points) {
     const result = versionMatches ? results.find((item) => item.pointId === point.id) : undefined
@@ -86,7 +113,7 @@ export function summarizePracticeAttempt(attempt: PracticeAttempt): PracticePerf
 function completeAttempt(attempt: PracticeAttempt): boolean {
   return attempt.report.rounds.length === attempt.scenario.maxTurns
     && attempt.report.completion.finalTurn === attempt.scenario.maxTurns
-    && new Set(attempt.report.rounds.map((round) => round.turn)).size === attempt.scenario.maxTurns
+    && attempt.report.rounds.every((round, index) => round.turn === index + 1)
     && attempt.report.rounds.every((round) => round.userFinal.trim().length > 0)
 }
 
@@ -94,6 +121,8 @@ export function comparePracticeAttempts(current: PracticeAttempt, history: reado
   current: PracticePerformance
   baseline: PracticePerformance | null
   baselineAttempt: StoredPracticeAttempt | null
+  performanceBaseline: PracticePerformance | null
+  performanceBaselineAttempt: StoredPracticeAttempt | null
 } {
   const performance = summarizePracticeAttempt(current)
   const key = getPracticeScenarioKey(current.scenario)
@@ -105,5 +134,20 @@ export function comparePracticeAttempts(current: PracticeAttempt, history: reado
       && getPracticeScenarioKey(attempt.scenario) === key
       && completeAttempt(attempt) && summarizePracticeAttempt(attempt).validEvaluation) ?? null
     : null
-  return { current: performance, baseline: baselineAttempt ? summarizePracticeAttempt(baselineAttempt) : null, baselineAttempt }
+  const performanceBaselineAttempt = current.report.mode !== 'mock' && performance.validPerformance && completeAttempt(current)
+    ? [...history].sort((a, b) => a.report.startedAt - b.report.startedAt).find((attempt) =>
+      attempt.report.mode === current.report.mode && attempt.report.mode !== 'mock'
+      && attempt.report.sessionId !== current.report.sessionId
+      && attempt.report.startedAt < current.report.startedAt
+      && getPracticeScenarioKey(attempt.scenario) === key
+      && attempt.scenario.evaluationVersion === current.scenario.evaluationVersion
+      && completeAttempt(attempt) && summarizePracticeAttempt(attempt).validPerformance) ?? null
+    : null
+  return {
+    current: performance,
+    baseline: baselineAttempt ? summarizePracticeAttempt(baselineAttempt) : null,
+    baselineAttempt,
+    performanceBaseline: performanceBaselineAttempt ? summarizePracticeAttempt(performanceBaselineAttempt) : null,
+    performanceBaselineAttempt,
+  }
 }

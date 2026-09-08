@@ -11,6 +11,7 @@ import { flushSync } from 'react-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildSessionReport, createRoundRecord } from '../../src/lib/metrics'
 import type { ConversationFeedbackResponse, SessionScenario } from '../../src/types'
+import type { StoredPracticeAttempt } from '../../src/lib/practice-history'
 
 let App: ComponentType
 let fetchConfig: ReturnType<typeof vi.fn>
@@ -174,6 +175,57 @@ describe('App lifecycle integration', () => {
 })
 
 describe('App config lifecycle regression', () => {
+  it('将选中练习的建议带到复练，并在查看后以 L4 开始且不污染重录次数', async () => {
+    vi.resetModules()
+    window.sessionStorage.clear()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
+    const attempt: StoredPracticeAttempt = {
+      scenario: scenario.dynamicData, practiceToken: 'practice-token', scenarioKey: 'haircut-key',
+      report: buildSessionReport('source-session', 'mock', scenario, 123, 456, [createRoundRecord(1, scenario.firstLine, 0)]),
+      feedback: { outcome: 'partial', outcomeEvidenceZh: '', listeningFinding: null, expressionImprovement: { turn: 1, userConfirmedJa: 'これをください。', suggestedJa: 'こちらをお願いします。', reasonZh: '更礼貌。' }, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: 'これをください。', directionZh: '' } },
+    }
+    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }), restartPractice: vi.fn().mockResolvedValue({ scenario: scenario.dynamicData, scenarioToken: 'repeat-token', practiceToken: 'practice-token' }), startScenarioSession: vi.fn().mockResolvedValue({ ...scenario, scenarioToken: 'repeat-token' }) }))
+    vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([attempt]) }))
+    const box = document.createElement('div'); document.body.appendChild(box)
+    const appModule = await import('../../src/App'); const appRoot = createRoot(box); flushSync(() => appRoot.render(createElement(appModule.default)))
+    const history = await vi.waitFor(() => { const button = box.querySelector<HTMLButtonElement>('.practice-history-open'); expect(button).not.toBeNull(); expect(button?.disabled).toBe(false); return button as HTMLButtonElement }, { interval: 0 })
+    flushSync(() => history.click())
+    const advice = await vi.waitFor(() => { const button = Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes('查看上次建议')); expect(button).toBeDefined(); return button as HTMLButtonElement }, { interval: 0 })
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    flushSync(() => advice.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+    expect(box.textContent).toContain('こちらをお願いします。')
+    flushSync(() => (Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes('开始对话')) as HTMLButtonElement).click())
+    await vi.waitFor(() => {
+      const saved = JSON.parse(window.sessionStorage.getItem('kaiwa.current-session.v1') ?? '{}') as { currentRound?: { expressionScaffoldLevel?: number; rerecordCount?: number } }
+      expect(saved.currentRound?.expressionScaffoldLevel).toBe(4)
+      expect(saved.currentRound?.rerecordCount).toBe(0)
+    }, { interval: 0 })
+    flushSync(() => (Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes('提前复盘')) as HTMLButtonElement).click())
+    const newScenario = await vi.waitFor(() => { const button = Array.from(box.querySelectorAll('button')).find((item) => item.textContent === '开始新场景'); expect(button).toBeDefined(); return button as HTMLButtonElement }, { interval: 0 })
+    flushSync(() => newScenario.click())
+    expect(box.textContent).not.toContain('上次建议')
+    appRoot.unmount(); box.remove(); vi.doUnmock('../../src/lib/api'); vi.doUnmock('../../src/lib/practice-history')
+  })
+
+  it('恢复带建议的快照，且兼容旧快照并拒绝无效建议', async () => {
+    vi.resetModules(); window.sessionStorage.clear(); Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
+    const advice = { expressionImprovement: { turn: 1, userConfirmedJa: 'これ', suggestedJa: 'こちら', reasonZh: '更礼貌。' }, sourceSessionId: 'source', sourceStartedAt: 1, viewed: true }
+    const snapshot = { version: 1, phase: 'waiting_user', sessionId: 'restored', scenario: { ...scenario, previousAdvice: advice }, messages: [], rounds: [], currentRound: createRoundRecord(1, scenario.firstLine, 0), turn: 1, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' } }
+    window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify(snapshot))
+    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }) }))
+    vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([]) }))
+    const box = document.createElement('div'); document.body.appendChild(box); const appModule = await import('../../src/App'); const appRoot = createRoot(box); flushSync(() => appRoot.render(createElement(appModule.default)))
+    const button = await vi.waitFor(() => { const item = box.querySelector<HTMLButtonElement>('[aria-label="查看上次建议"]'); expect(item).not.toBeNull(); return item as HTMLButtonElement }, { interval: 0 })
+    flushSync(() => button.click()); expect(box.textContent).toContain('こちら')
+    appRoot.unmount(); box.remove(); vi.doUnmock('../../src/lib/api'); vi.doUnmock('../../src/lib/practice-history')
+
+    const { readSessionSnapshot } = await import('../../src/lib/session-snapshot')
+    window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({ ...snapshot, scenario: { ...scenario, previousAdvice: { ...advice, expressionImprovement: { ...advice.expressionImprovement, suggestedJa: '' } } } }))
+    expect(readSessionSnapshot()).toBeNull()
+    window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({ ...snapshot, scenario }))
+    expect(readSessionSnapshot()).not.toBeNull()
+  })
   it('点击开始语音时先释放已完成的相手播放器，再申请麦克风', async () => {
     vi.resetModules()
     window.sessionStorage.clear()
@@ -331,7 +383,7 @@ describe('App async owner guards', () => {
     const appModule = await import('../../src/App')
     root = createRoot(container); flushSync(() => root?.render(createElement(appModule.default)))
     const hintButton = await vi.waitFor(() => {
-      const button = container?.querySelector<HTMLButtonElement>('[aria-label="不知道怎么说，查看表达帮助"]')
+      const button = container?.querySelector<HTMLButtonElement>('[aria-label="怎么说，查看表达帮助"]')
       expect(button).not.toBeNull()
       return button as HTMLButtonElement
     }, { interval: 0 })
@@ -367,6 +419,73 @@ describe('App async owner guards', () => {
     flushSync(() => button.click())
     await vi.waitFor(() => expect(scaffold).toHaveBeenCalledOnce(), { interval: 0 })
     await vi.waitFor(() => expect(container?.textContent).toContain('当前会话关键信息'), { interval: 0 })
+  })
+
+  it('replaces a pending generic hint with the learner intention', async () => {
+    vi.resetModules()
+    const genericHint = deferred({ directionZh: '旧的泛化方向', keyPhrasesJa: ['古い'], sentenceStarterJa: '古いです', fullExampleJa: '古い結果です。' })
+    const intendedHint = deferred({ directionZh: '询问换成热茶是否加钱', keyPhrasesJa: ['温かいお茶'], sentenceStarterJa: '温かいお茶に', fullExampleJa: '温かいお茶に変更すると、追加料金はかかりますか？' })
+    const fetchHint = vi.fn().mockImplementationOnce(() => genericHint.promise).mockImplementationOnce(() => intendedHint.promise)
+    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }), fetchHint }))
+    vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([]) }))
+    installWaitingSessionSnapshot()
+    container = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App')
+    root = createRoot(container); flushSync(() => root.render(createElement(appModule.default)))
+    const hintButton = await vi.waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('[aria-label="怎么说，查看表达帮助"]')
+      expect(button).not.toBeNull()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    await flush(); flushSync(() => hintButton.click())
+    await vi.waitFor(() => expect(fetchHint).toHaveBeenCalledTimes(1), { interval: 0 })
+    const intention = container.querySelector<HTMLTextAreaElement>('textarea')
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+    flushSync(() => { setter?.call(intention, '我想问换成热茶要不要加钱'); intention?.dispatchEvent(new Event('input', { bubbles: true })) })
+    const submit = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('给我日语说法')) as HTMLButtonElement
+    expect(submit.disabled).toBe(false)
+    flushSync(() => submit.click())
+    await vi.waitFor(() => expect(fetchHint).toHaveBeenCalledTimes(2), { interval: 0 })
+    expect(fetchHint.mock.calls[1]?.[3]).toBe('我想问换成热茶要不要加钱')
+    genericHint.resolve({ directionZh: '旧的泛化方向', keyPhrasesJa: ['古い'], sentenceStarterJa: '古いです', fullExampleJa: '古い結果です。' })
+    intendedHint.resolve({ directionZh: '询问换成热茶是否加钱', keyPhrasesJa: ['温かいお茶'], sentenceStarterJa: '温かいお茶に', fullExampleJa: '温かいお茶に変更すると、追加料金はかかりますか？' })
+    await vi.waitFor(() => expect(container.textContent).toContain('温かいお茶に変更すると、追加料金はかかりますか？'), { interval: 0 })
+    expect(container.textContent).not.toContain('旧的泛化方向')
+    const snapshot = JSON.parse(window.sessionStorage.getItem('kaiwa.current-session.v1') ?? '{}') as { currentRound?: { expressionScaffoldLevel?: number } }
+    expect(snapshot.currentRound?.expressionScaffoldLevel).toBe(4)
+  })
+
+  it('drops a hint that returns after its sheet has closed without recording expression help', async () => {
+    vi.resetModules()
+    const delayedHint = deferred({ directionZh: '关闭后不得显示', keyPhrasesJa: ['古い'], sentenceStarterJa: '古いです', fullExampleJa: '古い結果です。' })
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }),
+      fetchHint: vi.fn().mockImplementation(() => delayedHint.promise),
+    }))
+    vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([]) }))
+    installWaitingSessionSnapshot()
+    container = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App')
+    root = createRoot(container); flushSync(() => root.render(createElement(appModule.default)))
+    const hintButton = await vi.waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('[aria-label="怎么说，查看表达帮助"]')
+      expect(button).not.toBeNull()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    await flush()
+    flushSync(() => hintButton.click())
+    const close = await vi.waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('.im-sheet-close-btn')
+      expect(button).not.toBeNull()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => close.click())
+    delayedHint.resolve({ directionZh: '关闭后不得显示', keyPhrasesJa: ['古い'], sentenceStarterJa: '古いです', fullExampleJa: '古い結果です。' })
+    await flush(); await flush()
+    expect(container.textContent).not.toContain('关闭后不得显示')
+    const snapshot = JSON.parse(window.sessionStorage.getItem('kaiwa.current-session.v1') ?? '{}') as { currentRound?: { expressionScaffoldLevel?: number } }
+    expect(snapshot.currentRound?.expressionScaffoldLevel).toBe(0)
   })
 })
 
@@ -565,7 +684,7 @@ describe('SessionComplete redo lifecycle', () => {
         openai: { available: false, model: 'mock', mockAllowed: true },
       }),
       submitFeedbackTask: vi.fn().mockResolvedValue({ taskToken: 'feedback-token', expiresAt: Date.now() + 86_400_000 }),
-      getFeedbackTask: vi.fn().mockResolvedValue({ status: 'complete', kind: 'conversation', result: { outcome: 'partial', outcomeEvidenceZh: '已完成一项沟通目标。', listeningFinding: null, expressionImprovement: null, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', directionZh: '保留请求并补充细节。' } } }),
+      getFeedbackTask: vi.fn().mockResolvedValue({ status: 'complete', kind: 'conversation', result: { outcome: 'partial', outcomeEvidenceZh: '已完成一项沟通目标。', listeningFinding: null, expressionImprovement: { turn: 1, userConfirmedJa: '前髪は残してください。', suggestedJa: '前髪を少し整えてください。', reasonZh: '补充具体程度。' }, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', directionZh: '保留请求并补充细节。' } } }),
       requestElevenLabsToken: vi.fn().mockResolvedValue('ready-token'),
       listPracticeAttempts: vi.fn().mockResolvedValue([]),
     }))
@@ -591,12 +710,33 @@ describe('SessionComplete redo lifecycle', () => {
     const appModule = await import('../../src/App')
     const root = activeRoot = createRoot(container)
     flushSync(() => root.render(createElement(appModule.default)))
+    const fullReview = await vi.waitFor(() => {
+      const details = container.querySelector<HTMLDetailsElement>('.complete-review-details')
+      expect(details).not.toBeNull()
+      return details as HTMLDetailsElement
+    }, { interval: 0 })
+    expect(fullReview.open).toBe(false)
+    const redoCard = container.querySelector<HTMLElement>('.retry-task-card')
+    expect(redoCard).not.toBeNull()
+    expect(redoCard!.compareDocumentPosition(fullReview) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    fullReview.querySelector('summary')?.click()
+    expect(fullReview.open).toBe(true)
+    const suggestedExpression = Array.from(fullReview.querySelectorAll('p[lang="ja"]')).find((node) => node.textContent?.includes('前髪を少し整えてください。'))
+    expect(suggestedExpression).not.toBeUndefined()
     const redoButton = await vi.waitFor(() => {
       const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('再练这个回合'))
       expect(button).toBeDefined()
       return button as HTMLButtonElement
     }, { interval: 0 })
     flushSync(() => redoButton.click())
+    const expressionHelp = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent === '看表达方向')
+      expect(button).toBeDefined()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => expressionHelp.click())
+    expect(container.textContent).toContain('保留请求并补充细节。')
+    expect(Array.from(container.querySelectorAll('button')).some((item) => item.textContent === '看表达方向')).toBe(false)
     const startButton = await vi.waitFor(() => {
       const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('开始回答'))
       expect(button).toBeDefined()

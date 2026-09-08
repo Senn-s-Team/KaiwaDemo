@@ -106,6 +106,7 @@ const HintRequestSchema = z.object({
   sessionToken: z.string().trim().min(1),
   history: z.array(ConversationMessageSchema).min(1).max(LIMITS.maxHistoryMessages),
   lastAssistantText: z.string().trim().min(1).max(LIMITS.maxAssistantCharacters),
+  intentionZh: z.string().trim().min(1).max(LIMITS.maxUserCharacters).optional(),
 }).strict()
 
 const KANA_REGEX = /[\u3040-\u309F\u30A0-\u30FF]/
@@ -236,6 +237,7 @@ export function parseConversationFeedbackResponse(
   value: unknown,
   turnRecords: ConversationFeedbackRequest['turnRecords'],
   scenario?: DynamicScenarioDefinition,
+  requirePerformance = false,
 ): ConversationFeedbackResponse {
   const parsed = ConversationFeedbackResponseSchema.safeParse(value)
   if (!parsed.success) {
@@ -243,6 +245,23 @@ export function parseConversationFeedbackResponse(
   }
 
   const { evidenceResults, evaluationVersion } = parsed.data
+  if (requirePerformance && !parsed.data.performance) {
+    throw new ValidationError('invalid_feedback_output', 'New feedback must include performance version 1.')
+  }
+  if (parsed.data.performance) {
+    for (const dimension of Object.values(parsed.data.performance.dimensions)) {
+      if (dimension.rating !== null && !dimension.evidence.some(evidence => evidence.role === 'user')) {
+        throw new ValidationError('invalid_feedback_output', 'Rated performance dimensions require user-confirmed evidence.')
+      }
+      for (const evidence of dimension.evidence) {
+        const record = turnRecords.find(item => item.turn === evidence.turn)
+        const source = evidence.role === 'assistant' ? record?.partnerPromptJa : record?.userConfirmed
+        if (!source || !source.includes(evidence.quoteJa)) {
+          throw new ValidationError('invalid_feedback_output', 'Performance evidence must quote its referenced real turn exactly.')
+        }
+      }
+    }
+  }
   if (scenario?.evidencePoints) {
     const ids = scenario.evidencePoints.map(point => point.id)
     if (evaluationVersion !== scenario.evaluationVersion || !evidenceResults

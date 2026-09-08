@@ -158,6 +158,7 @@ export interface HintRequest {
   sessionToken: string
   history: ConversationMessage[]
   lastAssistantText: string
+  intentionZh?: string
 }
 
 export interface HintResponse {

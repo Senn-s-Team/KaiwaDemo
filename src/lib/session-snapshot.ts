@@ -46,6 +46,19 @@ export interface SessionSnapshot {
   transcript: TranscriptText
 }
 
+function isPreviousAdvice(value: unknown): boolean {
+  if (value === undefined) return true
+  if (typeof value !== 'object' || value === null) return false
+  const advice = value as { expressionImprovement?: Record<string, unknown>; sourceSessionId?: unknown; sourceStartedAt?: unknown; viewed?: unknown }
+  const improvement = advice.expressionImprovement
+  return typeof advice.sourceSessionId === 'string' && advice.sourceSessionId.length > 0
+    && typeof advice.sourceStartedAt === 'number' && Number.isFinite(advice.sourceStartedAt)
+    && typeof advice.viewed === 'boolean'
+    && typeof improvement === 'object' && improvement !== null
+    && typeof improvement.turn === 'number' && Number.isInteger(improvement.turn) && improvement.turn >= 1 && improvement.turn <= 5
+    && typeof improvement.userConfirmedJa === 'string' && typeof improvement.suggestedJa === 'string' && improvement.suggestedJa.trim().length > 0 && typeof improvement.reasonZh === 'string'
+}
+
 function isSessionSnapshot(value: unknown): value is SessionSnapshot {
   if (typeof value !== 'object' || value === null) return false
   const candidate = value as Partial<SessionSnapshot>
@@ -69,6 +82,7 @@ function isSessionSnapshot(value: unknown): value is SessionSnapshot {
     && scenario.maxTurns === 5
     && typeof scenario.dynamicData === 'object'
     && scenario.dynamicData !== null
+    && isPreviousAdvice((scenario as SessionScenario).previousAdvice)
     && typeof transcript === 'object'
     && transcript !== null
     && typeof transcript.rawText === 'string'

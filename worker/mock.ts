@@ -42,6 +42,15 @@ export function createMockFeedback(request: ConversationFeedbackRequest, scenari
   ))
 
   return {
+    performance: {
+      version: 1,
+      dimensions: {
+        communicationAchievement: { rating: null, status: 'unobserved', reasonZh: 'mock 模式不生成沟通表现判断。', evidence: [] },
+        responseRelevance: { rating: null, status: 'unobserved', reasonZh: 'mock 模式不生成回应关联判断。', evidence: [] },
+        expressionClarity: { rating: null, status: 'unobserved', reasonZh: 'mock 模式不生成表达清晰判断。', evidence: [] },
+        clarificationRepair: { rating: null, status: 'unobserved', reasonZh: 'mock 模式不生成澄清修复判断。', evidence: [] },
+      },
+    },
     ...(scenario?.evidencePoints ? { evaluationVersion: scenario.evaluationVersion, evidenceResults: scenario.evidencePoints.map(point => ({pointId: point.id, status: 'insufficient_evidence' as const, evidence: []})) } : {}),
     outcome: 'insufficient_evidence',
     outcomeEvidenceZh: `“${target.userConfirmed}”是实际确认稿；mock 模式不据此虚构唯一目标已经完成。`,

@@ -5,11 +5,15 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { AlertCircle, ArrowRight, Keyboard, Lightbulb, MessageCircle, Mic, Pencil, Square, Target, X } from 'lucide-react'
-import type { Dispatch, RefObject, SetStateAction } from 'react'
+import { useCallback, useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from 'react'
+import { requestElevenLabsToken } from '../lib/api'
+import { releaseMicrophoneStream, shouldTeardownOnVisibility } from '../lib/audio-engine'
+import { coordinateRecordingSetup } from '../lib/recording-setup'
+import { RealtimeSttSession } from '../lib/stt'
 import { formatRecordingTime } from '../lib/audio-feedback'
 import type { ActiveSpeechAssistState } from '../lib/speech-assist'
 import type { InterruptionRecoveryAffordances, InterruptionRecoveryEvent, InterruptionRecoveryState, InterruptionRecoveryTarget } from '../lib/session'
-import type { AppPhase, ConversationMessage, HintResponse, ListeningScaffoldLevel, TranscriptText, UiError } from '../types'
+import type { AppPhase, ConversationMessage, HintResponse, ListeningScaffoldLevel, PreviousAdvice, TranscriptText, UiError } from '../types'
 
 interface ListeningRequestState {
   loading: boolean
@@ -75,6 +79,11 @@ export interface ActiveSessionModel {
   showOriginalTranscript: boolean
   inlineError: string
   canConfirmTranscript: boolean
+  sttAvailable: boolean
+  sttModel: string
+  ttsAvailable: boolean
+  reviewAudioNotice: string
+  previousAdvice?: PreviousAdvice
 }
 
 export interface ActiveSessionActions {
@@ -93,18 +102,21 @@ export interface ActiveSessionActions {
   updateFinalText(value: string): void
   setDockTextValue: Dispatch<SetStateAction<string>>
   openTranscriptSheet(): void
-  handleRequestHint(): Promise<void>
+  handleRequestHint(intentionZh?: string): Promise<void>
   setShowHintSheet: Dispatch<SetStateAction<boolean>>
   stopRecording(): Promise<void>
   skipFailedTts(): void
   retryFailedStep(): Promise<void>
   resetSession(): void
   stopAiPlayback(): void
+  releaseAiPlayback(): void
+  playReviewAudio(text: string): Promise<void>
   closeTranscriptSheet(): void
   rerecord(): Promise<void>
   confirmTranscript(): Promise<void>
   setInlineError: Dispatch<SetStateAction<string>>
   toggleOriginalTranscript(): void
+  onPreviousAdviceViewed?(): void
 }
 
 export interface ActiveSessionProps {
@@ -128,8 +140,119 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
     getListeningLevel, replayPartnerMessage, advanceListeningScaffold, setDockInputMode, startRecording, enterTextInput, enterLifecycleTextInput,
     updateFinalText, setDockTextValue, openTranscriptSheet, handleRequestHint, setShowHintSheet, stopRecording,
     skipFailedTts, retryFailedStep, resetSession, stopAiPlayback, closeTranscriptSheet, rerecord, confirmTranscript,
-    setInlineError, toggleOriginalTranscript,
+    setInlineError, toggleOriginalTranscript, releaseAiPlayback, playReviewAudio, onPreviousAdviceViewed,
   } = actions
+  const [intentionZh, setIntentionZh] = useState('')
+  const [intentionRecording, setIntentionRecording] = useState(false)
+  const [intentionConnected, setIntentionConnected] = useState(false)
+  const [intentionError, setIntentionError] = useState('')
+  const [intentionSubmitted, setIntentionSubmitted] = useState(false)
+  const [showPreviousAdvice, setShowPreviousAdvice] = useState(false)
+  const intentionSttRef = useRef<RealtimeSttSession | null>(null)
+  const intentionAbortRef = useRef<AbortController | null>(null)
+  const intentionGenerationRef = useRef(0)
+  const intentionOwnsMicRef = useRef(false)
+  const intentionBaseRef = useRef('')
+  const intentionSessionRef = useRef<RealtimeSttSession | null>(null)
+  const intentionStoppingRef = useRef<RealtimeSttSession | null>(null)
+  const intentionConnectedRef = useRef<RealtimeSttSession | null>(null)
+  const previousTurnRef = useRef(turn)
+  const cancelIntentionRecording = useCallback((session = intentionSttRef.current, controller = intentionAbortRef.current) => {
+    if (!session || intentionSttRef.current !== session) return
+    intentionGenerationRef.current += 1
+    controller?.abort()
+    session.close()
+    if (intentionOwnsMicRef.current) releaseMicrophoneStream()
+    intentionOwnsMicRef.current = false
+    intentionAbortRef.current = null
+    intentionSttRef.current = null
+    intentionSessionRef.current = null
+    intentionStoppingRef.current = null
+    intentionConnectedRef.current = null
+    intentionBaseRef.current = ''
+    setIntentionRecording(false)
+    setIntentionConnected(false)
+  }, [])
+  useEffect(() => cancelIntentionRecording, [cancelIntentionRecording])
+  useEffect(() => {
+    const stop = () => { if (document.hidden && shouldTeardownOnVisibility(true)) cancelIntentionRecording() }
+    document.addEventListener('visibilitychange', stop)
+    return () => document.removeEventListener('visibilitychange', stop)
+  }, [cancelIntentionRecording])
+  useEffect(() => {
+    const stop = () => cancelIntentionRecording()
+    window.addEventListener('pagehide', stop)
+    return () => window.removeEventListener('pagehide', stop)
+  }, [cancelIntentionRecording])
+  useEffect(() => {
+    if (previousTurnRef.current === turn) return
+    previousTurnRef.current = turn
+    cancelIntentionRecording()
+    setIntentionZh('')
+    setIntentionSubmitted(false)
+    setShowPreviousAdvice(false)
+  }, [cancelIntentionRecording, turn])
+  useEffect(() => { if (!showHintSheet) cancelIntentionRecording() }, [cancelIntentionRecording, showHintSheet])
+  const startIntentionRecording = useCallback(async () => {
+    if (!model.sttAvailable || !model.sttModel || phase === 'recording' || intentionSttRef.current) return
+    releaseAiPlayback()
+    const generation = ++intentionGenerationRef.current
+    const session = new RealtimeSttSession()
+    const controller = new AbortController()
+    intentionSttRef.current = session
+    intentionSessionRef.current = session
+    intentionConnectedRef.current = null
+    intentionBaseRef.current = intentionZh.trim() ? `${intentionZh.trim()} ` : ''
+    intentionAbortRef.current = controller
+    intentionOwnsMicRef.current = true
+    setIntentionError('')
+    setIntentionRecording(true)
+    setIntentionConnected(false)
+    try {
+      await coordinateRecordingSetup({
+        acquireToken: () => requestElevenLabsToken('realtime_scribe', controller.signal),
+        isCancelled: () => controller.signal.aborted || generation !== intentionGenerationRef.current,
+        releaseOnCancelled: false,
+        connectStt: async (token) => {
+          await session.start(token, model.sttModel, { onPartial: (text) => { if (generation === intentionGenerationRef.current && intentionSttRef.current === session && !document.hidden) setIntentionZh(`${intentionBaseRef.current}${text}`.slice(0, 500)) }, onConnectionState: () => undefined, onAudioLevel: () => undefined }, 'zh')
+          if (generation === intentionGenerationRef.current && intentionSttRef.current === session) {
+            intentionConnectedRef.current = session
+            setIntentionConnected(true)
+          }
+        },
+      })
+    } catch (error) {
+      if (generation === intentionGenerationRef.current && !controller.signal.aborted) setIntentionError(error instanceof Error ? error.message : '中文语音暂时无法启动。')
+      cancelIntentionRecording(session, controller)
+    }
+  }, [cancelIntentionRecording, intentionZh, model.sttAvailable, model.sttModel, phase, releaseAiPlayback])
+  const stopIntentionRecording = useCallback(async () => {
+    const session = intentionSttRef.current
+    const generation = intentionGenerationRef.current
+    if (!session || intentionSessionRef.current !== session || intentionStoppingRef.current) return
+    if (intentionConnectedRef.current !== session) {
+      cancelIntentionRecording(session)
+      return
+    }
+    intentionStoppingRef.current = session
+    try {
+      const text = await session.stop()
+      if (generation === intentionGenerationRef.current && intentionSttRef.current === session && text.trim() && !document.hidden) setIntentionZh(`${intentionBaseRef.current}${text.trim()}`.slice(0, 500))
+    } catch (error) {
+      if (generation === intentionGenerationRef.current && intentionSttRef.current === session) setIntentionError(error instanceof Error ? error.message : '中文语音识别失败。')
+    } finally {
+      if (generation === intentionGenerationRef.current && intentionSttRef.current === session) cancelIntentionRecording(session)
+    }
+  }, [cancelIntentionRecording])
+  const submitIntentionHint = (): void => {
+    const value = intentionZh.trim()
+    if (!value) return
+    setIntentionSubmitted(true)
+    void handleRequestHint(value)
+  }
+  const startJapaneseRecording = (): void => {
+    void startRecording()
+  }
   return (
           <section className="im-chat-app" aria-label="会话">
             {/* 顶部极简 IM 导航栏 */}
@@ -146,6 +269,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                 </div>
               </div>
               <div className="im-top-actions">
+                {model.previousAdvice && (phase === 'waiting_user' || phase === 'round_complete') && <button className="im-icon-pill-btn" type="button" onClick={() => { if (!showPreviousAdvice) onPreviousAdviceViewed?.(); setShowPreviousAdvice((shown) => !shown) }} aria-label="查看上次建议">上次建议</button>}
                 <button
                   className={`im-icon-pill-btn ${showGoalsSheet ? 'is-active' : ''}`}
                   type="button"
@@ -190,6 +314,16 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                   >
                     关闭
                   </button>
+                </div>
+              )}
+              {showPreviousAdvice && model.previousAdvice && (
+                <div className="im-notice-banner info">
+                  <strong>上次建议</strong>
+                  <p lang="ja">原句：{model.previousAdvice.expressionImprovement.userConfirmedJa}</p>
+                  <p lang="ja">参考：{model.previousAdvice.expressionImprovement.suggestedJa}</p>
+                  <p>{model.previousAdvice.expressionImprovement.reasonZh}</p>
+                  <p>来源：{new Date(model.previousAdvice.sourceStartedAt).toLocaleDateString('zh-CN')}</p>
+                  <button className="text-button" type="button" disabled={intentionRecording || phase === 'recording' || !model.ttsAvailable} onClick={() => void playReviewAudio(model.previousAdvice!.expressionImprovement.suggestedJa)}>听一听</button>
                 </div>
               )}
 
@@ -356,6 +490,12 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
 
             {/* 单行极简 IM 底部控制栏 */}
             <footer className="im-bottom-dock" aria-label="操作栏">
+              {hintData && !showHintSheet && (phase === 'waiting_user' || phase === 'round_complete' || phase === 'recording') && (
+                <button className="im-dock-hint-preview" type="button" onClick={() => setShowHintSheet(true)}>
+                  <Lightbulb size={15} />
+                  <span>{hintLevel >= 4 ? hintData.fullExampleJa : hintLevel >= 3 ? hintData.sentenceStarterJa : hintLevel >= 2 ? hintData.keyPhrasesJa.join(' / ') : hintData.directionZh}</span>
+                </button>
+              )}
               {activeError ? (
                 <div className="im-action-row" style={{ width: '100%' }}>
                   {(activeError.recovery === 'text_input' || interruptionRecoveryAffordances.textInput) && <button className="secondary-button" type="button" onClick={recoveryTarget === 'stt' ? enterLifecycleTextInput : enterTextInput}>改用文字</button>}
@@ -379,7 +519,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                     <button
                       className="im-dock-main-btn"
                       type="button"
-                      onClick={() => void startRecording()}
+                      onClick={startJapaneseRecording}
                       disabled={!online}
                     >
                       <MicIcon />
@@ -418,7 +558,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
 
                   {/* 提示按钮 */}
                   <button
-                    className="im-dock-icon-btn"
+                    className="im-dock-icon-btn im-dock-hint-btn"
                     type="button"
                     onClick={() => {
                       if (!hintData) {
@@ -426,10 +566,11 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                       }
                       setShowHintSheet(true)
                     }}
-                    title="不知道怎么说"
-                    aria-label="不知道怎么说，查看表达帮助"
+                    title="怎么说"
+                    aria-label="怎么说，查看表达帮助"
                   >
                     <Lightbulb size={18} />
+                    <span>怎么说</span>
                   </button>
                 </>
               ) : phase === 'recording' ? (
@@ -569,14 +710,41 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                 <div className="im-bottom-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className="im-sheet-drag-handle" />
                   <div className="im-sheet-header">
-                    <h3 className="im-sheet-title"><Lightbulb size={18} /> 不知道怎么说</h3>
+                    <h3 className="im-sheet-title"><Lightbulb size={18} /> 怎么说</h3>
                     <button className="im-sheet-close-btn" type="button" onClick={() => setShowHintSheet(false)}><X size={18} /></button>
                   </div>
                   <div className="im-sheet-content">
+                    <label className="im-hint-intention-field">
+                      <span>你想表达什么？（可选）</span>
+                      <textarea
+                        value={intentionZh}
+                        onChange={(event) => setIntentionZh(event.target.value)}
+                        maxLength={500}
+                        readOnly={intentionRecording}
+                        placeholder="用中文说说你现在想表达的意思"
+                        rows={2}
+                      />
+                    </label>
+                    {model.sttAvailable && <button className={`secondary-button ${intentionRecording ? 'is-recording' : ''}`} type="button" disabled={phase === 'recording'} onClick={() => void (intentionRecording ? stopIntentionRecording() : startIntentionRecording())}>{intentionRecording ? (intentionConnected ? '说完了，返回表达帮助' : '正在连接，取消') : '中文语音输入'}</button>}
+                    {intentionError && <p className="im-inline-error" role="alert">{intentionError} 已保留输入内容。</p>}
+                    <button
+                      className="secondary-button im-hint-intention-submit"
+                      type="button"
+                      disabled={!intentionZh.trim() || intentionRecording}
+                      onClick={submitIntentionHint}
+                    >
+                      给我日语说法 <ArrowRight size={14} />
+                    </button>
                     {isLoadingHint && !hintData && (
                       <p style={{ textAlign: 'center', color: 'var(--muted)', padding: '20px 0' }}>正在设计提示...</p>
                     )}
-                    {hintData && (
+                    {hintData && intentionSubmitted ? (
+                      <div className="im-hint-sheet-tier is-intent">
+                        <strong>完整说法</strong>
+                        <p style={{ margin: 0 }} lang="ja">{hintData.fullExampleJa}</p>
+                        <button className="text-button" type="button" disabled={intentionRecording || phase === 'recording' || !model.ttsAvailable} onClick={() => void playReviewAudio(hintData.fullExampleJa)}>听一听</button>
+                      </div>
+                    ) : hintData && (
                       <>
                         <div className="im-hint-sheet-tier">
                           <strong>① 思考方向</strong>
@@ -598,10 +766,12 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                           <div className="im-hint-sheet-tier">
                             <strong>④ 完整例句</strong>
                             <p style={{ margin: 0 }} lang="ja">{hintData.fullExampleJa}</p>
+                            <button className="text-button" type="button" disabled={intentionRecording || phase === 'recording' || !model.ttsAvailable} onClick={() => void playReviewAudio(hintData.fullExampleJa)}>听一听</button>
                           </div>
                         )}
                       </>
                     )}
+                    {model.reviewAudioNotice && <p className="im-inline-error" role="status">{model.reviewAudioNotice}</p>}
                   </div>
                   <div className="im-sheet-footer">
                     {hintLevel < 4 && hintData && (
@@ -610,7 +780,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                         type="button"
                         onClick={() => void handleRequestHint()}
                       >
-                        再多给一点帮助 <ArrowRight size={14} />
+                        {hintLevel === 1 ? '查看关键词' : hintLevel === 2 ? '看句子开头' : '看完整说法'} <ArrowRight size={14} />
                       </button>
                     )}
                     <button

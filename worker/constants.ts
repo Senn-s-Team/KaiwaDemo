@@ -15,7 +15,7 @@ export const LIMITS = {
   maxScenarioDraftClarifications: 1,
   scenarioDraftOutputTokens: 2_000,
   hintOutputTokens: 500,
-  feedbackOutputTokens: 2_000,
+  feedbackOutputTokens: 2_800,
   redoFeedbackOutputTokens: 500,
   scenarioTokenTtlMs: 2 * 60 * 60 * 1_000,
   sessionTokenTtlMs: 1 * 60 * 60 * 1_000,

@@ -96,12 +96,13 @@ describe('dynamic scenario prompts', () => {
     expect(prompt).toContain(scenario.closingRules[0])
   })
 
-  it('keeps safety, fact-boundary, and natural upward-pull instructions', () => {
+  it('keeps fact boundaries and clarifies in role while deferring corrections until feedback', () => {
     const prompt = buildDynamicDeveloperPrompt(scenario, 3)
     expect(prompt).toContain('ユーザーが確認したSTT転写テキスト')
     expect(prompt).toContain('初期アンカー')
     expect(prompt).toContain('低リスクな細部を一つ')
-    expect(prompt).toContain('自然で一段上の口語表現')
+    expect(prompt).toContain('役割内で一つの確認質問')
+    expect(prompt).toContain('事後フィードバックに任せ')
     expect(prompt).toContain('実行できない外部確認や将来の対応を約束しない')
   })
 
@@ -134,6 +135,18 @@ describe('dynamic scenario prompts', () => {
     expect(prompt).toContain('「支架なし」「表現支架未使用」')
     expect(prompt).toContain('speechAssistUsed=false')
     expect(prompt).toContain('他フィールド以外の支架もなかった証拠にはならない')
+  })
+
+  it('uses the optional learner intention while keeping the scenario facts as the boundary', () => {
+    const prompt = buildHintPrompt(
+      scenario,
+      scenario.firstLine,
+      [{ role: 'assistant', text: scenario.firstLine }],
+      '我想确认改到周五下午三点是否可以',
+    )
+    expect(prompt).toContain('我想确认改到周五下午三点是否可以')
+    expect(prompt).toContain('場面の事実')
+    expect(prompt).toContain('約束、要求を追加してはいけません')
   })
 
   it('adds the exact versioned evidence fields to feedback output examples only for rubric scenarios', () => {

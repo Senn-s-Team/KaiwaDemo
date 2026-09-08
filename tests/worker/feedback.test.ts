@@ -144,6 +144,15 @@ async function feedbackRequest(): Promise<ConversationFeedbackRequest> {
 }
 
 const validFeedback = (records: FeedbackTurnRecord[]): ConversationFeedbackResponse => ({
+  performance: {
+    version: 1,
+    dimensions: {
+      communicationAchievement: { rating: 3, status: 'observed', reasonZh: '确认稿完成了入住诉求。', evidence: [{ turn: 1, role: 'user', quoteJa: records[0]!.userConfirmed }] },
+      responseRelevance: { rating: 3, status: 'observed', reasonZh: '确认稿回应了当前办理入住的话题。', evidence: [{ turn: 1, role: 'user', quoteJa: records[0]!.userConfirmed }] },
+      expressionClarity: { rating: 2, status: 'observed', reasonZh: '确认稿的姓名和请求清楚。', evidence: [{ turn: 1, role: 'user', quoteJa: records[0]!.userConfirmed }] },
+      clarificationRepair: { rating: null, status: 'not_needed', reasonZh: '本场没有需要修复的澄清。', evidence: [] },
+    },
+  },
   outcome: 'completed',
   outcomeEvidenceZh: `确认稿“${records[0]!.userConfirmed}”明确给出了姓名并提出入住请求。`,
   listeningFinding: {
@@ -324,5 +333,23 @@ describe('versioned evidence validation', () => {
     ]) expect(() => parseConversationFeedbackResponse(changed, records, rubricScenario)).toThrow()
     expect(() => parseConversationFeedbackResponse(feedback, records, scenario)).toThrow()
     expect(parseConversationFeedbackResponse({ ...feedback, evidenceResults: [{ pointId: scenario.coreGoal.id, status: 'not_observed', evidence: [] }] }, records, rubricScenario).evidenceResults?.[0]?.status).toBe('not_observed')
+  })
+
+  it('keeps legacy feedback readable while requiring grounded performance for new generation', async () => {
+    const { parseConversationFeedbackResponse } = await import('../../worker/validation')
+    const records = [turnRecord(1), turnRecord(2, { listeningScaffoldLevel: 1, ttsReplayCount: 1 })]
+    const legacy = validFeedback(records)
+    delete legacy.performance
+    expect(parseConversationFeedbackResponse(legacy, records, scenario)).toEqual(legacy)
+    expect(() => parseConversationFeedbackResponse(legacy, records, scenario, true)).toThrow()
+
+    const grounded = validFeedback(records)
+    expect(parseConversationFeedbackResponse(grounded, records, scenario, true)).toEqual(grounded)
+    const forged = structuredClone(grounded)
+    forged.performance!.dimensions.responseRelevance.evidence[0] = { turn: 1, role: 'assistant', quoteJa: '架空の相手发话' }
+    expect(() => parseConversationFeedbackResponse(forged, records, scenario, true)).toThrow()
+    const assistantOnly = structuredClone(grounded)
+    assistantOnly.performance!.dimensions.expressionClarity.evidence = [{ turn: 1, role: 'assistant', quoteJa: records[0]!.partnerPromptJa }]
+    expect(() => parseConversationFeedbackResponse(assistantOnly, records, scenario, true)).toThrow()
   })
 })

@@ -5,6 +5,7 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import type { ListeningScaffoldResponse } from '../shared/listening-scaffold'
+import type { ConversationPerformance } from '../shared/feedback-task'
 
 export type AppPhase =
   | 'loading_config'
@@ -83,6 +84,8 @@ export interface SessionScenario {
   scenarioToken: string
   practiceToken?: string
   dynamicData: DynamicScenarioData
+  /** 本地复练提示，绝不发送到动态场景或模型请求。 */
+  previousAdvice?: PreviousAdvice
 }
 
 export interface ScenarioDraftClarification {
@@ -127,6 +130,13 @@ export interface ExpressionImprovement {
   reasonZh: string
 }
 
+export interface PreviousAdvice {
+  expressionImprovement: ExpressionImprovement
+  sourceSessionId: string
+  sourceStartedAt: number
+  viewed: boolean
+}
+
 export interface RedoTask {
   turn: number
   partnerPromptJa: string
@@ -143,6 +153,7 @@ export interface EvidenceResult {
 export interface ConversationFeedbackResponse {
   evaluationVersion?: number
   evidenceResults?: EvidenceResult[]
+  performance?: ConversationPerformance
   outcome: FeedbackOutcome
   outcomeEvidenceZh: string
   listeningFinding: ListeningFinding | null

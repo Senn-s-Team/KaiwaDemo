@@ -275,6 +275,20 @@ export function SessionComplete({
     not_completed: '目标未完成',
     insufficient_evidence: '证据不足',
   }
+  const performanceLabels = {
+    communicationAchievement: { title: '沟通达成', anchors: ['已尝试但目标未完成', '完成部分诉求', '核心诉求完成，必要细节未确认', '核心诉求与必要条件均确认'] },
+    responseRelevance: { title: '回应贴合', anchors: ['偏离问题或误解关键意思', '接住部分内容，漏掉关键条件', '回应主要问题，少量信息不明确', '回应问题及相关关键条件'] },
+    expressionClarity: { title: '表达清晰', anchors: ['意思难以确定', '能猜出意思，歧义影响沟通', '意思清楚，有局部不自然', '信息清楚，表达适合当前关系'] },
+    clarificationRepair: { title: '澄清修复', anchors: ['已有误解，尝试后仍未解决', '尝试澄清，问题仍不明确', '通过重说或确认解决问题', '准确指出不确定处并完成确认'] },
+  } as const
+  const helpFacts = {
+    listening: rounds.filter(round => round.listeningScaffoldLevel > 0 || round.ttsReplayCount > 0).length,
+    expression: rounds.filter(round => round.expressionScaffoldLevel > 0 || round.speechAssistEvents.some(event => event.displayed && event.continuationSuggestionJa)).length,
+    text: rounds.filter(round => round.inputMode === 'text').length,
+    voice: rounds.filter(round => round.inputMode === 'stt').length,
+    rerecords: rounds.reduce((total, round) => total + round.rerecordCount, 0),
+    edited: rounds.filter(round => round.transcriptModified || round.transcriptModificationCount > 0).length,
+  }
 
   return (
     <div className="complete-view">
@@ -282,48 +296,27 @@ export function SessionComplete({
       <h1 id="conversation-heading">{reveal.titleZh}</h1>
       <p className="reveal-summary">{reveal.summaryZh}</p>
       {audioNotice && <p className="network-notice" role="status">{audioNotice}</p>}
-      {practiceComparison && feedbackStatus === 'success' && <section className="practice-comparison" aria-labelledby="practice-comparison-heading">
-        <h2 id="practice-comparison-heading">本场景表现</h2>
-        {practiceComparison.current.validEvaluation ? <>
-          <p>{practiceComparison.baselineAttempt
-            ? `与 ${new Date(practiceComparison.baselineAttempt.report.startedAt).toLocaleDateString('zh-CN')} 的首次完整有效练习比较。`
-            : report.completion.closedNaturally ? '已记录本次表现。再次完整练习同一场景后，可与首次有效记录比较。' : '本次提前结束，仅展示已观察到的表现。'}</p>
-          <details className="practice-details">
-            <summary>查看详细统计</summary>
-            <table className="practice-comparison-table">
-              <thead><tr><th scope="col">沟通证据点</th>{practiceComparison.baseline && <th scope="col">首次</th>}<th scope="col">本次</th></tr></thead>
-              <tbody>
-                <tr><th scope="row">已完成</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.completed}/{practiceComparison.baseline.total}</td>}<td>{practiceComparison.current.completed}/{practiceComparison.current.total}</td></tr>
-                <tr><th scope="row">听力未查看帮助</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.listeningIndependent}</td>}<td>{practiceComparison.current.listeningIndependent}</td></tr>
-                <tr><th scope="row">表达未查看帮助</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.expressionIndependent}</td>}<td>{practiceComparison.current.expressionIndependent}</td></tr>
-                <tr><th scope="row">独立性证据不足</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.independenceUnknown}</td>}<td>{practiceComparison.current.independenceUnknown}</td></tr>
-              </tbody>
-            </table>
-            <p className="practice-storage-note">帮助统计仅针对已完成的证据点。编辑、重录、文字输入、音频证据缺失，或无法排除先前表达帮助的影响时，独立性保留为证据不足。</p>
-            <p className="practice-storage-note">本次未观察 {practiceComparison.current.notObserved} 项，完成情况证据不足 {practiceComparison.current.insufficientEvidence} 项。原场景复练反映熟练情况，不代表整体日语水平。</p>
-          </details>
-        </> : <p>本次缺少可比较的评价证据，保留对话事实与复盘。</p>}
-        {scenario.dynamicData.evidencePoints && feedbackData?.evidenceResults && <ul className="practice-evidence-list">
-          {scenario.dynamicData.evidencePoints.map((point) => {
-            const result = feedbackData.evidenceResults?.find((item) => item.pointId === point.id)
-            const labels = { completed: '已完成', not_completed: '未完成', not_observed: '未观察', insufficient_evidence: '证据不足' }
-            return <li key={point.id}><strong>{point.titleZh}</strong><span>{result ? labels[result.status] : '证据不足'}</span>
-              {result?.evidence.map((item, index) => <p key={`${item.turn}-${index}`} lang="ja">第 {item.turn} 轮：「{item.quoteJa}」</p>)}
-            </li>
-          })}
-        </ul>}
-      </section>}
-
       {feedbackStatus === 'loading' && <div className="feedback-loading-card"><span className="pulse-dot" /><p>正在整理本场反馈...</p></div>}
       {feedbackStatus === 'error' && <div className="feedback-error-card" role="alert"><p>{feedbackErrorMsg}</p><button className="primary-button" type="button" onClick={onRetryFeedback}>重新生成</button></div>}
       {feedbackStatus === 'success' && feedbackData && (
         <div className="feedback-content">
-          <section className="feedback-section goal-summary-card"><h2>这次收获</h2><p><strong>{outcomeLabel[feedbackData.outcome]}</strong></p></section>
-          <section className="feedback-section"><h2>做到这一点的证据</h2><p>{feedbackData.outcomeEvidenceZh}</p></section>
-          <section className="feedback-section"><h2>听力收获</h2>{feedbackData.listeningFinding ? <><p>第 {feedbackData.listeningFinding.turn} 轮：{feedbackData.listeningFinding.findingZh}</p><p>{feedbackData.listeningFinding.evidenceZh}</p></> : <p>本场没有足够证据形成听力发现。</p>}</section>
-          <section className="feedback-section"><h2>下次可以这样说</h2>{feedbackData.expressionImprovement ? <><p lang="ja">{feedbackData.expressionImprovement.userConfirmedJa}</p><p lang="ja">建议：{feedbackData.expressionImprovement.suggestedJa}</p><p>{feedbackData.expressionImprovement.reasonZh}</p></> : <p>本场没有必须改写的表达。</p>}</section>
+          <section className="feedback-section goal-summary-card"><h2>这次收获</h2><p><strong>{outcomeLabel[feedbackData.outcome]}</strong></p><p>{feedbackData.outcomeEvidenceZh}</p></section>
+          {feedbackData.performance && <section className="feedback-section performance-section" aria-labelledby="performance-heading">
+            <h2 id="performance-heading">四维会后评价</h2>
+            <p className="practice-storage-note">等级描述本场对话表现；没有证据时保留为未观察，不合成总分。</p>
+            {practiceComparison?.performanceBaselineAttempt && <p className="practice-storage-note">比较基线：{new Date(practiceComparison.performanceBaselineAttempt.report.startedAt).toLocaleDateString('zh-CN')} 的首次完整有效练习。</p>}
+            <ul className="performance-list">{(Object.keys(performanceLabels) as (keyof typeof performanceLabels)[]).map((key) => {
+              const dimension = feedbackData.performance!.dimensions[key]
+              const label = performanceLabels[key]
+              const status = dimension.status === 'not_needed' ? '无需澄清' : dimension.status === 'unobserved' ? '未观察' : `等级 ${dimension.rating}：${label.anchors[dimension.rating!]}`
+              const baseline = practiceComparison?.performanceBaseline?.dimensions[key]
+              const comparison = baseline === undefined ? null : baseline === null || dimension.rating === null ? '本维度不可比较' : `比较：基线 ${baseline} · 本次 ${dimension.rating}`
+              return <li key={key}><strong>{label.title}</strong><span>{status}</span><p>{dimension.reasonZh}</p>{comparison && <p>{comparison}</p>}{dimension.evidence.map((item, index) => <p key={`${item.turn}-${item.role}-${index}`} lang="ja">第 {item.turn} 轮 {item.role === 'assistant' ? '相手' : '我'}：「{item.quoteJa}」</p>)}</li>
+            })}</ul>
+            <p className="practice-storage-note">程序记录：听力帮助 {helpFacts.listening} 轮，表达帮助 {helpFacts.expression} 轮，语音输入 {helpFacts.voice} 轮，文字输入 {helpFacts.text} 轮，重录 {helpFacts.rerecords} 次，确认稿编辑 {helpFacts.edited} 轮。</p>
+          </section>}
           <section className="feedback-section retry-task-card">
-            <h2>再练一个关键回合</h2>
+            <h2>把这一句再说顺一点</h2>
             <p lang="ja"><strong>这次回答：</strong>{feedbackData.redoTask.firstConfirmedJa}</p>
             {redoState === 'idle' && <div className="retry-actions"><button className="primary-button" type="button" onClick={startRedo}><Volume2 size={16} /> 再练这个回合</button></div>}
             {redoState === 'ready' && <div className="retry-actions"><button className="primary-button" type="button" onClick={() => void startRedoRecording()}><Mic size={16} /> 开始回答</button><button className="text-button" type="button" onClick={() => { setRedoInputMode('text'); setRedoState('confirming') }}>改用文字</button></div>}
@@ -340,7 +333,7 @@ export function SessionComplete({
                       {redoScaffoldLoading ? '正在获取关键信息…' : nextListeningAction(redoListeningLevel)}
                     </button>
                   )}
-                  <button className="text-button" type="button" onClick={() => setRedoExpressionLevel((level) => level === 4 ? 4 : (level + 1) as 1 | 2 | 3 | 4)}>再多给一点表达帮助</button>
+                  {redoExpressionLevel === 0 && <button className="text-button" type="button" onClick={() => setRedoExpressionLevel(1)}>看表达方向</button>}
                 </div>
                 {redoScaffoldError && <p className="im-listening-error" role="alert">{redoScaffoldError} 未显示新帮助，可重试。</p>}
                 {redoListeningLevel >= 2 && effectiveRedoScaffold && (
@@ -375,6 +368,42 @@ export function SessionComplete({
             {redoError && <p className="inline-error" role="alert">{redoError}</p>}
             {redoState === 'complete' && redoResult && <div className="retry-completed-panel"><p>{redoResult.comparisonZh}</p><p lang="ja"><strong>参考表达：</strong>{redoResult.referenceExpressionJa}</p><button className="text-button" type="button" onClick={startRedo}>再做一次</button></div>}
           </section>
+          <details className="complete-review-details">
+            <summary>查看完整复盘</summary>
+            {practiceComparison && <section className="practice-comparison" aria-labelledby="practice-comparison-heading">
+              <h2 id="practice-comparison-heading">本场景表现</h2>
+              {practiceComparison.current.validEvaluation ? <>
+                <p>{practiceComparison.baselineAttempt
+                  ? `与 ${new Date(practiceComparison.baselineAttempt.report.startedAt).toLocaleDateString('zh-CN')} 的首次完整有效练习比较。`
+                  : report.completion.closedNaturally ? '已记录本次表现。再次完整练习同一场景后，可与首次有效记录比较。' : '本次提前结束，仅展示已观察到的表现。'}</p>
+                <details className="practice-details">
+                  <summary>查看详细统计</summary>
+                  <table className="practice-comparison-table">
+                    <thead><tr><th scope="col">沟通证据点</th>{practiceComparison.baseline && <th scope="col">首次</th>}<th scope="col">本次</th></tr></thead>
+                    <tbody>
+                      <tr><th scope="row">已完成</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.completed}/{practiceComparison.baseline.total}</td>}<td>{practiceComparison.current.completed}/{practiceComparison.current.total}</td></tr>
+                      <tr><th scope="row">听力未查看帮助</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.listeningIndependent}</td>}<td>{practiceComparison.current.listeningIndependent}</td></tr>
+                      <tr><th scope="row">表达未查看帮助</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.expressionIndependent}</td>}<td>{practiceComparison.current.expressionIndependent}</td></tr>
+                      <tr><th scope="row">独立性证据不足</th>{practiceComparison.baseline && <td>{practiceComparison.baseline.independenceUnknown}</td>}<td>{practiceComparison.current.independenceUnknown}</td></tr>
+                    </tbody>
+                  </table>
+                  <p className="practice-storage-note">帮助统计仅针对已完成的证据点。编辑、重录、文字输入、音频证据缺失，或无法排除先前表达帮助的影响时，独立性保留为证据不足。</p>
+                  <p className="practice-storage-note">本次未观察 {practiceComparison.current.notObserved} 项，完成情况证据不足 {practiceComparison.current.insufficientEvidence} 项。原场景复练反映熟练情况，不代表整体日语水平。</p>
+                </details>
+              </> : <p>本次缺少可比较的评价证据，保留对话事实与复盘。</p>}
+            </section>}
+            {scenario.dynamicData.evidencePoints && feedbackData.evidenceResults && <section className="feedback-section"><h2>证据点</h2><ul className="practice-evidence-list">
+              {scenario.dynamicData.evidencePoints.map((point) => {
+                const result = feedbackData.evidenceResults?.find((item) => item.pointId === point.id)
+                const labels = { completed: '已完成', not_completed: '未完成', not_observed: '未观察', insufficient_evidence: '证据不足' }
+                return <li key={point.id}><strong>{point.titleZh}</strong><span>{result ? labels[result.status] : '证据不足'}</span>
+                  {result?.evidence.map((item, index) => <p key={`${item.turn}-${index}`} lang="ja">第 {item.turn} 轮：「{item.quoteJa}」</p>)}
+                </li>
+              })}
+            </ul></section>}
+            <section className="feedback-section"><h2>听力收获</h2>{feedbackData.listeningFinding ? <><p>第 {feedbackData.listeningFinding.turn} 轮：{feedbackData.listeningFinding.findingZh}</p><p>{feedbackData.listeningFinding.evidenceZh}</p></> : <p>本场没有足够证据形成听力发现。</p>}</section>
+            <section className="feedback-section"><h2>下次可以这样说</h2>{feedbackData.expressionImprovement ? <><p lang="ja">{feedbackData.expressionImprovement.userConfirmedJa}</p><p lang="ja">建议：{feedbackData.expressionImprovement.suggestedJa}</p><p>{feedbackData.expressionImprovement.reasonZh}</p></> : <p>本场没有必须改写的表达。</p>}</section>
+          </details>
         </div>
       )}
 

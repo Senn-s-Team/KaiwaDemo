@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   parseConversationFeedbackRequest,
+  parseHintRequest,
   parseListeningScaffoldModelOutput,
   parseListeningScaffoldRequest,
   parseRedoFeedbackRequest,
@@ -107,6 +108,19 @@ describe('worker request validation', () => {
     expect(parseListeningScaffoldRequest(valid)).toEqual(valid)
     expect(() => parseListeningScaffoldRequest({ ...valid, turn: 6 })).toThrow(ValidationError)
     expect(() => parseListeningScaffoldRequest({ ...valid, history: [] })).toThrow(ValidationError)
+  })
+
+  it('accepts an optional Chinese hint intention within the user text limit', () => {
+    const valid = {
+      scenarioType: 'dynamic',
+      sessionToken: 'signed-session-token',
+      history: [{ role: 'assistant', text: 'お飲み物はアイスコーヒーでよろしいですか？' }],
+      lastAssistantText: 'お飲み物はアイスコーヒーでよろしいですか？',
+      intentionZh: '我想问换成热茶要不要加钱',
+    }
+    expect(parseHintRequest(valid)).toEqual(valid)
+    expect(() => parseHintRequest({ ...valid, intentionZh: '' })).toThrow(ValidationError)
+    expect(() => parseHintRequest({ ...valid, unexpected: true })).toThrow(ValidationError)
   })
 
   it('accepts only model key phrases copied from the current partner prompt', () => {

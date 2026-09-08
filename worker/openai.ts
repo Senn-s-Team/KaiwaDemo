@@ -635,7 +635,7 @@ export async function generateHint(env: Env, request: HintRequest, signal?: Abor
     throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
   }
 
-  const prompt = buildHintPrompt(sessionPayload.scenario, request.lastAssistantText, request.history)
+  const prompt = buildHintPrompt(sessionPayload.scenario, request.lastAssistantText, request.history, request.intentionZh)
   const responsesUrl = resolveOpenAiResponsesUrl(env.OPENAI_BASE_URL)
   const isResponsesEndpoint = responsesUrl.endsWith('/responses')
 
@@ -706,7 +706,7 @@ export async function generateConversationFeedback(
   )
 
   try {
-    return parseConversationFeedbackResponse(parsedJson, request.turnRecords, sessionPayload.scenario)
+    return parseConversationFeedbackResponse(parsedJson, request.turnRecords, sessionPayload.scenario, true)
   } catch (error) {
     if (error instanceof ValidationError) {
       throw new ScenarioDraftError('feedback_model_invalid', error.message, 502)

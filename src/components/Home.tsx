@@ -13,7 +13,7 @@ import { coordinateRecordingSetup } from '../lib/recording-setup'
 import type { ScenarioDraftRecoveryState } from '../lib/scenario-draft-task'
 import { buildSparkPrompt, drawPracticeExamples } from '../lib/spark-practice'
 import { RealtimeSttSession } from '../lib/stt'
-import type { DynamicScenarioData, UiError } from '../types'
+import type { DynamicScenarioData, PreviousAdvice, UiError } from '../types'
 import type { StoredPracticeAttempt } from '../lib/practice-history'
 
 interface HomeProps {
@@ -27,11 +27,12 @@ interface HomeProps {
   setCustomInputZh: React.Dispatch<React.SetStateAction<string>>
   clarifications: Array<{ questionZh: string; answerZh: string }>
   pendingClarification: { questionZh: string; optionsZh: readonly string[] } | null
-  readyScenarioData: { scenario: DynamicScenarioData; scenarioToken: string } | null
+  readyScenarioData: { scenario: DynamicScenarioData; scenarioToken: string; previousAdvice?: PreviousAdvice } | null
   isDraftingScenario: boolean
   onDraftScenario: (prompt?: string, clarifications?: Array<{ questionZh: string; answerZh: string }>, force?: boolean) => void
   onAnswerClarification: (answer: string) => void
-  onStartDynamic: (scenarioToken: string) => void
+  onStartDynamic: (scenarioToken: string, previousAdvice?: PreviousAdvice) => void
+  onPreviousAdviceViewed?: () => void
   onResetCustom: () => void
   recentPractices: StoredPracticeAttempt[]
   practiceHistory: StoredPracticeAttempt[]
@@ -47,7 +48,7 @@ interface HomeProps {
 export function Home({
   loading, ready, online, error, sttAvailable, sttModel, customInputZh, setCustomInputZh,
   clarifications, pendingClarification, readyScenarioData, isDraftingScenario,
-  onDraftScenario, onAnswerClarification, onStartDynamic, onResetCustom, recentPractices, practiceHistory, historyNotice, historySaving, onPreparePractice, onRemovePractice, draftState, onRetryDraftTransport, onInputEdited,
+  onDraftScenario, onAnswerClarification, onStartDynamic, onPreviousAdviceViewed, onResetCustom, recentPractices, practiceHistory, historyNotice, historySaving, onPreparePractice, onRemovePractice, draftState, onRetryDraftTransport, onInputEdited,
 }: HomeProps): React.JSX.Element {
   const [clarificationInput, setClarificationInput] = useState('')
   const [examples, setExamples] = useState(() => drawPracticeExamples())
@@ -64,6 +65,8 @@ export function Home({
   const homePolishGenerationRef = useRef(0)
   const homePolishOriginalRef = useRef('')
   const [homePolishAvailable, setHomePolishAvailable] = useState(false)
+  const [showPreviousAdvice, setShowPreviousAdvice] = useState(false)
+  useEffect(() => { setShowPreviousAdvice(false) }, [readyScenarioData?.scenarioToken, readyScenarioData?.previousAdvice?.sourceSessionId])
   const busy = loading || isDraftingScenario
   const unavailable = busy || !ready || !online
 
@@ -261,9 +264,10 @@ export function Home({
           </div>
           <div className="ready-goal"><strong>这次想做到</strong><p>{readyScenarioData.scenario.coreGoal.descriptionZh}</p></div>
           <div className="ready-actions">
-            <button className="primary-button" type="button" onClick={() => { cancelHomeStt(); onStartDynamic(readyScenarioData.scenarioToken) }} disabled={unavailable}>开始对话 <ArrowRight size={18} aria-hidden="true" /></button>
+            <button className="primary-button" type="button" onClick={() => { cancelHomeStt(); onStartDynamic(readyScenarioData.scenarioToken, readyScenarioData.previousAdvice) }} disabled={unavailable}>开始对话 <ArrowRight size={18} aria-hidden="true" /></button>
             <button className="text-button" type="button" onClick={() => { cancelHomeStt(); onResetCustom() }} disabled={busy}>修改描述</button>
           </div>
+          {readyScenarioData.previousAdvice && <div className="ready-goal"><strong>上次练习</strong><p>本次可查看上次建议</p><button className="text-button" type="button" onClick={() => { if (!showPreviousAdvice) onPreviousAdviceViewed?.(); setShowPreviousAdvice((shown) => !shown) }}>{showPreviousAdvice ? '收起上次建议' : '查看上次建议'}</button>{showPreviousAdvice && <div><p lang="ja">原句：{readyScenarioData.previousAdvice.expressionImprovement.userConfirmedJa}</p><p lang="ja">参考：{readyScenarioData.previousAdvice.expressionImprovement.suggestedJa}</p><p>{readyScenarioData.previousAdvice.expressionImprovement.reasonZh}</p><p className="session-length">来源：{new Date(readyScenarioData.previousAdvice.sourceStartedAt).toLocaleDateString('zh-CN')}</p></div>}</div>}
           <p className="session-length">最多五轮，也可随时提前复盘。</p>
           {draftState.storageNotice && <p className="session-length" role="status">{draftState.storageNotice}</p>}
         </section>
@@ -312,7 +316,7 @@ export function Home({
           </section>
           {!pendingClarification && <section className="practice-examples" aria-labelledby="practice-examples-heading">
             <div className="examples-heading"><h2 id="practice-examples-heading">从一个场景开始</h2><button className="text-button" type="button" disabled={busy} onClick={() => setExamples(drawPracticeExamples(examples.map((example) => example.id)))}>换一组</button></div>
-            <ul>{examples.map((example) => <li key={example.id}><button className="practice-example" type="button" disabled={busy} onClick={() => { onInputEdited(); setCustomInputZh(buildSparkPrompt(example)); topicInputRef.current?.focus() }}><span><strong>{example.challengeZh}</strong><small>{example.titleZh} · {example.domainZh}</small></span><ArrowRight size={18} aria-hidden="true" /></button></li>)}</ul>
+            <ul>{examples.map((example) => <li key={example.id}><button className="practice-example" type="button" disabled={busy} onClick={() => { const prompt = buildSparkPrompt(example); onInputEdited(); setCustomInputZh(prompt); cancelHomeStt(); onDraftScenario(prompt) }}><span><strong>{example.challengeZh}</strong><small>{example.titleZh} · {example.domainZh}</small></span><ArrowRight size={18} aria-hidden="true" /></button></li>)}</ul>
           </section>}
         </>
       )}

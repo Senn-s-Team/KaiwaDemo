@@ -41,4 +41,15 @@ describe('Home realtime STT', () => {
   it('跳过后启动新录音，旧润色 finally 不会重置新录音', async () => { const polish = deferred<string>(); mocks.polish.mockReturnValueOnce(polish.promise).mockResolvedValueOnce('第二次润色'); await startAndStop(); await vi.waitFor(() => expect(button(container, '跳过润色')).toBeDefined(), { interval: 0 }); button(container, '跳过润色').click(); await vi.waitFor(() => expect(button(container, '中文语音输入')).toBeDefined(), { interval: 0 }); button(container, '中文语音输入').click(); await vi.waitFor(() => expect(container.textContent).toContain('说完了'), { interval: 0 }); polish.resolve('旧润色'); await flush(); expect(container.textContent).toContain('说完了') })
   it('后台取消录音，300 字上限保留已存在内容', async () => { flushSync(() => root.unmount()); root = createRoot(container); flushSync(() => root.render(createElement(Harness, { initial: '甲'.repeat(299) }))); button(container, '中文语音输入').click(); await flush(); flushSync(() => mocks.handlers?.onPartial('超过')); expect(textarea(container).value).toBe('甲'.repeat(299)); expect(container.textContent).toContain('输入框已接近 300 字'); Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); await flush(); expect(mocks.release).toHaveBeenCalled() })
   it('录音期间不能提交生成', async () => { const onDraftScenario = vi.fn(); flushSync(() => root.unmount()); root = createRoot(container); flushSync(() => root.render(createElement(Harness, { onDraftScenario }))); button(container, '中文语音输入').click(); await flush(); container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); expect(onDraftScenario).not.toHaveBeenCalled() })
+  it('点击场景例子直接准备，并保留开始对话前的准备阶段', async () => {
+    const onDraftScenario = vi.fn()
+    flushSync(() => root.unmount()); root = createRoot(container)
+    flushSync(() => root.render(createElement(Harness, { onDraftScenario })))
+    const example = container.querySelector<HTMLButtonElement>('.practice-example')!
+    expect(example).toBeDefined()
+    example.click()
+    await flush()
+    expect(onDraftScenario).toHaveBeenCalledOnce()
+    expect(onDraftScenario.mock.calls[0]?.[0]).toMatch(/理发|剪|头发/)
+  })
 })

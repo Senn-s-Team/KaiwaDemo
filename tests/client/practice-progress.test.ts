@@ -148,4 +148,27 @@ describe('practice performance', () => {
     delete current.scenario.evidencePoints
     expect(comparePracticeAttempts(current, [first]).baseline).toBeNull()
   })
+
+  it('only compares grounded, complete, non-mock performance records with a matching runtime and version', () => {
+    const current = attempt('current', 500)
+    const first = stored(attempt('first', 100))
+    const performance = {
+      version: 1 as const,
+      dimensions: {
+        communicationAchievement: { rating: 2 as const, status: 'observed' as const, reasonZh: '完成主要诉求。', evidence: [{ turn: 1, role: 'user' as const, quoteJa: '予約を変更したいです。' }] },
+        responseRelevance: { rating: 2 as const, status: 'observed' as const, reasonZh: '回应当前话题。', evidence: [{ turn: 1, role: 'user' as const, quoteJa: '予約を変更したいです。' }] },
+        expressionClarity: { rating: 2 as const, status: 'observed' as const, reasonZh: '意思清楚。', evidence: [{ turn: 1, role: 'user' as const, quoteJa: '予約を変更したいです。' }] },
+        clarificationRepair: { rating: null, status: 'not_needed' as const, reasonZh: '无需澄清。', evidence: [] },
+      },
+    }
+    current.feedback!.performance = performance
+    first.feedback!.performance = structuredClone(performance)
+    expect(comparePracticeAttempts(current, [first]).performanceBaselineAttempt?.report.sessionId).toBe('first')
+    first.report.mode = 'partial'
+    expect(comparePracticeAttempts(current, [first]).performanceBaseline).toBeNull()
+    first.report.mode = 'real'
+    first.feedback!.performance!.dimensions.expressionClarity.rating = null
+    first.feedback!.performance!.dimensions.expressionClarity.status = 'unobserved'
+    expect(comparePracticeAttempts(current, [first]).performanceBaseline).toBeNull()
+  })
 })

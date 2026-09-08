@@ -241,6 +241,7 @@ export async function fetchHint(
   scenario: SessionScenario,
   lastAssistantText: string,
   history: ConversationMessage[],
+  intentionZh?: string,
   signal?: AbortSignal,
 ): Promise<import('../types').HintResponse> {
   const body = {
@@ -248,6 +249,7 @@ export async function fetchHint(
     sessionToken: scenario.sessionToken,
     lastAssistantText,
     history: history.map(({ role, text }) => ({ role, text })),
+    ...(intentionZh?.trim() ? { intentionZh: intentionZh.trim() } : {}),
   }
 
   const response = await fetch('/api/hint', {
