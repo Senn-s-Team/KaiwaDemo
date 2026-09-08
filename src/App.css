@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 首页、会话、复盘与本机历史界面的类名和状态
- * [OUTPUT]: 提供响应式布局、主题、交互、语音准备状态与表现比较样式
+ * [OUTPUT]: 提供响应式布局、主题、交互、语音准备与非阻断静音保全提示、表现比较样式
  * [POS]: src 的应用级样式入口
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -544,7 +544,7 @@
   transition: background-color 160ms ease-out;
 }
 
-.im-recording-bubble.is-counting-down {
+.im-recording-bubble.is-silence-prompt {
   background: var(--apricot);
 }
 
@@ -564,9 +564,6 @@
   flex-shrink: 0;
 }
 
-.im-recording-bubble.is-counting-down .im-recording-pulse-dot {
-  animation-duration: 520ms;
-}
 
 @keyframes pulseDot {
   0% { transform: scale(0.9); opacity: 0.8; }
@@ -852,11 +849,6 @@
   animation: pulseButton 1.5s infinite;
 }
 
-.im-dock-main-btn.is-recording.is-counting-down {
-  color: var(--ink);
-  background: var(--apricot);
-  animation: none;
-}
 
 @keyframes pulseButton {
   0% { box-shadow: 0 0 0 0 rgba(220, 124, 117, 0.4); }
@@ -887,9 +879,6 @@
   flex: 0 0 24px;
 }
 
-.im-dock-main-btn.is-counting-down .im-dock-recording-indicator {
-  animation: countdownBeat 520ms ease-in-out infinite alternate;
-}
 
 .im-dock-recording-copy {
   overflow: hidden;
@@ -897,9 +886,6 @@
   white-space: nowrap;
 }
 
-@keyframes countdownBeat {
-  to { transform: scale(0.88); opacity: 0.68; }
-}
 
 .im-dock-main-btn:disabled {
   opacity: 0.6;

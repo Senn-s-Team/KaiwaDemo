@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 活动会话 view model、控制器派生状态与会话动作
- * [OUTPUT]: 渲染活动聊天、听力支架、录音、转写确认与提示/目标 sheet
+ * [OUTPUT]: 渲染活动聊天、听力支架、录音、非阻断静音保全提示、转写确认与提示/目标 sheet
  * [POS]: src/components 的活动会话纯视图；不拥有网络、存储或媒体 controller 生命周期
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -60,7 +60,7 @@ export interface ActiveSessionModel {
   playedAiMessageIds: ReadonlySet<string>
   activeError: UiError | null
   activeFailedStep: 'config' | 'scenario' | 'token' | 'stt' | 'llm' | 'tts' | null
-  silenceCountdownSeconds: number | null
+  silencePromptVisible: boolean
   activeAssistIsVisible: boolean
   activeAssistState: ActiveSpeechAssistState | null
   confirmedTranscript: string
@@ -130,7 +130,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
   const {
     phase, scenario, turn, controlsLocked, showGoalsSheet, sessionCoreGoal, recoveryMessage, interruptionRecovery,
     interruptionRecoveryAffordances, recoveryTarget, online, effectiveForegroundNotice, messages, listeningRequestStates,
-    activeAiMessageId, pausedAiMessageId, playedAiMessageIds, activeError, activeFailedStep, silenceCountdownSeconds, activeAssistIsVisible,
+    activeAiMessageId, pausedAiMessageId, playedAiMessageIds, activeError, activeFailedStep, silencePromptVisible, activeAssistIsVisible,
     activeAssistState, confirmedTranscript, interimTranscript, partialTranscript, recordingSeconds, dockInputMode,
     dockTextValue, hintData, isLoadingHint, hintLevel, showHintSheet, showTranscriptSheet, manualInput, transcript,
     showOriginalTranscript, inlineError, canConfirmTranscript,
@@ -418,13 +418,11 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                 {!activeError && phase === 'recording' && (
                   <div className="im-message-item is-user">
                     <div className="im-msg-column">
-                      <div className={`im-recording-bubble ${silenceCountdownSeconds !== null ? 'is-counting-down' : ''}`}>
+                      <div className={`im-recording-bubble ${silencePromptVisible ? 'is-silence-prompt' : ''}`}>
                         <span className="im-recording-pulse-dot" aria-hidden="true" />
                         <div className="im-recording-info">
                           <strong aria-live="polite">
-                            {silenceCountdownSeconds !== null
-                              ? `停顿中，${silenceCountdownSeconds} 秒后结束`
-                              : '正在录音中'}
+                            {silencePromptVisible ? '停顿中，继续说即可，当前内容已保留' : '正在录音中'}
                           </strong>
                           <span className="im-recording-transcript-row" lang="ja">
                             {activeAssistIsVisible && activeAssistState ? (
@@ -579,16 +577,14 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
               ) : phase === 'recording' ? (
                 <div className="im-dock-row">
                   <button
-                    className={`im-dock-main-btn is-recording ${silenceCountdownSeconds !== null ? 'is-counting-down' : ''}`}
+                    className="im-dock-main-btn is-recording"
                     type="button"
                     onClick={() => void stopRecording()}
                   >
                     <span className="im-dock-recording-indicator" aria-hidden="true">
-                      {silenceCountdownSeconds ?? <Square size={14} fill="currentColor" />}
+                      <Square size={14} fill="currentColor" />
                     </span>
-                    <span className="im-dock-recording-copy">
-                      {silenceCountdownSeconds !== null ? '秒后自动结束，说话可继续' : '说完了，点击结束'}
-                    </span>
+                    <span className="im-dock-recording-copy">说完了，点击结束</span>
                   </button>
                   <button
                     className="im-dock-icon-btn"

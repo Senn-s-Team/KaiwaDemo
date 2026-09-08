@@ -1,10 +1,15 @@
+/**
+ * [INPUT]: audio-feedback 录音反馈与静音保全提示纯规则
+ * [OUTPUT]: 锁定录音时间、音量映射、静音警告与静音保全提示阈值契约
+ * [POS]: tests/client 的录音反馈纯规则回归
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+ */
 import { describe, expect, it } from 'vitest'
 import {
-  SILENCE_AUTO_STOP_SECONDS,
-  SILENCE_COUNTDOWN_START_SECONDS,
+  SILENCE_PROMPT_SECONDS,
   formatRecordingTime,
-  getSilenceCountdownSeconds,
   microphoneLevelToBars,
+  shouldShowSilencePrompt,
   shouldWarnSilence,
 } from '../../src/lib/audio-feedback'
 
@@ -16,22 +21,16 @@ describe('录音反馈兼容导出', () => {
   })
 })
 
-describe('静音自动结束倒计时', () => {
-  it('在持续静音10秒时开始倒计时3秒', () => {
-    expect(SILENCE_COUNTDOWN_START_SECONDS).toBe(10)
-    expect(SILENCE_AUTO_STOP_SECONDS).toBe(13)
-    expect(getSilenceCountdownSeconds(9.99, true)).toBeNull()
-    expect(getSilenceCountdownSeconds(10, true)).toBe(3)
-    expect(getSilenceCountdownSeconds(11, true)).toBe(2)
-    expect(getSilenceCountdownSeconds(12, true)).toBe(1)
+describe('静音保全提示', () => {
+  it('在持续静音10秒后显示提示', () => {
+    expect(SILENCE_PROMPT_SECONDS).toBe(10)
+    expect(shouldShowSilencePrompt(9.99, true)).toBe(false)
+    expect(shouldShowSilencePrompt(10, true)).toBe(true)
+    expect(shouldShowSilencePrompt(11, true)).toBe(true)
   })
 
-  it('在13秒到0，并在更久静音时保持0', () => {
-    expect(getSilenceCountdownSeconds(13, true)).toBe(0)
-    expect(getSilenceCountdownSeconds(14, true)).toBe(0)
-  })
-  it('计量不可用或非有效数字时返回null', () => {
-    expect(getSilenceCountdownSeconds(11, false)).toBeNull()
-    expect(getSilenceCountdownSeconds(Number.NaN, true)).toBeNull()
+  it('在计量不可用或静音时长无效时不显示提示', () => {
+    expect(shouldShowSilencePrompt(10, false)).toBe(false)
+    expect(shouldShowSilencePrompt(Number.NaN, true)).toBe(false)
   })
 })

@@ -8,7 +8,7 @@ audio-engine.ts: 基础音频处理管线与流复用管理，包含麦克风采
 recording-setup.ts: 录音准备与并发协调深模块，隐藏麦克风与 Token 并发获取、连接就绪判定与失败回收，允许主动取消方避免二次释放新流，coordinateRecordingSetup
 voice-turn-controller.ts: 用户语音回合核心控制器深模块，以代际所有权锁隔离 dispose/retry 与迟到 finally，录音前释放相手播放资源，聚合麦克风权限状态、转写流与草稿、空语音/静音防护拦截、文本输入回退与单轮资源生命周期闭环，useVoiceTurnController / voiceTurnReducer / parseFinalTranscript / createRecordingStartLock
 ai-turn-controller.ts: 相手 AI 回合控制器深模块，闭环拥有 LLM 流式应答、TTS 播放/暂停/继续/降级及录音前资源释放、五回合自然判定与回合流转，useAiTurnController / createAiTurnRuntime / aiTurnReducer
-audio-feedback.ts: 麦克风电平与录音时长计算，静音警告纯函数
+audio-feedback.ts: 麦克风电平与录音时长计算，以及基于可用计量的静音保全提示纯规则
 microphone.ts: 麦克风权限预检、静默 Permissions.query 状态探测 queryMicrophonePermission 与状态缓存
 speech-assist.ts: 实时续说辅助触发规则与显示守卫
 metrics.ts: 从回合、失败/重试与 speechAssistEvents 聚合 RoundRecord / SessionReport，构建 completion、recovery 与 speechAssistUsed 事实

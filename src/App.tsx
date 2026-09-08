@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 lib/scenario-draft-task 首页恢复、lib/feedback-task-recovery 完成复盘恢复、lib/practice-history 本机历史、lib/practice-progress 表现比较、lib/api 接口请求、shared/listening-scaffold 内部四级听力协议、lib/stt 中文场景输入识别、lib/voice-turn-controller 语音回合控制器深模块、lib/ai-turn-controller 相手回合控制器深模块、lib/microphone 权限探测、lib/session 会话状态与显式中断恢复状态机
- * [OUTPUT]: 对外提供 App 根组件，驱动可编辑中文语音场景输入、原场景复练与证据对比、统一 recovery 反馈任务展示、KaiwaDemo 固定五回合会话、渐进帮助、可暂停继续的相手语音、录音前播放资源释放与安全生命周期交互
+ * [OUTPUT]: 对外提供 App 根组件，驱动可编辑中文语音场景输入、原场景复练与证据对比、统一 recovery 反馈任务展示、KaiwaDemo 固定五回合会话、渐进帮助、可暂停继续的相手语音、非阻断静音保全提示与录音前播放资源释放及安全生命周期交互
  * [POS]: src/ 核心入口与主控制器，编排可持久化会话业务状态、内部四级帮助、不可恢复媒体资源的显式释放与 offline/background 业务中断恢复，成功恢复不显示内部状态横幅；pagehide 仅释放资源，真实活动阶段才回滚业务状态
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -9,7 +9,7 @@ import './App.css'
 import { ActiveSession } from './components/ActiveSession'
 import { Home } from './components/Home'
 import { SessionComplete } from './components/SessionComplete'
-import { SILENCE_AUTO_STOP_SECONDS, SILENCE_COUNTDOWN_START_SECONDS } from './lib/audio-feedback'
+import { shouldShowSilencePrompt } from './lib/audio-feedback'
 import {
   fetchConfig,
   fetchHint,
@@ -697,11 +697,7 @@ function App() {
   const controlsLocked = ['fetching_token', 'connecting_stt', 'finalizing_transcript', 'requesting_llm', 'preparing_tts'].includes(phase)
   const reveal = phase === 'session_complete' ? scenario?.reveal ?? null : null
   const canConfirmTranscript = transcript.finalText.trim().length > 0
-  const silenceCountdownSeconds = phase === 'recording'
-    && microphoneMeterAvailable
-    && silentSeconds >= SILENCE_COUNTDOWN_START_SECONDS
-    ? Math.max(1, SILENCE_AUTO_STOP_SECONDS - silentSeconds)
-    : null
+  const silencePromptVisible = phase === 'recording' && shouldShowSilencePrompt(silentSeconds, microphoneMeterAvailable)
   const effectiveForegroundNotice = voiceForegroundNotice.trim() || appForegroundNotice.trim()
   const handleStartDynamic = useCallback((token: string, previousAdvice?: PreviousAdvice) => {
     const draftRequestId = draftState.request?.requestId
@@ -709,14 +705,6 @@ function App() {
     preparedStartRef.current = { scenarioToken: token, draftRequestId, previousAdvice }
     void startSession(token, draftRequestId, previousAdvice)
   }, [consumeReadyScenario, draftState.request?.requestId, startSession])
-  useEffect(() => {
-    if (
-      phase !== 'recording'
-      || !microphoneMeterAvailable
-      || silentSeconds < SILENCE_AUTO_STOP_SECONDS
-    ) return
-    void stopRecording()
-  }, [microphoneMeterAvailable, phase, silentSeconds, stopRecording])
   return (
     <div className={`app-shell ${isSessionActive ? 'is-session-active' : ''}`} data-build={BUILD_ID}>
       <a className="skip-link" href="#main-content">跳到主要内容</a>
@@ -796,7 +784,7 @@ function App() {
           model={{
             phase, scenario, turn, controlsLocked, showGoalsSheet, sessionCoreGoal, recoveryMessage, interruptionRecovery,
             interruptionRecoveryAffordances, recoveryTarget, online, effectiveForegroundNotice, messages, listeningRequestStates,
-            activeAiMessageId, pausedAiMessageId, playedAiMessageIds, activeError, activeFailedStep, silenceCountdownSeconds, activeAssistIsVisible,
+            activeAiMessageId, pausedAiMessageId, playedAiMessageIds, activeError, activeFailedStep, silencePromptVisible, activeAssistIsVisible,
             activeAssistState, confirmedTranscript, interimTranscript, partialTranscript, recordingSeconds, dockInputMode,
             dockTextValue, hintData, isLoadingHint, hintLevel, showHintSheet, showTranscriptSheet, manualInput, transcript,
             showOriginalTranscript, inlineError, canConfirmTranscript, sttAvailable: Boolean(config?.elevenlabs.sttAvailable), sttModel: config?.elevenlabs.sttModel ?? '', ttsAvailable: Boolean(config?.elevenlabs.ttsAvailable), reviewAudioNotice,
