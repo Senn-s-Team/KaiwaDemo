@@ -9,10 +9,12 @@ shared/ - 浏览器与 Worker 共用的 wire schema 与推导类型 (5成员)
 worker/ - Cloudflare Worker 服务端路由、模型代理、校验、签名与 Workflow 持久任务边界 (18成员)
 scripts/ - 构建期依赖校验与产物清洗脚本 (2成员)
 tests/ - 客户端、Worker 与组件契约测试 (3子目录: client/、worker/、components/)
-docs/ - 产品基线、理论依据、延期边界与验证材料 (6成员)
+docs/ - 活文档入口：产品契约、系统边界与人工测试模板（3 个正文成员）
 </directory>
 
 <config>
 package.json - 项目依赖与构建脚本
 wrangler.jsonc - Cloudflare Worker 配置文件
 </config>
+
+[PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
