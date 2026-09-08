@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 真实浏览器可见 App DOM、会话快照与 visibilitychange 生命周期事件
- * [OUTPUT]: 锁定会话草稿、录音前相手播放器释放顺序、反馈任务 transport/terminal 重试分流、重做录音及 hint/listening/redo 异步结果只写回其所属 App 会话的集成回归契约
+ * [OUTPUT]: 锁定会话草稿、录音前相手播放器释放顺序、非阻断静音保全提示、反馈任务 transport/terminal 重试分流、重做录音及 hint/listening/redo 异步结果只写回其所属 App 会话的集成回归契约
  * [POS]: tests/client/ App 根组件生命周期集成测试
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -12,7 +12,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildSessionReport, createRoundRecord } from '../../src/lib/metrics'
 import { writePreparedRestart, type PreparedRestartData } from '../../src/lib/home-practice-recovery'
 import type { ConversationFeedbackResponse, SessionScenario } from '../../src/types'
+import type { SttHandlers } from '../../src/lib/stt'
 import type { StoredPracticeAttempt } from '../../src/lib/practice-history'
+import type * as ApiModule from '../../src/lib/api'
+import type * as PracticeHistoryModule from '../../src/lib/practice-history'
+import type * as SttModule from '../../src/lib/stt'
+import type * as AudioEngineModule from '../../src/lib/audio-engine'
 
 let App: ComponentType
 let fetchConfig: ReturnType<typeof vi.fn>
@@ -176,6 +181,95 @@ describe('App lifecycle integration', () => {
 })
 
 describe('App config lifecycle regression', () => {
+
+  it('keeps recording past 13 seconds of silence, then clears the prompt when speech resumes', async () => {
+    vi.resetModules()
+    vi.useFakeTimers()
+    window.sessionStorage.clear()
+    installWaitingSessionSnapshot()
+    let handlers: SttHandlers | null = null
+    const stopStt = vi.fn<() => Promise<string>>().mockResolvedValue('')
+    class FakeRealtimeSttSession {
+      start = async (_token: string, _model: string, nextHandlers: SttHandlers): Promise<void> => {
+        handlers = nextHandlers
+        nextHandlers.onConnectionState('connected')
+        nextHandlers.onPipelineReady?.()
+      }
+      stop = stopStt
+      close = vi.fn()
+    }
+    vi.doMock('../../src/lib/api', async () => ({
+      ...(await vi.importActual<typeof ApiModule>('../../src/lib/api')),
+      fetchConfig: vi.fn().mockResolvedValue({
+        mode: 'mock', limits: { maxTurns: 5 },
+        elevenlabs: { sttAvailable: true, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' },
+        openai: { available: false, model: 'mock', mockAllowed: true },
+      }),
+      requestElevenLabsToken: vi.fn().mockResolvedValue('stt-token'),
+    }))
+    vi.doMock('../../src/lib/practice-history', async () => ({
+      ...(await vi.importActual<typeof PracticeHistoryModule>('../../src/lib/practice-history')),
+      listPracticeAttempts: vi.fn().mockResolvedValue([]),
+    }))
+    vi.doMock('../../src/lib/stt', async () => ({
+      ...(await vi.importActual<typeof SttModule>('../../src/lib/stt')),
+      RealtimeSttSession: FakeRealtimeSttSession,
+    }))
+    vi.doMock('../../src/lib/audio-engine', async () => ({
+      ...(await vi.importActual<typeof AudioEngineModule>('../../src/lib/audio-engine')),
+      requestMicrophoneStream: vi.fn().mockResolvedValue({
+        getAudioTracks: () => [{ readyState: 'live' }],
+      }),
+    }))
+    const scrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
+    const box = document.createElement('div')
+    const appRoot = createRoot(box)
+    document.body.appendChild(box)
+    try {
+      const appModule = await import('../../src/App')
+      flushSync(() => appRoot.render(createElement(appModule.default)))
+      await vi.advanceTimersByTimeAsync(0)
+      const startButton = await vi.waitFor(() => {
+        const button = Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes('开始回答'))
+        expect(button).toBeDefined()
+        return button as HTMLButtonElement
+      }, { interval: 0 })
+
+      flushSync(() => startButton.click())
+      await vi.waitFor(() => {
+        expect(handlers).not.toBeNull()
+        expect(box.textContent).toContain('正在录音中')
+      }, { interval: 0 })
+      await flush()
+      await vi.advanceTimersByTimeAsync(50)
+      await vi.advanceTimersByTimeAsync(9_950)
+      expect(box.textContent).toContain('停顿中，继续说即可，当前内容已保留')
+
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(box.querySelector('.im-recording-bubble')).not.toBeNull()
+      expect(box.querySelector('#transcript-sheet-input')).toBeNull()
+      expect(stopStt).not.toHaveBeenCalled()
+
+      if (!handlers) throw new Error('Expected STT handlers after recording starts.')
+      flushSync(() => handlers.onPartial('はい'))
+      expect(box.textContent).not.toContain('停顿中，继续说即可，当前内容已保留')
+      expect(box.querySelector('.im-recording-bubble')).not.toBeNull()
+      expect(stopStt).not.toHaveBeenCalled()
+    } finally {
+      appRoot.unmount()
+      box.remove()
+      window.sessionStorage.clear()
+      if (scrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollIntoView)
+      else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
+      vi.useRealTimers()
+      vi.doUnmock('../../src/lib/api')
+      vi.doUnmock('../../src/lib/practice-history')
+      vi.doUnmock('../../src/lib/stt')
+      vi.doUnmock('../../src/lib/audio-engine')
+      vi.clearAllMocks()
+    }
+  })
   it('将选中练习的建议带到复练，并在查看后以 L4 开始且不污染重录次数', async () => {
     vi.resetModules()
     window.sessionStorage.clear()
