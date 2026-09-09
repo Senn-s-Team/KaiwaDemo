@@ -17,7 +17,7 @@
 
 ## 本地启动
 
-要求：Node.js 20 以上、npm、具备麦克风权限的现代浏览器。
+要求：Node.js 26 以上、npm、具备麦克风权限的现代浏览器。
 
 ```bash
 npm install
@@ -39,6 +39,34 @@ ALLOW_MOCK=true
 OPENAI_MODEL=gpt-5.6-luna
 ELEVENLABS_STT_MODEL=scribe_v2_realtime
 ELEVENLABS_TTS_MODEL=eleven_flash_v2_5
+```
+
+## Cloudflare 部署与匿名验证数据
+
+`wrangler.jsonc` 已声明 `VALIDATION_DB` D1 binding、`migrations/` 目录和每日 UTC 清理任务。首次部署或迁移新环境时，先确认配置中的 `database_id` 指向目标数据库，再执行：
+
+```bash
+npx wrangler d1 migrations apply kaiwa-validation --local
+npx wrangler d1 migrations apply kaiwa-validation --remote
+npm run deploy
+```
+
+生产环境还必须通过 Worker Secrets 配置永久密钥；不要把密钥写入 `wrangler.jsonc`：
+
+```bash
+npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put ELEVENLABS_API_KEY
+npx wrangler secret put SCENARIO_SIGNING_SECRET
+```
+
+首页仅在用户明确同意后发送匿名技术指标。`VALIDATION_DB` 缺失、D1 写入失败、浏览器存储不可用或遥测上传失败都只会丢失对应验证数据，不得阻断训练。隐私字段、撤销语义和保留期见 [PRIVACY.md](./PRIVACY.md)。
+
+可直接用 D1 SQL 检查首要验证漏斗，不需要先建设独立看板：
+
+```bash
+npx wrangler d1 execute kaiwa-validation --remote --command "SELECT COUNT(*) AS started, SUM(closed_naturally) AS completed, SUM(feedback_completed) AS feedback_ready, SUM(redo_started) AS redo_started, SUM(redo_completed) AS redo_completed FROM validation_sessions;"
+npx wrangler d1 execute kaiwa-validation --remote --command "SELECT event, failure_domain, failure_code, COUNT(*) AS occurrences FROM validation_events WHERE event IN ('failure_occurred', 'failure_recovered') GROUP BY event, failure_domain, failure_code ORDER BY occurrences DESC;"
+npx wrangler d1 execute kaiwa-validation --remote --command "SELECT input_mode, listening_scaffold_level, expression_scaffold_level, COUNT(*) AS rounds, AVG(stt_finalize_latency_ms) AS avg_stt_ms, AVG(llm_first_text_latency_ms) AS avg_llm_first_text_ms, AVG(tts_first_audio_latency_ms) AS avg_tts_first_audio_ms FROM validation_rounds WHERE round_completed = 1 GROUP BY input_mode, listening_scaffold_level, expression_scaffold_level ORDER BY rounds DESC;"
 ```
 
 ## 质量检查与构建
