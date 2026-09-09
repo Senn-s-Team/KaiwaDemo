@@ -1,13 +1,12 @@
 /**
- * [INPUT]: 依赖首页/会话/复盘控制器、既有本机练习历史、独立技术验证遥测同意与出站控制器
- * [OUTPUT]: 对外提供 App 根组件，驱动训练流程并仅在明确同意后于稳定生命周期 seam 派生匿名技术验证 checkpoint/汇总
- * [POS]: src/ 核心入口；训练状态始终独立于遥测存储与传输失败
+ * [INPUT]: 依赖首页/会话/复盘控制器与既有本机练习历史，以及浏览器本机存储
+ * [OUTPUT]: 对外提供 App 根组件、驱动训练流程并清理已废弃遥测存储
+ * [POS]: src/ 核心入口；训练状态、本机历史恢复与启动清理保持独立
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type SetStateAction } from 'react'
 import './App.css'
 import { ActiveSession } from './components/ActiveSession'
-import { ValidationConsent } from './components/ValidationConsent'
 import { Home } from './components/Home'
 import { SessionComplete } from './components/SessionComplete'
 import { PHASE_TRANSITIONS, recoveryStatusText } from './lib/app-phase'
@@ -30,8 +29,6 @@ import { useCompletedPractice } from './lib/use-completed-practice'
 import { useHomePractice } from './lib/use-home-practice'
 import { useSessionSnapshotPersistence } from './lib/use-session-snapshot-persistence'
 import { useSessionLifecycle } from './lib/use-session-lifecycle'
-import { useValidationLifecycle } from './lib/use-validation-lifecycle'
-import type { ValidationTelemetrySession } from './lib/use-validation-telemetry'
 import { clearSessionSnapshot, readSessionSnapshot, removeLastSubmittedUserMessage, type SessionSnapshot } from './lib/session-snapshot'
 import type {
   AppPhase,
@@ -44,6 +41,26 @@ import type {
   UiError,
   TranscriptText,
 } from './types'
+
+const LEGACY_TELEMETRY_STORAGE_KEYS = ['kaiwa.validation-consent.v1', 'kaiwa.validation-client.v1'] as const
+const LEGACY_TELEMETRY_DATABASE = 'kaiwa-validation-telemetry'
+
+function purgeLegacyTelemetryStorage(): void {
+  for (const key of LEGACY_TELEMETRY_STORAGE_KEYS) {
+    try {
+      globalThis.localStorage?.removeItem(key)
+    } catch {
+      continue
+    }
+  }
+  try {
+    const indexedDb = globalThis.indexedDB
+    if (indexedDb && typeof indexedDb.deleteDatabase === 'function') indexedDb.deleteDatabase(LEGACY_TELEMETRY_DATABASE)
+  } catch {
+    return
+  }
+}
+
 function App() {
   const [config, setConfig] = useState<PrototypeConfig | null>(null)
   const [phase, setPhase] = useState<AppPhase>('loading_config')
@@ -61,7 +78,6 @@ function App() {
   const [uiError, setUiError] = useState<UiError | null>(null)
   const [inlineError, setInlineError] = useState('')
   const [lastFailedStep, setLastFailedStep] = useState<'config' | 'scenario' | 'token' | 'stt' | 'llm' | 'tts' | null>(null)
-  const [telemetrySession, setTelemetrySession] = useState<ValidationTelemetrySession | null>(null)
   const [pendingHistory, setPendingHistory] = useState<ConversationMessage[]>([])
   const requestAbortRef = useRef<AbortController | null>(null)
   const resetSessionRef = useRef<() => void>(() => undefined)
@@ -280,6 +296,9 @@ function App() {
   useEffect(() => {
     scrollToBottom(messages.length <= 1 ? 'auto' : 'smooth')
   }, [messages, phase, partialTranscript, hintData, hintLevel, uiError, scrollToBottom])
+  useEffect(() => {
+    purgeLegacyTelemetryStorage()
+  }, [])
   const replaceMessages = useCallback((next: ConversationMessage[]) => {
     messagesRef.current = next
     setMessages(next)
@@ -292,7 +311,7 @@ function App() {
       replaceMessages(structuredClone(record.messages)); roundsRef.current = structuredClone(record.rounds); setRounds(structuredClone(record.rounds)); setPhase('session_complete'); phaseRef.current = 'session_complete'; sessionSnapshotRef.current = null; setAppForegroundNotice('')
     },
   })
-  const { feedbackData, feedbackStatus, feedbackErrorMsg, report, currentPractice, practiceComparison, restoredRedoTask, redoRecords } = completedPractice.model
+  const { feedbackData, feedbackStatus, feedbackErrorMsg, report, currentPractice, practiceComparison, restoredRedoTask } = completedPractice.model
   const listeningScaffold = useListeningScaffoldController({
     messagesRef, rounds, currentRound: currentRoundView, scenario, sessionId,
     activeAiMessageId, pausedAiMessageId, isTtsActionLocked: aiTurn.meta.isTtsActionLocked,
@@ -424,7 +443,6 @@ function App() {
     completedPractice.actions.reset()
     const controller = new AbortController()
     requestAbortRef.current = controller
-    setTelemetrySession(null)
     transitionTo('loading_config')
     if (!config.elevenlabs.sttAvailable) {
       syncMicrophoneReadiness('unavailable')
@@ -449,7 +467,6 @@ function App() {
         text: nextScenario.firstLine,
       }
       const localScenario = previousAdvice ? { ...nextScenario, previousAdvice } : nextScenario
-      setTelemetrySession(startedSession.telemetrySession)
       setScenario(localScenario)
       if (draftRequestId) discardDraft()
       setSessionId(id)
@@ -562,19 +579,6 @@ function App() {
   }, [generateNextReply, replaceMessages, touchRound, transcript, turn])
   const activeError = uiError ?? voiceError ?? aiError
   const activeFailedStep = lastFailedStep ?? voiceTurn.state.lastFailedStep ?? aiTurn.state.lastFailedStep
-  const validationLifecycle = useValidationLifecycle({
-    telemetrySession,
-    sessionStartedAt,
-    rounds,
-    currentRound: currentRoundView,
-    report,
-    feedback: feedbackData,
-    redoRecords,
-    config,
-    activeFailure: activeError ? { code: activeError.code, step: activeFailedStep } : null,
-    recoveredTarget: interruptionRecovery.status === 'recovered' ? interruptionRecovery.target : null,
-    evaluationVersion: scenario?.dynamicData.evaluationVersion === undefined ? undefined : String(scenario.dynamicData.evaluationVersion),
-  })
   const recoveryTarget = interruptionRecovery.target
   const recoveryCanAct = interruptionRecovery.status === 'interrupted' || interruptionRecovery.status === 'failed'
   const interruptionRecoveryAffordances = decideInterruptionRecoveryAffordances(recoveryCanAct ? recoveryTarget : null)
@@ -649,7 +653,6 @@ function App() {
     dispatchInterruptionRecovery({ type: 'reset' })
     clearSessionSnapshot()
     setSessionId('')
-    setTelemetrySession(null)
     setScenario(null)
     restoredTranscriptRef.current = null
     setSessionStartedAt(null); setSessionEndedAt(null); setCompletionReason(null)
@@ -694,11 +697,10 @@ function App() {
     void startSession(token, draftRequestId, previousAdvice)
   }, [consumeReadyScenario, draftState.request?.requestId, startSession])
   return (
-    <div className={`app-shell ${isSessionActive ? 'is-session-active' : ''} ${validationLifecycle.consent === 'accepted' ? 'is-validation-accepted' : ''}`} data-build="2026-09-07-listening-scaffold-l4">
+    <div className={`app-shell ${isSessionActive ? 'is-session-active' : ''}`} data-build="2026-09-07-listening-scaffold-l4">
       <a className="skip-link" href="#main-content">跳到主要内容</a>
       <header className="topbar">
         <p>Kaiwa</p>
-        {isSessionActive && validationLifecycle.consent === 'accepted' && <ValidationConsent consent={validationLifecycle.consent} onDecision={validationLifecycle.decide} onRevoke={validationLifecycle.revoke} />}
         {isSessionActive && (
           <button className="text-button quiet-exit" type="button" onClick={() => endSession(true)} disabled={controlsLocked}>
             结束练习
@@ -709,7 +711,6 @@ function App() {
         {!isSessionActive && phase !== 'session_complete' && (
           <section className="conversation-panel" aria-labelledby="conversation-heading">
             {!online && <p className="network-notice" role="status">网络已断开。恢复连接后可以继续。</p>}
-            {validationLifecycle.consent === 'undecided' && <ValidationConsent consent={validationLifecycle.consent} onDecision={validationLifecycle.decide} onRevoke={validationLifecycle.revoke} />}
             <Home
               loading={phase === 'loading_config'}
               ready={config !== null}
@@ -738,7 +739,6 @@ function App() {
               onPreparePractice={(attempt) => void preparePracticeAgain(attempt)}
               onRemovePractice={(attempt) => void removePractice(attempt)}
             />
-            {validationLifecycle.consent === 'accepted' && <ValidationConsent consent={validationLifecycle.consent} onDecision={validationLifecycle.decide} onRevoke={validationLifecycle.revoke} />}
           </section>
         )}
         {phase === 'session_complete' && report && reveal && scenario && (
@@ -759,7 +759,7 @@ function App() {
               onRetryFeedback={completedPractice.actions.retryConversationFeedback}
               onReplayAi={(text) => void playReviewAudio(text)}
               onStopAudio={stopReviewAudio}
-              onRequestRedo={(request) => { validationLifecycle.trackRedoStarted(request.turn); completedPractice.actions.startRedoTask(request) }}
+              onRequestRedo={completedPractice.actions.startRedoTask}
               onRequestListeningScaffold={requestListeningScaffold}
               onCacheListeningScaffold={cacheListeningScaffold}
               onNewScenario={resetSession}
@@ -769,7 +769,6 @@ function App() {
               historyNotice={historySaving ? '正在保存本次练习…' : historyNotice}
               onRetrySave={historySaveFailed && currentPractice ? () => void persistPractice(currentPractice) : undefined}
             />
-            {validationLifecycle.consent === 'accepted' && <ValidationConsent consent={validationLifecycle.consent} onDecision={validationLifecycle.decide} onRevoke={validationLifecycle.revoke} />}
           </section>
         )}
         {isSessionActive && <ActiveSession

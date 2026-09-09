@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 zod、../types 与 shared/ 下跨端 wire schema
- * [OUTPUT]: 提供动态会话启动包装器、训练服务与严格校验的同意遥测 batch API 通信；遥测凭据不进入 SessionScenario
+ * [OUTPUT]: 提供动态会话启动包装器与训练服务的严格校验 API 通信
  * [POS]: src/lib 的前端 API 通信边界
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -32,7 +32,6 @@ import {
   type FeedbackTaskRequest,
   type FeedbackTaskStatus,
 } from '../../shared/feedback-task'
-import { ValidationBatchSchema, type ValidationBatch } from '../../shared/validation-telemetry'
 import type {
   ConversationFeedbackRequest,
   ConversationMessage,
@@ -112,7 +111,6 @@ export async function fetchConfig(signal?: AbortSignal): Promise<PrototypeConfig
 
 export interface StartedScenarioSession {
   scenario: SessionScenario
-  telemetrySession: { sessionId: string; telemetryToken: string } | null
 }
 
 export async function startScenarioSession(
@@ -141,21 +139,7 @@ export async function startScenarioSession(
     dynamicData,
     reveal: data.reveal as SessionScenario['reveal'],
   }
-  const telemetrySession = typeof data.sessionId === 'string' && typeof data.telemetryToken === 'string'
-    ? { sessionId: data.sessionId, telemetryToken: data.telemetryToken }
-    : null
-  return { scenario, telemetrySession }
-}
-
-export async function sendValidationBatch(batch: ValidationBatch, signal?: AbortSignal): Promise<void> {
-  const validated = ValidationBatchSchema.parse(batch)
-  const response = await fetch('/api/validation/batch', {
-    method: 'POST',
-    signal,
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(validated),
-  })
-  if (!response.ok) throw await errorFromResponse(response)
+  return { scenario }
 }
 export async function requestElevenLabsToken(
   type: 'realtime_scribe' | 'tts_websocket',

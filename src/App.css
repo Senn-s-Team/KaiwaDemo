@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 首页、会话、复盘、本机历史与匿名技术验证同意界面的类名和状态
- * [OUTPUT]: 提供响应式产品样式及静态、内嵌的隐私选择视觉规则
+ * [INPUT]: 首页、会话、复盘与本机历史界面的类名和状态
+ * [OUTPUT]: 提供响应式产品样式
  * [POS]: src 的应用级样式入口
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -72,8 +72,6 @@
   margin-bottom: clamp(12px, 2.5vh, 24px);
 }
 .app-shell.is-session-active .topbar { display: none; }
-.app-shell.is-session-active.is-validation-accepted .topbar { display: flex; }
-.app-shell.is-session-active.is-validation-accepted .topbar > .validation-consent-status { margin-top: 0; }
 
 .app-shell.is-session-active .main-layout {
   height: 100%;
@@ -1724,20 +1722,6 @@
   .topic-stt-status { width: 100%; }
 }
 
-/* 匿名技术验证：保持首页内嵌信息层级，不抢占练习启动流程。 */
-.validation-consent { margin-top: 20px; padding-top: 16px; border-top: 1px solid rgba(40, 58, 73, 0.22); }
-.validation-consent h2 { margin: 0; color: var(--ink); font-size: 0.95rem; line-height: 1.6; }
-.validation-consent > p { margin: 6px 0 0; color: var(--muted); font-size: 0.84rem; line-height: 1.7; }
-.validation-consent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.validation-consent-actions button { min-height: 40px; }
-.validation-consent-details { margin-top: 12px; color: var(--muted); font-size: 0.82rem; line-height: 1.7; }
-.validation-consent-details summary { cursor: pointer; color: var(--ink); font-weight: 600; }
-.validation-consent-details p { margin: 8px 0 0; }
-.validation-consent-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 0.82rem; line-height: 1.6; }
-.validation-consent-status .text-button { min-height: 36px; padding-inline: 8px; }
-@media (max-width: 360px) {
-  .validation-consent-actions button { flex: 1 1 100%; }
-}
 
 /* ==========================================================================
    本机历史与场景表现：可扫描的记录、固定口径的事实比较

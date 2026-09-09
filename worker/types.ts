@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 ../shared wire contracts 与 Worker 动态场景、会话及报告约定
- * [OUTPUT]: 除 shared/ 外的 Worker 动态场景、会话、响应与模型领域类型（会话启动含 telemetry token）
+ * [OUTPUT]: 除 shared/ 外的 Worker 动态场景、会话、响应与模型领域类型
  * [POS]: Worker 内部领域类型边界
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -126,7 +126,6 @@ export interface SessionStartRequest {
 
 export interface SessionStartResponse {
   practiceToken?: string
-  telemetryToken: string
   sessionId: string
   scenarioType: 'dynamic'
   sessionToken: string
