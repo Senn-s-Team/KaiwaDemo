@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 scenario-draft 共享 wire schema、浏览器 localStorage、前端 API 通信层与页面可见性/联网状态
- * [OUTPUT]: 提供可恢复首页场景草稿控制器及 React hook，仅持久化未完成请求并在成功结果进入内存后清除封套
+ * [OUTPUT]: 提供可恢复首页场景草稿控制器及 React hook，仅持久化未完成请求并在成功或失败终态进入内存后清除封套
  * [POS]: src/lib 的首页动态场景草稿恢复边界，隔离草稿网络生命周期，避免与语音回合 phase 混用
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -16,15 +16,15 @@ import {
 } from '../../shared/scenario-draft'
 import { ApiError, getScenarioDraftTask, submitScenarioDraft } from './api'
 
-export const SCENARIO_DRAFT_STORAGE_KEY = 'kaiwa.scenario-draft-task.v2'
-const LEGACY_SCENARIO_DRAFT_STORAGE_KEY = 'kaiwa.scenario-draft-task.v1'
+export const SCENARIO_DRAFT_STORAGE_KEY = 'kaiwa.scenario-draft-task.v3'
+const LEGACY_SCENARIO_DRAFT_STORAGE_KEYS = ['kaiwa.scenario-draft-task.v1', 'kaiwa.scenario-draft-task.v2'] as const
 const POLL_INTERVAL_MS = 2_000
 const NETWORK_TIMEOUT_MS = 25_000
 
 type Clarification = { questionZh: string; answerZh: string }
 
 interface StoredScenarioDraft {
-  version: 2
+  version: 3
   request: ScenarioDraftTaskRequest
   taskToken?: string
 }
@@ -67,10 +67,10 @@ export interface ScenarioDraftRecoveryDependencies {
 function parseStoredScenarioDraft(value: unknown): StoredScenarioDraft | null {
   if (typeof value !== 'object' || value === null) return null
   const candidate = value as Partial<StoredScenarioDraft>
-  if (candidate.version !== 2 || (candidate.taskToken !== undefined && typeof candidate.taskToken !== 'string')) return null
+  if (candidate.version !== 3 || (candidate.taskToken !== undefined && typeof candidate.taskToken !== 'string')) return null
   const request = ScenarioDraftTaskRequestSchema.safeParse(candidate.request)
   if (!request.success) return null
-  return { version: 2, request: request.data, taskToken: candidate.taskToken }
+  return { version: 3, request: request.data, taskToken: candidate.taskToken }
 }
 
 function isLifecycleAbort(signal: AbortSignal): boolean {
@@ -139,7 +139,7 @@ export function createScenarioDraftRecoveryRuntime(dependencies: ScenarioDraftRe
   const removeLegacyStored = (): void => {
     if (!storage) return
     try {
-      storage.removeItem(LEGACY_SCENARIO_DRAFT_STORAGE_KEY)
+      for (const key of LEGACY_SCENARIO_DRAFT_STORAGE_KEYS) storage.removeItem(key)
     } catch {
       storageNotice = '浏览器无法清除旧恢复记录；本次仍可继续。'
     }
@@ -319,7 +319,7 @@ export function createScenarioDraftRecoveryRuntime(dependencies: ScenarioDraftRe
       discard()
       storageNotice = ''
       stored = {
-        version: 2,
+        version: 3,
         request: {
           requestId: crypto.randomUUID(),
           createdAt: now(),

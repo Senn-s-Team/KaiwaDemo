@@ -66,10 +66,11 @@ describe('recoverable scenario draft controller', () => {
     expect(reloaded.getState()).toMatchObject({ status: 'pending', request: beforeAcceptance.request })
   })
 
-  it('ignores legacy completed draft pointers so they cannot replace the homepage', async () => {
+  it('ignores legacy draft pointers so they cannot replace the homepage', async () => {
     const storage = new MemoryStorage()
     const request = { requestId: crypto.randomUUID(), createdAt: Date.now(), inputZh: '旧理发场景', clarifications: [], forceGenerate: false }
     storage.setItem('kaiwa.scenario-draft-task.v1', JSON.stringify({ version: 1, request, taskToken: 'completed-token' }))
+    storage.setItem('kaiwa.scenario-draft-task.v2', JSON.stringify({ version: 2, request, taskToken: 'failed-token' }))
     const get = vi.fn().mockResolvedValue({ status: 'complete', result: { status: 'needs_clarification', questionZh: '想约哪一天？', optionsZh: ['周末'] } })
     const runtime = createScenarioDraftRecoveryRuntime({
       storage,
@@ -84,6 +85,7 @@ describe('recoverable scenario draft controller', () => {
     expect(get).not.toHaveBeenCalled()
     expect(runtime.getState().status).toBe('idle')
     expect(storage.getItem('kaiwa.scenario-draft-task.v1')).toBeNull()
+    expect(storage.getItem('kaiwa.scenario-draft-task.v2')).toBeNull()
   })
 
   it('clears the current envelope when its result becomes ready', async () => {
@@ -205,7 +207,7 @@ describe('recoverable scenario draft controller', () => {
     expect(corrupt.getState()).toMatchObject({ status: 'expired', error: '无法恢复已损坏的练习草稿，请重新准备。' })
 
     const expiredStorage = new MemoryStorage()
-    expiredStorage.setItem(SCENARIO_DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, request: { requestId: crypto.randomUUID(), createdAt: 0, inputZh: '过期', clarifications: [], forceGenerate: false } }))
+    expiredStorage.setItem(SCENARIO_DRAFT_STORAGE_KEY, JSON.stringify({ version: 3, request: { requestId: crypto.randomUUID(), createdAt: 0, inputZh: '过期', clarifications: [], forceGenerate: false } }))
     const expired = createScenarioDraftRecoveryRuntime({ api: acceptedApi(), storage: expiredStorage, now: () => 86_400_001 })
     expired.mount()
     expect(expired.getState().status).toBe('expired')
@@ -291,7 +293,7 @@ describe('recoverable scenario draft controller', () => {
     ]
     for (const request of invalidRequests) {
       const storage = new MemoryStorage()
-      storage.setItem(SCENARIO_DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, request }))
+      storage.setItem(SCENARIO_DRAFT_STORAGE_KEY, JSON.stringify({ version: 3, request }))
       const runtime = createScenarioDraftRecoveryRuntime({ api: acceptedApi(), storage })
       runtime.mount()
       expect(runtime.getState().status).toBe('expired')
