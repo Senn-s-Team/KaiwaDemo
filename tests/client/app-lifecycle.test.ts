@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 真实浏览器可见 App DOM、会话快照、启动存储与 visibilitychange 生命周期事件
- * [OUTPUT]: 锁定会话媒体/草稿生命周期、启动时旧遥测存储清理、异步所有权、复练建议与提前退出行为
+ * [INPUT]: 真实浏览器可见 App DOM、会话快照、visibilitychange 生命周期事件与匿名遥测控制器
+ * [OUTPUT]: 锁定会话媒体/草稿生命周期、异步所有权及自动匿名遥测 checkpoint seam
  * [POS]: tests/client 的 App 根组件生命周期集成回归契约
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -19,7 +19,6 @@ import type * as PracticeHistoryModule from '../../src/lib/practice-history'
 import type * as SttModule from '../../src/lib/stt'
 import type * as AudioEngineModule from '../../src/lib/audio-engine'
 
-let indexedDbDeleteSpy: { mockRestore: () => void } | undefined
 let App: ComponentType
 let fetchConfig: ReturnType<typeof vi.fn>
 let listPracticeAttempts: ReturnType<typeof vi.fn>
@@ -85,13 +84,11 @@ function installWaitingSessionSnapshot(listeningScaffoldLevel = 0): void {
 describe('App lifecycle integration', () => {
   let root: Root
   let container: HTMLDivElement
-  let indexedDbDescriptor: PropertyDescriptor | undefined
   let hidden: PropertyDescriptor | undefined
   let visibility: PropertyDescriptor | undefined
   let scrollIntoView: PropertyDescriptor | undefined
 
   beforeEach(async () => {
-    vi.resetModules()
     scrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
     fetchConfig = vi.fn().mockResolvedValue({
@@ -114,19 +111,12 @@ describe('App lifecycle integration', () => {
       ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')),
       listPracticeAttempts,
     }))
-    window.localStorage.setItem('kaiwa.validation-consent.v1', 'true')
-    window.localStorage.setItem('kaiwa.validation-client.v1', 'legacy-client')
-    indexedDbDescriptor = Object.getOwnPropertyDescriptor(window, 'indexedDB')
-    const fakeIndexedDb: Pick<IDBFactory, 'deleteDatabase'> = {
-      deleteDatabase: vi.fn<IDBFactory['deleteDatabase']>(),
-    }
-    Object.defineProperty(window, 'indexedDB', { configurable: true, value: fakeIndexedDb })
-    indexedDbDeleteSpy = vi.spyOn(fakeIndexedDb, 'deleteDatabase')
     hidden = Object.getOwnPropertyDescriptor(document, 'hidden')
     visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
     installSessionSnapshot()
     expect(window.sessionStorage.getItem('kaiwa.current-session.v1')).not.toBeNull()
     container = document.createElement('div')
+    vi.resetModules()
     const appModule = await import('../../src/App')
     App = appModule.default
     document.body.appendChild(container)
@@ -140,8 +130,8 @@ describe('App lifecycle integration', () => {
   })
 
   afterEach(() => {
-    if (root) root.unmount()
-    if (container) container.remove()
+    root.unmount()
+    container.remove()
     window.sessionStorage.clear()
     if (scrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollIntoView)
     else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
@@ -149,13 +139,9 @@ describe('App lifecycle integration', () => {
     else delete (document as { hidden?: boolean }).hidden
     if (visibility) Object.defineProperty(document, 'visibilityState', visibility)
     else delete (document as { visibilityState?: DocumentVisibilityState }).visibilityState
-    if (indexedDbDescriptor) Object.defineProperty(window, 'indexedDB', indexedDbDescriptor)
-    else delete (window as { indexedDB?: IDBFactory }).indexedDB
     vi.doUnmock('../../src/lib/api')
     vi.doUnmock('../../src/lib/practice-history')
     vi.clearAllMocks()
-    indexedDbDeleteSpy?.mockRestore()
-    indexedDbDeleteSpy = undefined
   })
 
   it('keeps the restored draft and send action when hidden then visible', async () => {
@@ -193,12 +179,10 @@ describe('App lifecycle integration', () => {
     const restored: unknown = JSON.parse(window.sessionStorage.getItem('kaiwa.current-session.v1') ?? 'null')
     expect(readFailureCount(restored)).toBe(0)
   })
-
-  it('purges legacy telemetry storage while restoring the session and loading config', () => {
-    expect(window.localStorage.getItem('kaiwa.validation-consent.v1')).toBeNull()
-    expect(window.localStorage.getItem('kaiwa.validation-client.v1')).toBeNull()
-    expect(window.indexedDB.deleteDatabase).toHaveBeenCalledWith('kaiwa-validation-telemetry')
-    expect(container.querySelector<HTMLTextAreaElement>('#transcript-sheet-input')).not.toBeNull()
+  it('wires telemetry lifecycle without a consent decision or consent UI', () => {
+    expect(container.querySelector('.validation-consent')).toBeNull()
+    expect(container.textContent).not.toContain('同意参与')
+    expect(container.textContent).not.toContain('撤销同意')
   })
 })
 
@@ -301,7 +285,7 @@ describe('App config lifecycle regression', () => {
       report: buildSessionReport('source-session', 'mock', scenario, 123, 456, [createRoundRecord(1, scenario.firstLine, 0)]),
       feedback: { outcome: 'partial', outcomeEvidenceZh: '', listeningFinding: null, expressionImprovement: { turn: 1, userConfirmedJa: 'これをください。', suggestedJa: 'こちらをお願いします。', reasonZh: '更礼貌。' }, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: 'これをください。', directionZh: '' } },
     }
-    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }), restartPractice: vi.fn().mockResolvedValue({ scenario: scenario.dynamicData, scenarioToken: 'repeat-token', practiceToken: 'practice-token' }), startScenarioSession: vi.fn().mockResolvedValue({ scenario: { ...scenario, scenarioToken: 'repeat-token' } }) }))
+    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }), restartPractice: vi.fn().mockResolvedValue({ scenario: scenario.dynamicData, scenarioToken: 'repeat-token', practiceToken: 'practice-token' }), startScenarioSession: vi.fn().mockResolvedValue({ scenario: { ...scenario, scenarioToken: 'repeat-token' }, telemetrySession: null }) }))
     vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([attempt]) }))
     const box = document.createElement('div'); document.body.appendChild(box)
     const appModule = await import('../../src/App'); const appRoot = createRoot(box); flushSync(() => appRoot.render(createElement(appModule.default)))
@@ -332,7 +316,7 @@ describe('App config lifecycle regression', () => {
     const prepared: PreparedRestartData = { scenario: scenario.dynamicData, scenarioToken: 'prepared-token', practiceToken: 'practice-token', previousAdvice }
     writePreparedRestart(prepared)
     const fetchConfigMock = vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } })
-    const startScenarioSessionMock = vi.fn().mockResolvedValue({ scenario: { ...scenario, scenarioToken: 'prepared-token' } })
+    const startScenarioSessionMock = vi.fn().mockResolvedValue({ scenario: { ...scenario, scenarioToken: 'prepared-token' }, telemetrySession: null })
     vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: fetchConfigMock, startScenarioSession: startScenarioSessionMock }))
     vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([]) }))
     const box = document.createElement('div'); document.body.appendChild(box)
@@ -1037,6 +1021,7 @@ describe('SessionComplete redo lifecycle', () => {
     expect(window.localStorage.getItem('kaiwa.completed-review.v1')).toBeNull()
   })
 
+
   it('records user_exit when the learner ends an active session early', async () => {
     vi.resetModules()
     const round = createRoundRecord(1, scenario.firstLine, 0); round.inputMode = 'text'; round.userFinal = '前髪は残してください。'
@@ -1047,5 +1032,22 @@ describe('SessionComplete redo lifecycle', () => {
     const earlyReview = await vi.waitFor(() => { const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent === '提前复盘'); expect(button).toBeDefined(); return button as HTMLButtonElement }, { interval: 0 })
     flushSync(() => earlyReview.click())
     await vi.waitFor(() => { const record = JSON.parse(window.localStorage.getItem('kaiwa.completed-review.v1') ?? 'null') as { report?: { completion?: { reason?: string } } } | null; expect(record?.report?.completion?.reason).toBe('user_exit') }, { interval: 0 })
+  })
+})
+
+describe('App validation telemetry lifecycle', () => {
+  it('never restores telemetry credentials from a session snapshot', async () => {
+    vi.resetModules()
+    const snapshot = { version: 1, phase: 'waiting_user', sessionId: 'local-session', scenario, messages: [], rounds: [], currentRound: createRoundRecord(1, scenario.firstLine, 0), turn: 1, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' } }
+    const serialized = JSON.stringify(snapshot)
+    expect(serialized).not.toContain('telemetryToken')
+    expect(serialized).not.toContain('dyn_ses_')
+    const { readSessionSnapshot } = await import('../../src/lib/session-snapshot')
+    window.sessionStorage.setItem('kaiwa.current-session.v1', serialized)
+    expect(readSessionSnapshot()?.scenario).toEqual(scenario)
+    const completedRecovery = JSON.stringify({ version: 1, sessionId: 'local-session', scenario, messages: [], rounds: [], startedAt: 1, endedAt: 2, report: {}, feedback: null, redoRecords: [], pending: {} })
+    expect(completedRecovery).not.toContain('telemetryToken')
+    expect(completedRecovery).not.toContain('dyn_ses_')
+    window.sessionStorage.clear()
   })
 })

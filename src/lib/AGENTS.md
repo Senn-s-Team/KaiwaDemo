@@ -29,6 +29,10 @@ api.ts: 前端 API 通信层，提供场景语音描述保真润色、可恢复�
 
 practice-history.ts: 当前浏览器 IndexedDB 练习历史、完整场景分组与关联删除，不保存临时访问令牌
 practice-progress.ts: 基于有效引用与帮助事实的场景表现汇总、同标准首次完整练习比较
+validation-client.ts: 技术验证遥测的匿名客户端 UUID 生成与本地存储边界
+validation-outbox.ts: 独立 IndexedDB 遥测 record 队列，按非凭据 sessionId 路由、幂等投递与有界退避；绝不持久化令牌
+use-validation-telemetry.ts: 从既有事实派生严格匿名记录；按 sessionId 隔离出站与去重
+use-validation-lifecycle.ts: 集中 App 的稳定遥测 seam 与可更新会话汇总；服务端凭据只留内存
 app-phase.ts: App 合法阶段迁移和恢复提示纯规则，供根编排复用
 
 [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md

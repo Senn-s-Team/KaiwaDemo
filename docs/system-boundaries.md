@@ -26,7 +26,7 @@
 │  ├─ fetch API + shared Schema parsing                   │
 │  ├─ sessionStorage: 当前会话/首页复练准备               │
 │  ├─ localStorage: 草稿任务/完成复盘 durable recovery    │
-│  ├─ IndexedDB: 本机练习历史                              │
+│  ├─ IndexedDB: 本机练习历史与独立遥测 outbox          │
 │  └─ ElevenLabs client: STT/TTS 媒体连接                 │
 └───────────────┬─────────────────────────────────────────┘
                 │ same-origin /api/*
@@ -35,6 +35,7 @@
 │ worker/index.ts: HTTP 边界、路由、入站校验、签名校验    │
 │  ├─ OpenAI-compatible gateway: 回复、提示、反馈等       │
 │  ├─ api.elevenlabs.io: 临时 STT/TTS token 代理          │
+│  ├─ D1 VALIDATION_DB: 匿名技术验证事实                  │
 │  └─ Workflow bindings                                   │
 │       ├─ SCENARIO_DRAFT → ScenarioDraftWorkflow         │
 │       └─ FEEDBACK_TASK   → FeedbackWorkflow              │
@@ -47,7 +48,7 @@
 
 - 浏览器通过同源 `/api/*` 与 Worker 通信；`wrangler.jsonc` 将 `/api/*` 配置为先运行 Worker，其他静态资源走 SPA fallback。
 - 浏览器不会把 OpenAI 或 ElevenLabs 的服务端密钥发给上游。ElevenLabs 媒体连接使用 Worker 签发的临时 token；模型请求由 Worker 代发。
-- 场景草拟和反馈/重做是 Worker 创建并查询的 Cloudflare Workflow durable task；普通会话回复、提示、听力支架、语音辅助和场景润色在 API 请求内完成。
+- 场景草拟和反馈/重做是 Worker 创建并查询的 Cloudflare Workflow durable task；普通会话回复、提示、听力支架、语音辅助和场景润色在 API 请求内完成。测试使用期间，浏览器通过独立 outbox 自动向 D1 写入不含对话文本的固定匿名验证事实；D1 不参与训练主链路，遥测失败不得影响训练。
 - Workflow 的 runtime-only 类只在 `worker/entry.ts` 导出；`scenario-draft-execute.ts` 与 `feedback-task-execute.ts` 是 Workflow 和 Node 测试共用的执行 seam。
 
 ## 3. Worker API 路由职责
@@ -61,13 +62,14 @@
 | `/api/scenario/draft` | POST | 校验 `ScenarioDraftTaskRequest`，按请求摘要建立/复用场景草拟 Workflow，返回 task capability | `SCENARIO_DRAFT`；`scenario_draft` capability |
 | `/api/scenario/draft` | GET | 验证 task capability，查询场景草拟 Workflow，返回 pending/complete/failed | `Authorization: Bearer <taskToken>` |
 | `/api/practice/restart` | POST | 验证 practice token，重新签发短期 scenario token，返回可开始的场景数据 | `practice` token → `scenario` token |
-| `/api/session/start` | POST | 验证 scenario token，创建动态 session id，签发 session token，并返回场景首句及回合上限 | `scenario` token → `session` token |
+| `/api/session/start` | POST | 验证 scenario token，创建动态 session id，签发 session token 和只用于匿名验证写入的短期 telemetry token，并返回场景首句及回合上限 | `scenario` token → `session`/`telemetry` token |
 | `/api/respond` | POST | 校验动态会话回复请求，向 OpenAI-compatible endpoint 请求流式相手回复 | session token；NDJSON response |
 | `/api/hint` | POST | 生成表达提示 | session token；OpenAI-compatible endpoint 或受控 mock |
 | `/api/listening-scaffold` | POST | 生成四级听力支架响应 | session token；`shared/listening-scaffold.ts` |
 | `/api/feedback/tasks` | POST | 校验 conversation/redo 任务，验证 session 与场景首句，创建/复用反馈 Workflow | `FEEDBACK_TASK`；`feedback_task` capability |
 | `/api/feedback/tasks` | GET | 验证 task capability，查询反馈/重做 Workflow 状态并校验结果 | `Authorization: Bearer <taskToken>` |
 | `/api/speech/assist` | POST | 在已观察转写和停顿条件下生成续说辅助 | session token；`shared/speech-assist.ts` |
+| `/api/validation/batch` | POST | 以 shared 严格 Schema 校验版本 2 的自动匿名技术验证批次，验证会话绑定的 telemetry token，并幂等写入 D1 | `telemetry` token；`VALIDATION_DB` |
 | `/api/scenario/polish` | POST | 对中文场景设置做受限保真润色 | `shared/scenario-polish.ts`；模型或受控 mock |
 
 - 未匹配的 `/api/*` 返回 `404 not_found`；不在本文加入未实现的救援或旁路路由。
@@ -100,7 +102,20 @@
 - 这是跨页面/跨会话的本机历史边界，不是 Worker 数据库，也不保存 session token 或 STT/TTS 临时访问 token。保存函数显式挑选字段；调用方附带的临时令牌不会被隐式持久化。
 - IndexedDB 不可用、被阻塞或事务失败时，历史保存/读取以错误结束；本文不把浏览器历史推断为云端备份。
 
-### 4.4 Workflow 数据：服务端任务状态
+### 4.4 IndexedDB：技术验证 outbox
+
+- `src/lib/validation-outbox.ts` 独立拥有数据库 `kaiwa-validation-telemetry`。它只保存已通过 `shared/validation-telemetry.ts` 严格校验的固定事实、随机 session id、尝试次数和下次尝试时间，不读取或写入 `kaiwa-practice-history`，也不保存 telemetry token。
+- 新会话自动生成并入队固定形状的匿名技术事实。在线、窗口重新获得焦点或新记录入队时尝试投递；发送器只接收与当前内存 session id 匹配的记录，旧会话残留记录会被丢弃而不会借用新 token。失败采用有界指数退避，所有失败都不得改变训练状态。
+- telemetry capability 不写入 sessionStorage、localStorage、完成复盘恢复记录或练习历史；刷新后不能恢复该页面内存凭据。旧 wire schema v1 批次可被 Worker 拒绝并由 outbox 自然丢弃。
+
+### 4.5 D1：匿名技术验证事实
+
+- `worker/validation-telemetry.ts` 在 `/api/validation/batch` 边界验证版本 2 Schema、`anonymousMetricsCollection: true`、token 会话绑定和七天事件时间窗，然后把随机客户端 UUID 经过服务端 HMAC 派生后写入 `VALIDATION_DB`；D1 不保存原始 UUID、IP 字段、User-Agent、对话、转写、场景描述、音频、访问令牌或自由文本评价。
+- `validation_sessions` 保存一行会话汇总；`validation_events` 保存阶段、完成和失败 checkpoint；`validation_rounds` 保存回合耗时、输入模式、支架、修改、重录与重试事实；`validation_reviews` 只保存结构化复盘枚举及人工复核占位，不保存模型解释文本。
+- `event_id` 与 `(session_id, sequence)` 形成幂等边界。会话汇总允许反馈或重做完成后以更高 `sequence` 单调更新，`last_summary_sequence` 拒绝乱序记录与同一事件重放；重复上传不得重复计数或覆盖既有汇总。D1 缺失或写入失败时端点失败，但客户端吞没遥测失败并继续训练。
+- 每日 UTC cron 先删除超过 180 天的 review/round/event，再删除超过 365 天的 session 汇总。
+
+### 4.6 Workflow 数据：服务端任务状态
 
 - 场景草拟任务由 `SCENARIO_DRAFT` 拥有，反馈/重做任务由 `FEEDBACK_TASK` 拥有。浏览器只拥有请求封套和 capability token，不拥有 Workflow 内部状态。
 - task id 是完整请求 JSON 的 SHA-256 摘要；提交失败时路由尝试按同一 id 查询已有任务，形成请求级幂等边界。
@@ -109,6 +124,7 @@
 - Workflow 结果必须再次通过 `ScenarioDraftModelResultSchema` 或 `FeedbackTaskStatusSchema` 等 Schema 校验；无效结果不能被当作成功数据交给浏览器。
 
 ## 5. Token 类型与生命周期
+
 所有应用 token 由 `worker/tokens.ts` 以 HMAC-SHA-256 签名。签名密钥优先使用 `SCENARIO_SIGNING_SECRET`，否则使用 `OPENAI_API_KEY`；非 mock 部署缺少二者时签发/验签失败。
 
 - **scenario token**：包含动态场景及 `issuedAt`/`expiresAt`，由场景草拟结果或练习重启签发；默认有效期为 `LIMITS.scenarioTokenTtlMs`（当前代码为 2 小时）。`/api/session/start` 消费并验证它。
@@ -116,7 +132,8 @@
 - **practice token**：包含带版本化 evidence points 的场景和签发时间；用于本机复练入口。验签时不按 `expiresAt` 检查，但它只在具有评价证据的场景上签发；重新开始时换发新的短期 scenario token。
 - **scenario_draft capability**：只引用场景草拟 task id 和任务请求过期时间，供草拟 GET 查询；不是场景或会话凭据。
 - **feedback_task capability**：只引用反馈 task id 和任务请求过期时间，供反馈 GET 查询；不是 session token。
-- token 具有 kind 与 schema version，端点会拒绝格式错误、签名错误、类型不匹配、版本不支持、声明非法或已过期的 token。持久化边界按封套区分：场景草稿 `taskToken` 写入 `localStorage`；完成复盘的待处理 `feedback_task` 也可写入 `localStorage`；`SessionScenario` 中的 `sessionToken`、`scenarioToken`（及可选 `practiceToken`）会随当前会话快照进入 `sessionStorage`。
+- **telemetry token**：只包含随机动态 session id、签发和过期时间，只能向匿名验证端点写入与该 session id 一致的严格批次；不授权读取数据或调用训练接口。有效期覆盖客户端允许的七天离线批次窗口，但只保存在当前页面内存。
+- token 具有 kind 与 schema version，端点会拒绝格式错误、签名错误、类型不匹配、版本不支持、声明非法或已过期的 token。持久化边界按封套区分：场景草稿 `taskToken` 写入 `localStorage`；完成复盘的待处理 `feedback_task` 也可写入 `localStorage`；`SessionScenario` 中的 `sessionToken`、`scenarioToken`（及可选 `practiceToken`）会随当前会话快照进入 `sessionStorage`。这些 token 并非都只存在内存。
 - ElevenLabs token 是另一类供应商临时凭据：Worker 从上游获取后返回 `expiresInSeconds: 900`；浏览器 `SttTokenManager` 仅以内存缓存管理，默认本地 token lifetime 为 800 秒，并在使用后消费或 reset。它不进入 sessionStorage、localStorage 或 IndexedDB 历史。
 
 ## 6. STT、TTS 与模型失败边界
@@ -142,6 +159,7 @@
 
 - Worker 主入口为 `./worker/entry.ts`；静态 assets 使用 SPA `not_found_handling`，`/api/*` 配置 `run_worker_first`。
 - 必需的 Workflow binding 是 `SCENARIO_DRAFT`（`ScenarioDraftWorkflow`）和 `FEEDBACK_TASK`（`FeedbackWorkflow`）。缺少对应 binding 时，任务提交/查询返回 Workflow 未配置或不可用错误。
+- 匿名技术验证使用 `VALIDATION_DB` D1 binding、`migrations/` 迁移目录和每日 UTC cron。缺少 D1 binding 时 `/api/validation/batch` 返回不可用，但训练接口和页面流程不依赖该数据库。
 - 运行变量包括 OpenAI base URL/model、ElevenLabs STT/TTS model/voice id，以及 `ALLOW_MOCK`。真正调用还需要 `OPENAI_API_KEY`、`ELEVENLABS_API_KEY` 和签名密钥配置；`ELEVENLABS_VOICE_ID` 是 TTS 可用性的必要条件。
 - `SCENARIO_SIGNING_SECRET` 未设置时，代码会把 `OPENAI_API_KEY` 作为签名密钥回退；生产部署应把签名密钥作为明确的 Worker Secret 管理，而不是把 API key 暴露给浏览器。
 - `ALLOW_MOCK` 当前配置为 `false`。本文不宣称某个未在配置或代码中出现的模型档位、供应商或 Durable Object 绑定存在。
@@ -149,10 +167,10 @@
 ## 8. 隐私与不持久化边界
 
 - 浏览器向 Worker 提交的是转写文本、会话消息、场景及任务请求；STT 原始音频由浏览器媒体管线直接提供给 ElevenLabs 实时客户端，不由本 Worker 持久化。
-- token 的本地持久化由恢复封套决定：草稿/反馈 task capability 可随 `localStorage` 中的任务记录恢复；当前会话的 `sessionToken`、`scenarioToken` 和可选 `practiceToken` 可随 `sessionStorage` 快照保存。
+- token 的本地持久化由恢复封套决定：草稿/反馈 task capability 可随 `localStorage` 中的任务记录恢复；当前会话的 `sessionToken`、`scenarioToken` 和可选 `practiceToken` 可随 `sessionStorage` 快照保存。telemetry token 例外：它只存在当前页面内存，不进入任何本地恢复或历史存储。
 - 当前会话快照和复盘恢复记录属于浏览器本地存储，可能包含对话文本、场景、报告、反馈及上述恢复所需凭据；它们不是服务端账户数据，也不构成跨设备同步。本文不承诺浏览器、供应商或平台日志的保留策略。
 - Workflow 在任务生命周期内持有请求参数与执行结果；当前配置只证明 1 天结果保留，不证明永久删除时间、跨区域位置或供应商侧数据策略。
-- 任何“发音、口音、原音或情绪”评价都不应从当前数据边界推导：Worker 的全局安全约束明确把输入定义为用户确认的 STT 文本，而不是原始音频。
+- 自动匿名验证批次只携带固定枚举、计数、耗时、粗粒度环境分类和结构化会话/回合/复盘事实。D1 保存服务端 HMAC 派生客户端标识，不保存原始客户端 UUID、原始音频、对话、转写、场景描述、访问令牌、完整浏览器标识、User-Agent 或应用级 IP 字段；平台网络日志仍服从 Cloudflare 配置。
 
 ## 9. 边界变更检查
 
@@ -163,4 +181,5 @@
 3. sessionStorage、localStorage、IndexedDB 与 Workflow 的所有权是否仍互不混淆。
 4. token 签发、验签、过期和恢复器内的 task 生命周期是否同步。
 5. `wrangler.jsonc` 的 binding、变量和 `/api/*` Worker 优先规则是否仍满足运行时入口。
-6. 同时更新本文头部协议，并检查 `docs/AGENTS.md`。
+6. 匿名遥测字段、自动收集标识、token 内存边界、D1 migration、索引和 retention cron 是否仍同构。
+7. 同时更新本文头部协议，并检查 `docs/AGENTS.md`。

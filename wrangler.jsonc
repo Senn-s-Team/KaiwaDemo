@@ -19,4 +19,8 @@
     { "binding": "SCENARIO_DRAFT", "name": "scenario-draft", "class_name": "ScenarioDraftWorkflow" },
     { "binding": "FEEDBACK_TASK", "name": "feedback-task", "class_name": "FeedbackWorkflow" }
   ],
+  "d1_databases": [
+    { "binding": "VALIDATION_DB", "database_name": "kaiwa-validation", "database_id": "30bfb9d1-d3b4-41db-a3bd-64c8373bd163", "migrations_dir": "migrations" }
+  ],
+  "triggers": { "crons": ["0 0 * * *"] }
 }

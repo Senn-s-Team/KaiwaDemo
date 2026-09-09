@@ -14,4 +14,5 @@ listening-scaffold.test.ts: 四级听力支架请求、输出与跨字段约束�
 openai-url.test.ts: OpenAI endpoint URL 组合边界测试
 elevenlabs-token.test.ts: ElevenLabs 临时 token 代理边界测试
 tokens.test.ts: Worker token 签发、验签、过期与篡改边界测试
+validation-telemetry.test.ts: 同意式 telemetry schema 严格拒绝文本、token 绑定与七日认证、D1 原子批次/幂等/last_seen、缺少 binding、过期批次与保留期测试
 [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md

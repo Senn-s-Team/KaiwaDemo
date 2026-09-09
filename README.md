@@ -13,7 +13,7 @@
 7. **克制相手**：相手保持角色，每轮 1 至 2 句，最多提 1 个聚焦问题，不在会中纠错或教学。
 8. **精炼完成页**：只展示沟通结果及事实证据、1 个听力发现、1 个表达改进和 1 个关键回合重做任务。
 9. **完整回合重做**：重播该回合原始相手音频，将听力和表达支架重置到无支架状态；听力仍按 L1 至 L4 顺序升级，已有消息缓存则复用，再重新录音/文字回应并确认第二稿，提交后对比前后沟通效果与参考表达。
-10. **单场恢复与数据导出**：当前会话的场景、消息、回合记录、当前回合、`turn`、可编辑转写及按相手消息保存的听力支架缓存在浏览器 `sessionStorage`。刷新后恢复到最近可操作状态；录音或网络请求等不可原样恢复的阶段安全降级到等待用户回应或确认转写，不自动重放请求。训练事实、重做记录与 `speechAssistEvents` 可主动导出为 JSON；不设账号、云端数据库或跨设备持久化。
+10. **单场恢复、数据导出与匿名技术验证**：当前会话的场景、消息、回合记录、当前回合、`turn`、可编辑转写及按相手消息保存的听力支架缓存在浏览器 `sessionStorage`。刷新后恢复到最近可操作状态；录音或网络请求等不可原样恢复的阶段安全降级到等待用户回应或确认转写，不自动重放请求。训练事实、重做记录与 `speechAssistEvents` 可主动导出为 JSON。技术验证数据在测试使用期间自动记录并通过独立浏览器 outbox 发送，仅包含固定形状的匿名操作、会话和性能事实；遥测 token 仅存于内存，失败不阻断训练。
 
 ## 本地启动
 
@@ -41,18 +41,32 @@ ELEVENLABS_STT_MODEL=scribe_v2_realtime
 ELEVENLABS_TTS_MODEL=eleven_flash_v2_5
 ```
 
-## Cloudflare 部署
+## Cloudflare 部署与匿名验证数据
 
-生产环境必须通过 Worker Secrets 配置永久密钥；不要把密钥写入 `wrangler.jsonc`：
+`wrangler.jsonc` 已声明 `VALIDATION_DB` D1 binding、`migrations/` 目录和每日 UTC 清理任务。当前 D1 数据库 ID 为 `30bfb9d1-d3b4-41db-a3bd-64c8373bd163`。首次部署或迁移新环境时，先确认配置中的 `database_id` 指向目标数据库，再执行：
 
 ```bash
+npx wrangler d1 migrations apply kaiwa-validation --local
+npx wrangler d1 migrations apply kaiwa-validation --remote
 npm run deploy
 ```
+
+生产环境还必须通过 Worker Secrets 配置永久密钥；不要把密钥写入 `wrangler.jsonc`：
 
 ```bash
 npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put ELEVENLABS_API_KEY
 npx wrangler secret put SCENARIO_SIGNING_SECRET
+```
+
+测试使用期间会自动发送匿名技术验证数据。发送内容仅为固定形状的流程阶段、耗时、失败类别、重试、功能使用计数、粗粒度环境分类、匿名会话/客户端派生标识和结构化复盘事实；wire schema 版本为 2，并使用 `anonymousMetricsCollection: true` 表示该批次属于自动技术验证。不会发送或在 D1 保存原始音频、转写或对话内容、场景描述、访问令牌、IP、User-Agent 或完整浏览器标识。浏览器 outbox 只保存待发送事实、随机会话 ID 和重试元数据；telemetry token 只存在内存。`VALIDATION_DB` 缺失、D1 写入失败、浏览器存储不可用或遥测上传失败都只会丢失对应验证数据，不得阻断训练。保留期和边界见 [PRIVACY.md](./PRIVACY.md)。
+
+可直接用 D1 SQL 检查首要验证漏斗，不需要先建设独立看板：
+
+```bash
+npx wrangler d1 execute kaiwa-validation --remote --command "SELECT COUNT(*) AS started, SUM(closed_naturally) AS completed, SUM(feedback_completed) AS feedback_ready, SUM(redo_started) AS redo_started, SUM(redo_completed) AS redo_completed FROM validation_sessions;"
+npx wrangler d1 execute kaiwa-validation --remote --command "SELECT event, failure_domain, failure_code, COUNT(*) AS occurrences FROM validation_events WHERE event IN ('failure_occurred', 'failure_recovered') GROUP BY event, failure_domain, failure_code ORDER BY occurrences DESC;"
+npx wrangler d1 execute kaiwa-validation --remote --command "SELECT input_mode, listening_scaffold_level, expression_scaffold_level, COUNT(*) AS rounds, AVG(stt_finalize_latency_ms) AS avg_stt_ms, AVG(llm_first_text_latency_ms) AS avg_llm_first_text_ms, AVG(tts_first_audio_latency_ms) AS avg_tts_first_audio_ms FROM validation_rounds WHERE round_completed = 1 GROUP BY input_mode, listening_scaffold_level, expression_scaffold_level ORDER BY rounds DESC;"
 ```
 
 ## 质量检查与构建
@@ -66,5 +80,5 @@ npm run preview
 
 1. 原型为回合制交互，不包含全双工打断、发音或声调打分、长期成长曲线。
 2. 尾部静音检测（trailing silence）用于语音辅助触发，也用于 10 秒开始倒计时、13 秒自动停止录音；它不能恢复历史声学停顿。字段 A 仅对文本中的填充词与重复片段做确定性删除清理。
-3. `sessionStorage` 只恢复当前浏览器标签页中的单场会话，不构成长期历史、数据库存储、账号同步或跨设备恢复；用户仍需主动点击“导出训练数据 JSON”保存报告。
+3. `sessionStorage` 只恢复当前浏览器标签页中的单场会话，不构成账号同步或跨设备恢复；自动匿名技术验证另由独立 outbox 发送至 `VALIDATION_DB`，用户仍需主动点击“导出训练数据 JSON”保存报告。
 4. 真实语音识别和合成受浏览器麦克风权限、音频采样率和网络延迟影响。
