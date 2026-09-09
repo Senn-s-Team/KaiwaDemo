@@ -192,6 +192,7 @@ export function createScenarioDraftRecoveryRuntime(dependencies: ScenarioDraftRe
     }
   }
   const failTerminal = (request: ScenarioDraftTaskRequest, error: unknown): void => {
+    removeStored()
     publish({ status: 'failed', request, result: null, error: errorMessage(error), storageNotice })
   }
   const submit = async (): Promise<void> => {
@@ -241,7 +242,7 @@ export function createScenarioDraftRecoveryRuntime(dependencies: ScenarioDraftRe
         removeStored()
         publish({ status: 'ready', request, result: status.result, error: null, storageNotice })
       } else {
-        publish({ status: 'failed', request, result: null, error: status.error.message, storageNotice })
+        failTerminal(request, new Error(status.error.message))
       }
     } catch (error) {
       if (requestEpoch !== epoch || isLifecycleAbort(controller.signal)) return

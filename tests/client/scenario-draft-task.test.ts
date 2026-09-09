@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 可恢复场景草稿控制器、内存 storage、可控草稿 task API
- * [OUTPUT]: 验证未完成草稿请求持久化、前后台恢复、成功终态清理、同封套重试、代际隔离及错误分类
+ * [OUTPUT]: 验证未完成草稿请求持久化、前后台恢复、成功与失败终态清理、同封套重试、代际隔离及错误分类
  * [POS]: tests/client 的首页场景草稿恢复回归契约，不依赖真实网络或浏览器刷新
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -165,6 +165,7 @@ describe('recoverable scenario draft controller', () => {
     await tick()
     expect(requests[1]).toEqual(requests[0])
     expect(runtime.getState().status).toBe('failed')
+    expect(storage.getItem(SCENARIO_DRAFT_STORAGE_KEY)).toBeNull()
 
     runtime.replace('预约理发', [], false)
     await tick()

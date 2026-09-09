@@ -323,7 +323,7 @@ export async function draftScenario(env: Env, request: ScenarioDraftRequest): Pr
         accept: 'application/json',
       },
       body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(DEADLINES.scenarioDraftModelMs),
     })
   } catch {
     if (mustGenerate) {

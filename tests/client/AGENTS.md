@@ -19,7 +19,7 @@ stt-observable.test.ts: STT 实时片段规约、提交收敛与停止时已观�
 text-cleaner.test.ts: 日语转写文本清洗与规整契约
 home-stt.test.ts: 首页中文 STT 的既有文字保全、迟到结果、取消离页、冲突切换与 300 字上限契约
 session-complete-offline.test.ts: 完成页重做 STT/token 离线中断、转写保全、文字回退与迟到结果隔离契约
-scenario-draft-task.test.ts: 首页场景草稿未完成请求封套持久化、旧版本清理、成功终态驱逐、前后台恢复、响应丢失与 deadline 重试、代际隔离和终态分类契约
+scenario-draft-task.test.ts: 首页场景草稿未完成请求封套持久化、旧版本清理、成功与失败终态驱逐、前后台恢复、响应丢失与 deadline 重试、代际隔离和终态分类契约
 home-practice-recovery.test.ts: 首页同场景复练准备恢复的 round-trip、viewed、非法存储与清理纯逻辑契约
 tts-errors.test.ts: TTS 错误分类与界面恢复语义契约
 voice-turn-controller.test.ts: 用户语音回合状态机、最终文本校验与录音启动锁契约

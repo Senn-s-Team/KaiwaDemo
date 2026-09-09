@@ -21,6 +21,7 @@ export const LIMITS = {
   sessionTokenTtlMs: 1 * 60 * 60 * 1_000,
 } as const
 export const DEADLINES = {
+  scenarioDraftModelMs: 30_000,
   interactiveModelMs: 20_000,
   feedbackWorkflowModelMs: 25_000,
   feedbackWorkflowStepMs: 30_000,
