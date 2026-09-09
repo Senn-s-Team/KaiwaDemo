@@ -89,8 +89,8 @@
 
 ### 4.2 `localStorage`：跨页面 durable recovery
 
-- `src/lib/scenario-draft-task.ts` 的 `kaiwa.scenario-draft-task.v1` 保存版本化场景草稿请求及可选 task token。
-- 场景草稿恢复器在页面可见、在线且非活动会话条件下轮询；页面隐藏、离线、进入活动会话或组件卸载时停止观察并中止请求。请求创建时间超过 `SCENARIO_DRAFT_TASK_TTL_MS` 时删除并报告过期。
+- `src/lib/scenario-draft-task.ts` 的 `kaiwa.scenario-draft-task.v2` 只保存尚未完成的版本化场景草稿请求及可选 task token；旧 `v1` 封套在挂载时静默清理，不能接管首页。
+- 场景草稿恢复器在页面可见、在线且非活动会话条件下轮询；成功结果进入当前页面内存后立即删除持久化封套，刷新不再反复展示同一个准备场景。页面隐藏、离线、进入活动会话或组件卸载时停止观察并中止请求；请求创建时间超过 `SCENARIO_DRAFT_TASK_TTL_MS` 时删除并报告过期。
 - `src/lib/feedback-task-recovery.ts` 的 `kaiwa.completed-review.v1` 保存完成复盘上下文、报告、反馈、重做记录和按任务种类分组的待处理任务；其中任务可包含 task token、状态、错误和结果。
 - 完成复盘恢复器同样只在前台在线时观察，并按 session id/request id 防止迟到响应覆盖新状态；恢复记录或任务超过 `FEEDBACK_TASK_TTL_MS` 时清理。
 - `localStorage` 只由上述 recovery 模块拥有。不可用时页面可继续当前操作，但离开页面后无法保证恢复。

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 可恢复场景草稿控制器、内存 storage、可控草稿 task API
- * [OUTPUT]: 验证草稿请求持久化、前后台恢复、同封套重试、代际隔离及终态分类
+ * [OUTPUT]: 验证未完成草稿请求持久化、前后台恢复、成功终态清理、同封套重试、代际隔离及错误分类
  * [POS]: tests/client 的首页场景草稿恢复回归契约，不依赖真实网络或浏览器刷新
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -66,25 +66,42 @@ describe('recoverable scenario draft controller', () => {
     expect(reloaded.getState()).toMatchObject({ status: 'pending', request: beforeAcceptance.request })
   })
 
-  it('requeries a completed pointer after reload so its clarification can be restored', async () => {
+  it('ignores legacy completed draft pointers so they cannot replace the homepage', async () => {
     const storage = new MemoryStorage()
-    const request = { requestId: crypto.randomUUID(), createdAt: Date.now(), inputZh: '预约理发', clarifications: [], forceGenerate: false }
-    storage.setItem(SCENARIO_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, request, taskToken: 'completed-token' }))
+    const request = { requestId: crypto.randomUUID(), createdAt: Date.now(), inputZh: '旧理发场景', clarifications: [], forceGenerate: false }
+    storage.setItem('kaiwa.scenario-draft-task.v1', JSON.stringify({ version: 1, request, taskToken: 'completed-token' }))
+    const get = vi.fn().mockResolvedValue({ status: 'complete', result: { status: 'needs_clarification', questionZh: '想约哪一天？', optionsZh: ['周末'] } })
     const runtime = createScenarioDraftRecoveryRuntime({
       storage,
       api: {
         submit: async () => ({ taskToken: 'unused', expiresAt: Date.now() + 86_400_000 }),
-        get: async () => ({ status: 'complete', result: { status: 'needs_clarification', questionZh: '想约哪一天？', optionsZh: ['周末'] } }),
+        get,
       },
     })
 
     runtime.mount()
     await tick()
-    expect(runtime.getState()).toMatchObject({
-      status: 'ready',
-      request,
-      result: { status: 'needs_clarification', questionZh: '想约哪一天？' },
+    expect(get).not.toHaveBeenCalled()
+    expect(runtime.getState().status).toBe('idle')
+    expect(storage.getItem('kaiwa.scenario-draft-task.v1')).toBeNull()
+  })
+
+  it('clears the current envelope when its result becomes ready', async () => {
+    const storage = new MemoryStorage()
+    const runtime = createScenarioDraftRecoveryRuntime({
+      storage,
+      api: {
+        submit: async () => ({ taskToken: 'task-token', expiresAt: Date.now() + 86_400_000 }),
+        get: async () => ({ status: 'complete', result: { status: 'needs_clarification', questionZh: '想约哪一天？', optionsZh: ['周末'] } }),
+      },
     })
+
+    runtime.mount()
+    runtime.replace('预约理发', [], false)
+    await tick()
+    await tick()
+    expect(runtime.getState()).toMatchObject({ status: 'ready', result: { status: 'needs_clarification' } })
+    expect(storage.getItem(SCENARIO_DRAFT_STORAGE_KEY)).toBeNull()
   })
 
   it('pauses local observation while hidden and resumes the existing task without generating a new request', async () => {
@@ -187,7 +204,7 @@ describe('recoverable scenario draft controller', () => {
     expect(corrupt.getState()).toMatchObject({ status: 'expired', error: '无法恢复已损坏的练习草稿，请重新准备。' })
 
     const expiredStorage = new MemoryStorage()
-    expiredStorage.setItem(SCENARIO_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, request: { requestId: crypto.randomUUID(), createdAt: 0, inputZh: '过期', clarifications: [], forceGenerate: false } }))
+    expiredStorage.setItem(SCENARIO_DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, request: { requestId: crypto.randomUUID(), createdAt: 0, inputZh: '过期', clarifications: [], forceGenerate: false } }))
     const expired = createScenarioDraftRecoveryRuntime({ api: acceptedApi(), storage: expiredStorage, now: () => 86_400_001 })
     expired.mount()
     expect(expired.getState().status).toBe('expired')
@@ -273,7 +290,7 @@ describe('recoverable scenario draft controller', () => {
     ]
     for (const request of invalidRequests) {
       const storage = new MemoryStorage()
-      storage.setItem(SCENARIO_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, request }))
+      storage.setItem(SCENARIO_DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, request }))
       const runtime = createScenarioDraftRecoveryRuntime({ api: acceptedApi(), storage })
       runtime.mount()
       expect(runtime.getState().status).toBe('expired')
