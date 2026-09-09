@@ -1,7 +1,7 @@
 /**
- * [INPUT]: 真实浏览器可见 App DOM、会话快照与 visibilitychange 生命周期事件
- * [OUTPUT]: 锁定会话草稿、录音前相手播放器释放顺序、非阻断静音保全提示、反馈任务 transport/terminal 重试分流、重做录音及 hint/listening/redo 异步结果只写回其所属 App 会话的集成回归契约
- * [POS]: tests/client/ App 根组件生命周期集成测试
+ * [INPUT]: 真实浏览器可见 App DOM、会话快照、visibilitychange 生命周期事件与同意遥测控制器
+ * [OUTPUT]: 锁定会话媒体/草稿生命周期、异步所有权及明确同意后的稳定遥测 checkpoint seam
+ * [POS]: tests/client 的 App 根组件生命周期集成回归契约
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 // @vitest-environment jsdom
@@ -279,7 +279,7 @@ describe('App config lifecycle regression', () => {
       report: buildSessionReport('source-session', 'mock', scenario, 123, 456, [createRoundRecord(1, scenario.firstLine, 0)]),
       feedback: { outcome: 'partial', outcomeEvidenceZh: '', listeningFinding: null, expressionImprovement: { turn: 1, userConfirmedJa: 'これをください。', suggestedJa: 'こちらをお願いします。', reasonZh: '更礼貌。' }, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: 'これをください。', directionZh: '' } },
     }
-    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }), restartPractice: vi.fn().mockResolvedValue({ scenario: scenario.dynamicData, scenarioToken: 'repeat-token', practiceToken: 'practice-token' }), startScenarioSession: vi.fn().mockResolvedValue({ ...scenario, scenarioToken: 'repeat-token' }) }))
+    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }), restartPractice: vi.fn().mockResolvedValue({ scenario: scenario.dynamicData, scenarioToken: 'repeat-token', practiceToken: 'practice-token' }), startScenarioSession: vi.fn().mockResolvedValue({ scenario: { ...scenario, scenarioToken: 'repeat-token' }, telemetrySession: null }) }))
     vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([attempt]) }))
     const box = document.createElement('div'); document.body.appendChild(box)
     const appModule = await import('../../src/App'); const appRoot = createRoot(box); flushSync(() => appRoot.render(createElement(appModule.default)))
@@ -310,7 +310,7 @@ describe('App config lifecycle regression', () => {
     const prepared: PreparedRestartData = { scenario: scenario.dynamicData, scenarioToken: 'prepared-token', practiceToken: 'practice-token', previousAdvice }
     writePreparedRestart(prepared)
     const fetchConfigMock = vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } })
-    const startScenarioSessionMock = vi.fn().mockResolvedValue({ ...scenario, scenarioToken: 'prepared-token' })
+    const startScenarioSessionMock = vi.fn().mockResolvedValue({ scenario: { ...scenario, scenarioToken: 'prepared-token' }, telemetrySession: null })
     vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: fetchConfigMock, startScenarioSession: startScenarioSessionMock }))
     vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([]) }))
     const box = document.createElement('div'); document.body.appendChild(box)
@@ -1013,5 +1013,56 @@ describe('SessionComplete redo lifecycle', () => {
     await flush(); await flush()
     expect(container.textContent).not.toContain('迟到比较不得写入')
     expect(window.localStorage.getItem('kaiwa.completed-review.v1')).toBeNull()
+  })
+
+  it('shows exactly one active-session revoke control and clears accepted consent when invoked', async () => {
+    vi.resetModules(); window.localStorage.setItem('kaiwa.validation-consent.v1', 'accepted'); installWaitingSessionSnapshot()
+    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }) }))
+    const container = activeContainer = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App'); const root = activeRoot = createRoot(container); flushSync(() => root.render(createElement(appModule.default)))
+    const revoke = await vi.waitFor(() => { const controls = Array.from(container.querySelectorAll('button')).filter((button) => button.textContent === '撤销同意'); expect(controls).toHaveLength(1); return controls[0] as HTMLButtonElement }, { interval: 0 })
+    flushSync(() => revoke.click())
+    await vi.waitFor(() => expect(Array.from(container.querySelectorAll('button')).filter((button) => button.textContent === '撤销同意')).toHaveLength(0), { interval: 0 })
+    expect(window.localStorage.getItem('kaiwa.validation-consent.v1')).toBeNull()
+  })
+
+  it('shows exactly one completed-session revoke control and clears accepted consent when invoked', async () => {
+    vi.resetModules(); window.localStorage.setItem('kaiwa.validation-consent.v1', 'accepted'); installCompletedConversationTask('failed', 'feedback-token')
+    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }), submitFeedbackTask: vi.fn(), getFeedbackTask: vi.fn().mockResolvedValue({ status: 'pending' }) }))
+    const container = activeContainer = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App'); const root = activeRoot = createRoot(container); flushSync(() => root.render(createElement(appModule.default)))
+    const revoke = await vi.waitFor(() => { const controls = Array.from(container.querySelectorAll('button')).filter((button) => button.textContent === '撤销同意'); expect(controls).toHaveLength(1); return controls[0] as HTMLButtonElement }, { interval: 0 })
+    flushSync(() => revoke.click())
+    await vi.waitFor(() => expect(Array.from(container.querySelectorAll('button')).filter((button) => button.textContent === '撤销同意')).toHaveLength(0), { interval: 0 })
+    expect(window.localStorage.getItem('kaiwa.validation-consent.v1')).toBeNull()
+  })
+
+  it('records user_exit when the learner ends an active session early', async () => {
+    vi.resetModules()
+    const round = createRoundRecord(1, scenario.firstLine, 0); round.inputMode = 'text'; round.userFinal = '前髪は残してください。'
+    window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({ version: 1, phase: 'waiting_user', sessionId: 'early-exit-session', scenario, messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }], rounds: [], currentRound: round, turn: 1, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' } }))
+    vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }), submitFeedbackTask: vi.fn().mockResolvedValue({ taskToken: 'feedback-token', expiresAt: Date.now() + 86_400_000 }), getFeedbackTask: vi.fn().mockResolvedValue({ status: 'pending' }) }))
+    const container = activeContainer = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App'); const root = activeRoot = createRoot(container); flushSync(() => root.render(createElement(appModule.default)))
+    const earlyReview = await vi.waitFor(() => { const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent === '提前复盘'); expect(button).toBeDefined(); return button as HTMLButtonElement }, { interval: 0 })
+    flushSync(() => earlyReview.click())
+    await vi.waitFor(() => { const record = JSON.parse(window.localStorage.getItem('kaiwa.completed-review.v1') ?? 'null') as { report?: { completion?: { reason?: string } } } | null; expect(record?.report?.completion?.reason).toBe('user_exit') }, { interval: 0 })
+  })
+})
+
+describe('App validation telemetry lifecycle', () => {
+  it('never restores telemetry credentials from a session snapshot', async () => {
+    vi.resetModules()
+    const snapshot = { version: 1, phase: 'waiting_user', sessionId: 'local-session', scenario, messages: [], rounds: [], currentRound: createRoundRecord(1, scenario.firstLine, 0), turn: 1, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' } }
+    const serialized = JSON.stringify(snapshot)
+    expect(serialized).not.toContain('telemetryToken')
+    expect(serialized).not.toContain('dyn_ses_')
+    const { readSessionSnapshot } = await import('../../src/lib/session-snapshot')
+    window.sessionStorage.setItem('kaiwa.current-session.v1', serialized)
+    expect(readSessionSnapshot()?.scenario).toEqual(scenario)
+    const completedRecovery = JSON.stringify({ version: 1, sessionId: 'local-session', scenario, messages: [], rounds: [], startedAt: 1, endedAt: 2, report: {}, feedback: null, redoRecords: [], pending: {} })
+    expect(completedRecovery).not.toContain('telemetryToken')
+    expect(completedRecovery).not.toContain('dyn_ses_')
+    window.sessionStorage.clear()
   })
 })

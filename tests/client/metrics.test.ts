@@ -79,7 +79,7 @@ describe('session metrics and export facts', () => {
       referenceExpressionJa: 'パスポートと在留カードを持参しました。',
     }
 
-    const report = buildSessionReport('session-id', 'real', scenario, 1_000, 9_000, [first, second], [redo])
+    const report = buildSessionReport('session-id', 'real', scenario, 1_000, 9_000, [first, second], [redo], 'user_exit')
     expect(report.rounds[0].listeningScaffoldLevel).toBe(2)
     expect(report.rounds[0].expressionScaffoldLevel).toBe(3)
     expect(report.totals.expressionScaffoldLevelTotal).toBe(4)
@@ -88,7 +88,7 @@ describe('session metrics and export facts', () => {
     expect(report.completion).toEqual({
       maxTurns: 5,
       finalTurn: 2,
-      reason: 'turn_budget',
+      reason: 'user_exit',
       closedNaturally: false,
     })
     expect(report.recovery).toEqual({
@@ -102,7 +102,7 @@ describe('session metrics and export facts', () => {
 
   it('仅在最终回合达到五回合预算时标记自然结束', () => {
     const fifth = createRoundRecord(5, '最後に確認したいことはありますか。', 0)
-    const report = buildSessionReport('complete-session', 'mock', scenario, 2_000, 8_000, [fifth])
+    const report = buildSessionReport('complete-session', 'mock', scenario, 2_000, 8_000, [fifth], [], 'turn_budget')
 
     expect(report.completion).toEqual({
       maxTurns: 5,
@@ -115,6 +115,17 @@ describe('session metrics and export facts', () => {
       retryCount: 0,
       speechAssistRequestCount: 0,
       speechAssistDisplayedCount: 0,
+    })
+  })
+
+  it('preserves an unrecoverable termination reason without marking it natural', () => {
+    const report = buildSessionReport('failed-session', 'mock', scenario, 2_000, 8_000, [createRoundRecord(1, scenario.firstLine, 0)], [], 'unrecoverable_failure')
+
+    expect(report.completion).toEqual({
+      maxTurns: 5,
+      finalTurn: 1,
+      reason: 'unrecoverable_failure',
+      closedNaturally: false,
     })
   })
 })
