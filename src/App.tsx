@@ -1,14 +1,16 @@
 /**
- * [INPUT]: 依赖 lib/scenario-draft-task 首页恢复、lib/feedback-task-recovery 完成复盘恢复、lib/practice-history 本机历史、lib/practice-progress 表现比较、lib/api 接口请求、shared/listening-scaffold 内部四级听力协议、lib/stt 中文场景输入识别、lib/voice-turn-controller 语音回合控制器深模块、lib/ai-turn-controller 相手回合控制器深模块、lib/microphone 权限探测、lib/session 会话状态与显式中断恢复状态机
- * [OUTPUT]: 对外提供 App 根组件，驱动可编辑中文语音场景输入、原场景复练与证据对比、统一 recovery 反馈任务展示、KaiwaDemo 固定五回合会话、渐进帮助、可暂停继续的相手语音、非阻断静音保全提示与录音前播放资源释放及安全生命周期交互
- * [POS]: src/ 核心入口与主控制器，编排可持久化会话业务状态、内部四级帮助、不可恢复媒体资源的显式释放与 offline/background 业务中断恢复，成功恢复不显示内部状态横幅；pagehide 仅释放资源，真实活动阶段才回滚业务状态
+ * [INPUT]: 依赖首页/会话/复盘控制器、既有本机练习历史、独立技术验证遥测同意与出站控制器
+ * [OUTPUT]: 对外提供 App 根组件，驱动训练流程并仅在明确同意后于稳定生命周期 seam 派生匿名技术验证 checkpoint/汇总
+ * [POS]: src/ 核心入口；训练状态始终独立于遥测存储与传输失败
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type SetStateAction } from 'react'
 import './App.css'
 import { ActiveSession } from './components/ActiveSession'
+import { ValidationConsent } from './components/ValidationConsent'
 import { Home } from './components/Home'
 import { SessionComplete } from './components/SessionComplete'
+import { PHASE_TRANSITIONS, recoveryStatusText } from './lib/app-phase'
 import { shouldShowSilencePrompt } from './lib/audio-feedback'
 import {
   fetchConfig,
@@ -28,44 +30,20 @@ import { useCompletedPractice } from './lib/use-completed-practice'
 import { useHomePractice } from './lib/use-home-practice'
 import { useSessionSnapshotPersistence } from './lib/use-session-snapshot-persistence'
 import { useSessionLifecycle } from './lib/use-session-lifecycle'
+import { useValidationLifecycle } from './lib/use-validation-lifecycle'
+import type { ValidationTelemetrySession } from './lib/use-validation-telemetry'
 import { clearSessionSnapshot, readSessionSnapshot, removeLastSubmittedUserMessage, type SessionSnapshot } from './lib/session-snapshot'
 import type {
   AppPhase,
   ConversationMessage,
   HintResponse,
   PrototypeConfig,
-  RoundRecord,
+  CompletionReason, RoundRecord,
   SessionScenario,
   PreviousAdvice,
   UiError,
   TranscriptText,
 } from './types'
-const BUILD_ID = '2026-09-07-listening-scaffold-l4'
-function recoveryStatusText(status: 'idle' | 'interrupted' | 'retrying' | 'recovered' | 'failed'): string {
-  switch (status) {
-    case 'idle': return ''
-    case 'interrupted': return '当前步骤已中断，请选择重试或安全回退。'
-    case 'retrying': return '正在重新建立当前步骤，请稍候。'
-    case 'recovered': return ''
-    case 'failed': return '恢复当前步骤失败，请重试或改用文字回答。'
-  }
-}
-const PHASE_TRANSITIONS: Record<AppPhase, readonly AppPhase[]> = {
-  loading_config: ['idle', 'preparing_tts', 'error'],
-  idle: ['loading_config', 'error'],
-  fetching_token: ['connecting_stt', 'recording', 'confirming_transcript', 'error', 'session_complete'],
-  connecting_stt: ['recording', 'confirming_transcript', 'error', 'session_complete'],
-  waiting_user: ['recording', 'fetching_token', 'connecting_stt', 'confirming_transcript', 'preparing_tts', 'error', 'session_complete'],
-  recording: ['finalizing_transcript', 'confirming_transcript', 'waiting_user', 'error', 'session_complete'],
-  finalizing_transcript: ['confirming_transcript', 'waiting_user', 'error', 'session_complete'],
-  confirming_transcript: ['waiting_user', 'recording', 'fetching_token', 'requesting_llm', 'error', 'session_complete'],
-  requesting_llm: ['preparing_tts', 'waiting_user', 'error', 'session_complete'],
-  preparing_tts: ['playing_ai', 'waiting_user', 'error', 'session_complete'],
-  playing_ai: ['waiting_user', 'error', 'session_complete'],
-  round_complete: ['waiting_user', 'recording', 'fetching_token', 'session_complete', 'error'],
-  session_complete: ['loading_config', 'idle', 'error'],
-  error: ['loading_config', 'idle', 'fetching_token', 'connecting_stt', 'waiting_user', 'recording', 'confirming_transcript', 'requesting_llm', 'preparing_tts', 'session_complete'],
-}
 function App() {
   const [config, setConfig] = useState<PrototypeConfig | null>(null)
   const [phase, setPhase] = useState<AppPhase>('loading_config')
@@ -73,7 +51,7 @@ function App() {
   const [sessionId, setSessionId] = useState('')
   const [scenario, setScenario] = useState<SessionScenario | null>(null)
   const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null)
-  const [sessionEndedAt, setSessionEndedAt] = useState<number | null>(null)
+  const [sessionEndedAt, setSessionEndedAt] = useState<number | null>(null); const [completionReason, setCompletionReason] = useState<CompletionReason | null>(null)
   const [turn, setTurn] = useState(1)
   const [rounds, setRounds] = useState<RoundRecord[]>([])
   const [interruptionRecovery, dispatchInterruptionRecovery] = useReducer(reduceInterruptionRecovery, INITIAL_INTERRUPTION_RECOVERY_STATE)
@@ -83,6 +61,7 @@ function App() {
   const [uiError, setUiError] = useState<UiError | null>(null)
   const [inlineError, setInlineError] = useState('')
   const [lastFailedStep, setLastFailedStep] = useState<'config' | 'scenario' | 'token' | 'stt' | 'llm' | 'tts' | null>(null)
+  const [telemetrySession, setTelemetrySession] = useState<ValidationTelemetrySession | null>(null)
   const [pendingHistory, setPendingHistory] = useState<ConversationMessage[]>([])
   const requestAbortRef = useRef<AbortController | null>(null)
   const resetSessionRef = useRef<() => void>(() => undefined)
@@ -122,7 +101,6 @@ function App() {
     hintSheetVisibleRef.current = next
     setShowHintSheet(next)
   }, [])
-
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
     if (chatBottomRef.current) {
       chatBottomRef.current.scrollIntoView({ behavior, block: 'end' })
@@ -146,7 +124,6 @@ function App() {
     return operationIdRef.current
   }, [])
   const isCurrentOperation = useCallback((operationId: number) => operationId === operationIdRef.current, [])
-
   const operationCapability = useMemo(
     () => ({
       begin: beginOperation,
@@ -265,10 +242,7 @@ function App() {
     commitAssistantMessage,
     advanceTurn: (nextTurn) => setTurn(nextTurn),
     prefetchSttToken,
-    onSessionComplete: () => {
-      setSessionEndedAt(Date.now())
-      transitionTo('session_complete')
-    },
+    onSessionComplete: () => { setCompletionReason('turn_budget'); setSessionEndedAt(Date.now()); transitionTo('session_complete') },
   })
   const {
     currentAiText,
@@ -311,15 +285,14 @@ function App() {
     setMessages(next)
   }, [])
   const completedPractice = useCompletedPractice({
-    config, phase, scenario, sessionId, startedAt: sessionStartedAt, endedAt: sessionEndedAt, messages, messagesRef, rounds, roundsRef, practiceHistory,
+    config, phase, scenario, sessionId, startedAt: sessionStartedAt, endedAt: sessionEndedAt, messages, messagesRef, rounds, roundsRef, practiceHistory, completionReason,
     persistPractice,
     restoreCompletedSession: (record) => {
-      setSessionId(record.sessionId); setScenario(structuredClone(record.scenario)); setSessionStartedAt(record.startedAt); setSessionEndedAt(record.endedAt)
+      setSessionId(record.sessionId); setScenario(structuredClone(record.scenario)); setSessionStartedAt(record.startedAt); setSessionEndedAt(record.endedAt); setCompletionReason(record.report.completion.reason)
       replaceMessages(structuredClone(record.messages)); roundsRef.current = structuredClone(record.rounds); setRounds(structuredClone(record.rounds)); setPhase('session_complete'); phaseRef.current = 'session_complete'; sessionSnapshotRef.current = null; setAppForegroundNotice('')
     },
   })
-  const { feedbackData, feedbackStatus, feedbackErrorMsg, report, currentPractice, practiceComparison, restoredRedoTask } = completedPractice.model
-  const { retryConversationFeedback, startRedoTask } = completedPractice.actions
+  const { feedbackData, feedbackStatus, feedbackErrorMsg, report, currentPractice, practiceComparison, restoredRedoTask, redoRecords } = completedPractice.model
   const listeningScaffold = useListeningScaffoldController({
     messagesRef, rounds, currentRound: currentRoundView, scenario, sessionId,
     activeAiMessageId, pausedAiMessageId, isTtsActionLocked: aiTurn.meta.isTtsActionLocked,
@@ -350,8 +323,7 @@ function App() {
         let restoredRounds = structuredClone(snapshot.rounds)
         let restoredRound = snapshot.currentRound ? structuredClone(snapshot.currentRound) : null
         let restoredTurn = snapshot.turn
-        let restoredPhase: AppPhase = 'waiting_user'
-        let restoredEndedAt: number | null = null
+        let restoredPhase: AppPhase = 'waiting_user'; let restoredEndedAt: number | null = null; let restoredCompletionReason: CompletionReason | null = null
         let restoredTranscript: TranscriptText | null = null
         if (snapshot.phase === 'confirming_transcript' && snapshot.transcript.finalText.trim()) {
           restoredPhase = 'confirming_transcript'
@@ -368,6 +340,7 @@ function App() {
             restoredRound = null
             restoredPhase = 'session_complete'
             restoredEndedAt = Date.now()
+            restoredCompletionReason = 'turn_budget'
           } else {
             const nextTurn = snapshot.turn + 1
             const nextPrompt = restoredMessages.findLast((message) => message.role === 'assistant' && message.turn === nextTurn)?.text
@@ -381,6 +354,7 @@ function App() {
         setScenario(structuredClone(snapshot.scenario))
         setSessionStartedAt(snapshot.sessionStartedAt)
         setSessionEndedAt(restoredEndedAt)
+        setCompletionReason(restoredCompletionReason)
         setTurn(restoredTurn)
         replaceMessages(restoredMessages)
         roundsRef.current = restoredRounds
@@ -422,7 +396,6 @@ function App() {
   }, [setHintSheetVisible, turn])
   useSessionSnapshotPersistence({ reading: sessionSnapshotRef.current !== null, phase, sessionId, scenario, messages, rounds, currentRound: currentRoundView, turn, startedAt: sessionStartedAt, endedAt: sessionEndedAt, transcript })
   useSessionLifecycle({ phaseRef, setOnline, setNotice: setAppForegroundNotice, beginOperation, abortSpeechAssist, interruptPlayback: aiTurn.actions.interruptPlaybackForBackground, disposeVoice: disposeVoiceTurn, dispatch: dispatchInterruptionRecovery, touchRound, setUiError, transitionTo, stopResources: stopActiveResources })
-
   const startSession = useCallback(async (scenarioToken: string, draftRequestId?: string, previousAdvice?: PreviousAdvice) => {
     if (!config || !online || sessionStartLockRef.current) return
     dispatchInterruptionRecovery({ type: 'reset' })
@@ -436,8 +409,7 @@ function App() {
     setHintSheetVisible(false)
     setSessionId('')
     setScenario(null)
-    setSessionStartedAt(null)
-    setSessionEndedAt(null)
+    setSessionStartedAt(null); setSessionEndedAt(null); setCompletionReason(null)
     setTurn(1)
     replaceMessages([])
     roundsRef.current = []
@@ -452,6 +424,7 @@ function App() {
     completedPractice.actions.reset()
     const controller = new AbortController()
     requestAbortRef.current = controller
+    setTelemetrySession(null)
     transitionTo('loading_config')
     if (!config.elevenlabs.sttAvailable) {
       syncMicrophoneReadiness('unavailable')
@@ -464,8 +437,9 @@ function App() {
     }
     void unlockAudio().catch(() => undefined)
     try {
-      const nextScenario = await startScenarioSession(scenarioToken, controller.signal)
+      const startedSession = await startScenarioSession(scenarioToken, controller.signal)
       if (controller.signal.aborted || !isCurrentOperation(operationId)) return
+      const nextScenario = startedSession.scenario
       const id = createSessionId()
       const startedAt = Date.now()
       const firstMessage: ConversationMessage = {
@@ -475,6 +449,7 @@ function App() {
         text: nextScenario.firstLine,
       }
       const localScenario = previousAdvice ? { ...nextScenario, previousAdvice } : nextScenario
+      setTelemetrySession(startedSession.telemetrySession)
       setScenario(localScenario)
       if (draftRequestId) discardDraft()
       setSessionId(id)
@@ -549,7 +524,7 @@ function App() {
     const activeRound = currentRoundRef.current
     if (includeConfirmedCurrent && activeRound?.userFinal) appendRound(activeRound)
     replaceCurrentRound(null)
-    setSessionEndedAt(Date.now())
+    setCompletionReason('user_exit'); setSessionEndedAt(Date.now())
     setUiError(null)
     transitionTo('session_complete')
   }, [appendRound, replaceCurrentRound, stopActiveResources, transitionTo])
@@ -587,6 +562,19 @@ function App() {
   }, [generateNextReply, replaceMessages, touchRound, transcript, turn])
   const activeError = uiError ?? voiceError ?? aiError
   const activeFailedStep = lastFailedStep ?? voiceTurn.state.lastFailedStep ?? aiTurn.state.lastFailedStep
+  const validationLifecycle = useValidationLifecycle({
+    telemetrySession,
+    sessionStartedAt,
+    rounds,
+    currentRound: currentRoundView,
+    report,
+    feedback: feedbackData,
+    redoRecords,
+    config,
+    activeFailure: activeError ? { code: activeError.code, step: activeFailedStep } : null,
+    recoveredTarget: interruptionRecovery.status === 'recovered' ? interruptionRecovery.target : null,
+    evaluationVersion: scenario?.dynamicData.evaluationVersion === undefined ? undefined : String(scenario.dynamicData.evaluationVersion),
+  })
   const recoveryTarget = interruptionRecovery.target
   const recoveryCanAct = interruptionRecovery.status === 'interrupted' || interruptionRecovery.status === 'failed'
   const interruptionRecoveryAffordances = decideInterruptionRecoveryAffordances(recoveryCanAct ? recoveryTarget : null)
@@ -661,10 +649,10 @@ function App() {
     dispatchInterruptionRecovery({ type: 'reset' })
     clearSessionSnapshot()
     setSessionId('')
+    setTelemetrySession(null)
     setScenario(null)
     restoredTranscriptRef.current = null
-    setSessionStartedAt(null)
-    setSessionEndedAt(null)
+    setSessionStartedAt(null); setSessionEndedAt(null); setCompletionReason(null)
     setTurn(1)
     replaceMessages([])
     roundsRef.current = []
@@ -706,10 +694,11 @@ function App() {
     void startSession(token, draftRequestId, previousAdvice)
   }, [consumeReadyScenario, draftState.request?.requestId, startSession])
   return (
-    <div className={`app-shell ${isSessionActive ? 'is-session-active' : ''}`} data-build={BUILD_ID}>
+    <div className={`app-shell ${isSessionActive ? 'is-session-active' : ''} ${validationLifecycle.consent === 'accepted' ? 'is-validation-accepted' : ''}`} data-build="2026-09-07-listening-scaffold-l4">
       <a className="skip-link" href="#main-content">跳到主要内容</a>
       <header className="topbar">
         <p>Kaiwa</p>
+        {isSessionActive && validationLifecycle.consent === 'accepted' && <ValidationConsent consent={validationLifecycle.consent} onDecision={validationLifecycle.decide} onRevoke={validationLifecycle.revoke} />}
         {isSessionActive && (
           <button className="text-button quiet-exit" type="button" onClick={() => endSession(true)} disabled={controlsLocked}>
             结束练习
@@ -720,6 +709,7 @@ function App() {
         {!isSessionActive && phase !== 'session_complete' && (
           <section className="conversation-panel" aria-labelledby="conversation-heading">
             {!online && <p className="network-notice" role="status">网络已断开。恢复连接后可以继续。</p>}
+            {validationLifecycle.consent === 'undecided' && <ValidationConsent consent={validationLifecycle.consent} onDecision={validationLifecycle.decide} onRevoke={validationLifecycle.revoke} />}
             <Home
               loading={phase === 'loading_config'}
               ready={config !== null}
@@ -748,6 +738,7 @@ function App() {
               onPreparePractice={(attempt) => void preparePracticeAgain(attempt)}
               onRemovePractice={(attempt) => void removePractice(attempt)}
             />
+            {validationLifecycle.consent === 'accepted' && <ValidationConsent consent={validationLifecycle.consent} onDecision={validationLifecycle.decide} onRevoke={validationLifecycle.revoke} />}
           </section>
         )}
         {phase === 'session_complete' && report && reveal && scenario && (
@@ -765,10 +756,10 @@ function App() {
               feedbackStatus={feedbackStatus}
               feedbackErrorMsg={feedbackErrorMsg}
               restoredRedoTask={restoredRedoTask}
-              onRetryFeedback={retryConversationFeedback}
+              onRetryFeedback={completedPractice.actions.retryConversationFeedback}
               onReplayAi={(text) => void playReviewAudio(text)}
               onStopAudio={stopReviewAudio}
-              onRequestRedo={startRedoTask}
+              onRequestRedo={(request) => { validationLifecycle.trackRedoStarted(request.turn); completedPractice.actions.startRedoTask(request) }}
               onRequestListeningScaffold={requestListeningScaffold}
               onCacheListeningScaffold={cacheListeningScaffold}
               onNewScenario={resetSession}
@@ -778,6 +769,7 @@ function App() {
               historyNotice={historySaving ? '正在保存本次练习…' : historyNotice}
               onRetrySave={historySaveFailed && currentPractice ? () => void persistPractice(currentPractice) : undefined}
             />
+            {validationLifecycle.consent === 'accepted' && <ValidationConsent consent={validationLifecycle.consent} onDecision={validationLifecycle.decide} onRevoke={validationLifecycle.revoke} />}
           </section>
         )}
         {isSessionActive && <ActiveSession

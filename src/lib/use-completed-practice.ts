@@ -11,18 +11,18 @@ import { comparePracticeAttempts } from './practice-progress'
 import { buildSessionReport } from './metrics'
 import { COMPLETED_REVIEW_STORAGE_KEY, useCompletedReviewRecovery, type CompletedReviewSnapshot } from './feedback-task-recovery'
 import type { PracticeAttempt, StoredPracticeAttempt } from './practice-history'
-import type { AppPhase, ConversationFeedbackResponse, ConversationMessage, FeedbackLoadingState, RedoFeedbackRequest, RedoRecord, RoundRecord, SessionReport, SessionScenario } from '../types'
+import type { AppPhase, CompletionReason, ConversationFeedbackResponse, ConversationMessage, FeedbackLoadingState, RedoFeedbackRequest, RedoRecord, RoundRecord, SessionReport, SessionScenario } from '../types'
 
 export interface CompletedPracticeOptions {
   config: { mode: 'real' | 'partial' | 'mock' } | null; phase: AppPhase; scenario: SessionScenario | null; sessionId: string; startedAt: number | null; endedAt: number | null
   messages: ConversationMessage[]; messagesRef: RefObject<ConversationMessage[]>; rounds: RoundRecord[]; roundsRef: RefObject<RoundRecord[]>; practiceHistory: StoredPracticeAttempt[]
+  completionReason: CompletionReason | null
   persistPractice(attempt: PracticeAttempt): Promise<void>; restoreCompletedSession(record: CompletedReviewSnapshot): void
 }
 
 export function useCompletedPractice(options: CompletedPracticeOptions) {
   const {
-    config, phase, scenario, sessionId, startedAt, endedAt,
-    messagesRef, rounds, roundsRef, practiceHistory, persistPractice, restoreCompletedSession,
+    config, phase, scenario, sessionId, startedAt, endedAt, messagesRef, rounds, roundsRef, practiceHistory, completionReason, persistPractice, restoreCompletedSession,
   } = options
   const [feedbackData, setFeedbackData] = useState<ConversationFeedbackResponse | null>(null)
   const [feedbackStatus, setFeedbackStatus] = useState<FeedbackLoadingState>('idle'); const [feedbackErrorMsg, setFeedbackErrorMsg] = useState(''); const [redoRecords, setRedoRecords] = useState<RedoRecord[]>([])
@@ -32,7 +32,7 @@ export function useCompletedPractice(options: CompletedPracticeOptions) {
   const recovery = useCompletedReviewRecovery({ activeSession: scenario !== null && phase !== 'session_complete' })
   const { state: recoveryState, save: saveRecovery, discard: discardRecovery, startTask: startRecoveryTask, resumeTask: resumeRecoveryTask } = recovery
   const recoveryRecord = recoveryState.record
-  const report = useMemo<SessionReport | null>(() => !config || !scenario || !sessionId || startedAt === null || endedAt === null ? null : buildSessionReport(sessionId, config.mode, scenario, startedAt, endedAt, rounds, redoRecords), [config, endedAt, rounds, scenario, sessionId, startedAt, redoRecords])
+  const report = useMemo<SessionReport | null>(() => !config || !scenario || !sessionId || startedAt === null || endedAt === null || completionReason === null ? null : buildSessionReport(sessionId, config.mode, scenario, startedAt, endedAt, rounds, redoRecords, completionReason), [completionReason, config, endedAt, rounds, scenario, sessionId, startedAt, redoRecords])
   const currentPractice = useMemo<PracticeAttempt | null>(() => !report || !scenario?.practiceToken || report.rounds.length === 0 ? null : { scenario: scenario.dynamicData, practiceToken: scenario.practiceToken, report, feedback: feedbackData }, [feedbackData, scenario, report])
   const practiceComparison = useMemo(() => currentPractice ? comparePracticeAttempts(currentPractice, practiceHistory) : null, [currentPractice, practiceHistory])
   const fetchFeedback = useCallback(() => {

@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 zod、../types 与 shared/ 下跨端 wire schema
- * [OUTPUT]: 提供配置、动态会话、可恢复场景草稿、回复、提示、durable 反馈任务、听力支架、语音续说辅助与场景润色请求函数及响应校验
- * [POS]: src/lib 的 HTTP 通信边界，负责序列化前端请求并严格验证服务端结构化响应
+ * [OUTPUT]: 提供动态会话启动包装器、训练服务与严格校验的同意遥测 batch API 通信；遥测凭据不进入 SessionScenario
+ * [POS]: src/lib 的前端 API 通信边界
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { z } from 'zod'
@@ -32,6 +32,7 @@ import {
   type FeedbackTaskRequest,
   type FeedbackTaskStatus,
 } from '../../shared/feedback-task'
+import { ValidationBatchSchema, type ValidationBatch } from '../../shared/validation-telemetry'
 import type {
   ConversationFeedbackRequest,
   ConversationMessage,
@@ -109,10 +110,15 @@ export async function fetchConfig(signal?: AbortSignal): Promise<PrototypeConfig
   return ConfigSchema.parse(await response.json())
 }
 
+export interface StartedScenarioSession {
+  scenario: SessionScenario
+  telemetrySession: { sessionId: string; telemetryToken: string } | null
+}
+
 export async function startScenarioSession(
   scenarioToken: string,
   signal?: AbortSignal,
-): Promise<SessionScenario> {
+): Promise<StartedScenarioSession> {
   const response = await fetch('/api/session/start', {
     method: 'POST',
     signal,
@@ -122,7 +128,7 @@ export async function startScenarioSession(
   if (!response.ok) throw await errorFromResponse(response)
   const data = (await response.json()) as Record<string, unknown>
   const dynamicData = data.scenario as SessionScenario['dynamicData']
-  return {
+  const scenario: SessionScenario = {
     id: dynamicData.id,
     version: dynamicData.version,
     variantId: 'dynamic-variant',
@@ -135,6 +141,21 @@ export async function startScenarioSession(
     dynamicData,
     reveal: data.reveal as SessionScenario['reveal'],
   }
+  const telemetrySession = typeof data.sessionId === 'string' && typeof data.telemetryToken === 'string'
+    ? { sessionId: data.sessionId, telemetryToken: data.telemetryToken }
+    : null
+  return { scenario, telemetrySession }
+}
+
+export async function sendValidationBatch(batch: ValidationBatch, signal?: AbortSignal): Promise<void> {
+  const validated = ValidationBatchSchema.parse(batch)
+  const response = await fetch('/api/validation/batch', {
+    method: 'POST',
+    signal,
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(validated),
+  })
+  if (!response.ok) throw await errorFromResponse(response)
 }
 export async function requestElevenLabsToken(
   type: 'realtime_scribe' | 'tts_websocket',

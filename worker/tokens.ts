@@ -1,7 +1,7 @@
 /**
- * [INPUT]: 依赖 zod、Worker 环境密钥与 types 中的动态场景、场景 token、会话 token 契约
- * [OUTPUT]: 对外提供场景、会话、长期复练 token，以及绑定 scenario-draft 与 feedback-task task identity 的短期 capability 签发、验证、claims 类型和结构化 TokenError
- * [POS]: worker 的可信边界，以 HMAC、严格 schema、task identity 绑定和 expiresAt 验证保护五轮动态场景与短期任务凭据，并拒绝 legacy claims
+ * [INPUT]: 依赖 zod、Worker 环境密钥，以及动态场景、场景/会话/任务和 telemetry token 契约
+ * [OUTPUT]: 提供场景、会话、长期复练、短期任务 capability 与会话绑定 telemetry token 的签发、验证、claims 类型和结构化 TokenError
+ * [POS]: worker 的 HMAC 可信边界，通过用途、身份、过期和严格 schema 隔离训练、任务与匿名验证权限
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { z } from 'zod'
@@ -17,7 +17,8 @@ import type { Env } from './env'
 const TOKEN_SCHEMA_VERSION = 1
 const HMAC_ALGORITHM = { name: 'HMAC', hash: 'SHA-256' } as const
 
-type TokenKind = 'scenario' | 'session' | 'practice' | 'scenario_draft' | 'feedback_task'
+type TokenKind = 'scenario' | 'session' | 'practice' | 'scenario_draft' | 'feedback_task' | 'telemetry'
+const telemetryTokenSchema = z.object({ schemaVersion: z.literal(1), kind: z.literal('telemetry'), issuedAt: z.number().int().nonnegative(), expiresAt: z.number().int().positive(), sessionId: z.string().regex(/^dyn_ses_[A-Za-z0-9_-]{1,55}$/) }).strict().refine(value => value.expiresAt > value.issuedAt, 'expiresAt must be after issuedAt.')
 
 type TokenErrorCode =
   | 'token_secret_missing'
@@ -147,6 +148,31 @@ export interface SessionTokenClaims {
   expiresAt: number
   issuedAt?: number
 }
+export interface TelemetryTokenClaims {
+  sessionId: string
+  expiresAt?: number
+  issuedAt?: number
+}
+
+export async function signTelemetryToken(env: Env, sessionId: string, issuedAt = Date.now()): Promise<string> {
+  if (!/^dyn_ses_[A-Za-z0-9_-]{1,55}$/.test(sessionId)) throw new TokenError('token_claims_invalid', 'Telemetry session claims are invalid.', 400)
+  const expiresAt = issuedAt + 8 * 24 * 60 * 60 * 1000
+  return signPayload(env, { schemaVersion: 1, kind: 'telemetry', issuedAt, expiresAt, sessionId })
+}
+
+export async function verifyTelemetryToken(env: Env, token: string, sessionId: string, now = Date.now()): Promise<z.infer<typeof telemetryTokenSchema>> {
+  const payload = await verifyPayload(env, token, 'telemetry', now)
+  const parsed = telemetryTokenSchema.safeParse(payload)
+  if (!parsed.success) throw new TokenError('token_claims_invalid', 'Telemetry token claims are invalid.', 401)
+  if (parsed.data.sessionId !== sessionId) throw new TokenError('token_claims_invalid', 'Telemetry token session does not match.', 401)
+  return parsed.data
+}
+
+export async function hashTelemetryClientId(env: Env, clientId: string): Promise<string> {
+  const key = await getSigningKey(env, 'telemetry')
+  const digest = await crypto.subtle.sign(HMAC_ALGORITHM, key, new TextEncoder().encode(`client_id:${clientId}`))
+  return encodeBase64Url(new Uint8Array(digest))
+}
 
 export async function signScenarioToken(env: Env, claims: ScenarioTokenClaims): Promise<string> {
   const payload: ScenarioTokenPayload = {
@@ -185,12 +211,12 @@ export async function verifySessionToken(env: Env, token: string, now = Date.now
 
 async function signPayload(
   env: Env,
-  payload: ScenarioTokenPayload | SessionTokenPayload | PracticeTokenPayload | ScenarioDraftCapabilityPayload | FeedbackTaskCapabilityPayload,
+  payload: ScenarioTokenPayload | SessionTokenPayload | PracticeTokenPayload | ScenarioDraftCapabilityPayload | FeedbackTaskCapabilityPayload | { schemaVersion: 1; kind: 'telemetry'; issuedAt: number; expiresAt: number; sessionId: string },
 ): Promise<string> {
   if (payload.kind === 'scenario') parseScenarioTokenPayload(payload)
   else if (payload.kind === 'practice') parsePracticeTokenPayload(payload)
   else if (payload.kind === 'session') parseSessionTokenPayload(payload)
-
+  else if (payload.kind === 'telemetry') telemetryTokenSchema.parse(payload)
   const signingKey = await getSigningKey(env, payload.kind)
   const encodedPayload = encodeBase64Url(new TextEncoder().encode(JSON.stringify(payload)))
   const signature = await crypto.subtle.sign(HMAC_ALGORITHM, signingKey, new TextEncoder().encode(encodedPayload))
@@ -277,7 +303,7 @@ async function getSigningKey(env: Env, kind: TokenKind = 'scenario'): Promise<Cr
 
   return crypto.subtle.importKey(
     'raw',
-    new TextEncoder().encode(`${kind === 'feedback_task' ? 'kaiwa_feedback_task' : 'kaiwa_scenario'}_${secret}`),
+    new TextEncoder().encode(`${kind === 'feedback_task' ? 'kaiwa_feedback_task' : kind === 'telemetry' ? 'kaiwa_validation_telemetry' : 'kaiwa_scenario'}_${secret}`),
     HMAC_ALGORITHM,
     false,
     ['sign', 'verify'],

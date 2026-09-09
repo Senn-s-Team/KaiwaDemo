@@ -1,7 +1,7 @@
 /**
- * [INPUT]: 依赖 Worker 路由、模型与 token 流程约定的动态场景、四级支架和会话数据形状
- * [OUTPUT]: 对外提供 Worker 动态场景、会话、版本化证据评价、复练凭据与模型交互领域类型
- * [POS]: worker 的服务端领域协议入口，约束五回合动态场景、L0-L4 支架及请求响应数据形状
+ * [INPUT]: 依赖 ../shared wire contracts 与 Worker 动态场景、会话及报告约定
+ * [OUTPUT]: 除 shared/ 外的 Worker 动态场景、会话、响应与模型领域类型（会话启动含 telemetry token）
+ * [POS]: Worker 内部领域类型边界
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 
@@ -126,6 +126,7 @@ export interface SessionStartRequest {
 
 export interface SessionStartResponse {
   practiceToken?: string
+  telemetryToken: string
   sessionId: string
   scenarioType: 'dynamic'
   sessionToken: string

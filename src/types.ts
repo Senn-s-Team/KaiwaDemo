@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖浏览器会话编排、动态场景协议、共享听力支架协议与语音续说辅助观测数据
- * [OUTPUT]: 提供可选版本化证据、长期复练凭据与旧单场兼容类型； 对外提供前端会话、四级支架、反馈、恢复、指标与报告领域类型
- * [POS]: src 的前端领域类型总入口，统一动态会话与可序列化消息缓存的数据形状
+ * [OUTPUT]: 提供可选版本化证据、长期复练凭据与旧单场兼容类型；对外提供前端会话、四级支架、反馈、恢复、指标与报告领域类型
+ * [POS]: src 的前端领域类型总入口，统一动态会话与可序列化消息缓存的数据形状；不含遥测凭据
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import type { ListeningScaffoldResponse } from '../shared/listening-scaffold'
@@ -22,6 +22,8 @@ export type AppPhase =
   | 'round_complete'
   | 'session_complete'
   | 'error'
+export type CompletionReason = 'turn_budget' | 'user_exit' | 'unrecoverable_failure'
+
 
 export type IntegrationMode = 'real' | 'partial' | 'mock'
 export type ListeningScaffoldLevel = 0 | 1 | 2 | 3 | 4
@@ -345,7 +347,7 @@ export interface SessionReport {
   completion: {
     maxTurns: 5
     finalTurn: number
-    reason: 'turn_budget'
+    reason: CompletionReason
     closedNaturally: boolean
   }
   recovery: {

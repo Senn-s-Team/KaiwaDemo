@@ -1,7 +1,7 @@
 /**
- * [INPUT]: 依赖 ../shared/scenario-draft 的 ScenarioDraftTaskRequest 类型，以及 Cloudflare Worker 注入的 secrets、模型配置和 Workflow binding
- * [OUTPUT]: 对外导出 Env 配置接口；定义 SCENARIO_DRAFT 与 FEEDBACK_TASK 的创建、查询及任务参数边界
- * [POS]: Worker runtime 配置契约，连接 shared 场景草拟请求与两个 durable task Workflow，并集中声明可选部署配置
+ * [INPUT]: 依赖 shared 场景草拟请求类型，以及 Cloudflare Worker 注入的 secrets、模型配置、Workflow 与 D1 binding
+ * [OUTPUT]: 提供 Env 配置接口，定义场景草拟、反馈任务和匿名验证持久化的运行时边界
+ * [POS]: Worker runtime 配置契约，集中连接短期任务 Workflow 与可选 VALIDATION_DB
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import type { ScenarioDraftTaskRequest } from '../shared/scenario-draft'
@@ -30,4 +30,5 @@ export interface Env {
   ALLOW_MOCK?: string
   SCENARIO_DRAFT?: ScenarioDraftWorkflowBinding
   FEEDBACK_TASK?: FeedbackWorkflowBinding
+  VALIDATION_DB?: D1Database
 }

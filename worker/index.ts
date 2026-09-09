@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 Worker 环境、HTTP 边界、token、严格请求校验及各模型编排入口
- * [OUTPUT]: 对外提供配置、场景、长期复练凭据续签、会话、回复、反馈、四级听力支架、场景润色与语音服务的同源 API 路由
+ * [OUTPUT]: 对外提供配置、场景、长期复练凭据续签、会话（含 telemetry token）、回复、反馈、四级听力支架、场景润色、语音与 telemetry API 路由
  * [POS]: Worker 请求入口，统一执行方法、同源、JSON 大小、鉴权与错误响应边界
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -25,11 +25,12 @@ import {
 } from './openai'
 import {
   signPracticeToken,
-  verifyPracticeToken,
   signScenarioToken,
   signSessionToken,
+  signTelemetryToken,
   TokenError,
   verifyScenarioToken,
+  verifyPracticeToken,
 } from './tokens'
 import {
   parseHintRequest,
@@ -43,6 +44,7 @@ import {
   ValidationError,
 } from './validation'
 import { handleScenarioDraftGet, handleScenarioDraftPost, ScenarioDraftTaskError } from './scenario-draft-task'
+import { handleValidationBatch, runValidationRetention } from './validation-telemetry'
 import { handleFeedbackTaskGet, handleFeedbackTaskPost, FeedbackTaskError } from './feedback-task'
 function configResponse(env: Env): Response {
   const elevenlabsConfigured = Boolean(env.ELEVENLABS_API_KEY)
@@ -114,12 +116,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       startedAt,
       expiresAt: startedAt + LIMITS.sessionTokenTtlMs,
     })
-
+    const telemetryToken = await signTelemetryToken(env, sessionId, startedAt)
     return json({
       sessionId,
       scenarioType: 'dynamic',
       ...(scenarioPayload.scenario.evidencePoints ? { practiceToken: await signPracticeToken(env, scenarioPayload.scenario) } : {}),
       sessionToken,
+      telemetryToken,
       scenario: scenarioPayload.scenario,
       firstLine: scenarioPayload.scenario.firstLine,
       maxTurns: LIMITS.maxTurns,
@@ -147,13 +150,16 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const body = await readJsonBody(request, LIMITS.requestBytes)
     return json(await generateListeningScaffold(env, parseListeningScaffoldRequest(body), request.signal))
   }
-
   if (url.pathname === '/api/feedback/tasks') {
     if (request.method === 'POST') return handleFeedbackTaskPost(request, env)
     if (request.method === 'GET') return handleFeedbackTaskGet(request, env)
     return methodNotAllowed('GET, POST')
   }
 
+  if (url.pathname === '/api/validation/batch') {
+    if (request.method !== 'POST') return methodNotAllowed('POST')
+    return handleValidationBatch(request, env)
+  }
   if (url.pathname === '/api/speech/assist') {
     if (request.method !== 'POST') return methodNotAllowed('POST')
     const body = await readJsonBody(request, LIMITS.requestBytes)
@@ -168,22 +174,18 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   return errorJson(404, 'not_found', 'API route not found.')
 }
-
 export default {
   async fetch(request, env): Promise<Response> {
     try {
       return await handleApi(request, env)
     } catch (error) {
-      if (error instanceof RequestBodyError) {
-        return errorJson(error.status, error.code, error.message)
-      }
-      if (error instanceof ValidationError) {
-        return errorJson(400, error.code, error.message)
-      }
-      if (error instanceof TokenError || error instanceof ScenarioDraftError || error instanceof ScenarioDraftTaskError || error instanceof FeedbackTaskError) {
-        return errorJson(error.status, error.code, error.message)
-      }
+      if (error instanceof RequestBodyError) return errorJson(error.status, error.code, error.message)
+      if (error instanceof ValidationError) return errorJson(400, error.code, error.message)
+      if (error instanceof TokenError || error instanceof ScenarioDraftError || error instanceof ScenarioDraftTaskError || error instanceof FeedbackTaskError) return errorJson(error.status, error.code, error.message)
       return errorJson(500, 'internal_error', 'The prototype could not complete this request. Retry the current step.')
     }
+  },
+  async scheduled(_controller, env): Promise<void> {
+    await runValidationRetention(env)
   },
 } satisfies ExportedHandler<Env>

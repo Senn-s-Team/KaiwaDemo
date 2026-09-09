@@ -5,7 +5,7 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { isFinalTurn } from './session'
-import type { IntegrationMode, RedoRecord, RoundRecord, RoundTiming, SessionReport, SessionScenario } from '../types'
+import type { CompletionReason, IntegrationMode, RedoRecord, RoundRecord, RoundTiming, SessionReport, SessionScenario } from '../types'
 
 export function createTiming(): RoundTiming {
   return {
@@ -73,7 +73,10 @@ export function buildSessionReport(
   endedAt: number,
   rounds: RoundRecord[],
   redos: RedoRecord[] = [],
+  completionReason?: CompletionReason,
 ): SessionReport {
+  const finalTurnCandidate = Math.max(0, ...rounds.map((round) => round.turn))
+  const resolvedCompletionReason = completionReason ?? (isFinalTurn(finalTurnCandidate) ? 'turn_budget' : 'user_exit')
   const speechStartLatencies: number[] = []
   let finalTurn = 0
   let failureCount = 0
@@ -118,8 +121,8 @@ export function buildSessionReport(
     completion: {
       maxTurns: 5,
       finalTurn,
-      reason: 'turn_budget',
-      closedNaturally: isFinalTurn(finalTurn),
+      reason: resolvedCompletionReason,
+      closedNaturally: resolvedCompletionReason === 'turn_budget' && isFinalTurn(finalTurn),
     },
     recovery: {
       failureCount,
