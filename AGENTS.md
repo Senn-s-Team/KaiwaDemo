@@ -4,7 +4,7 @@ React + TypeScript + Vite + Cloudflare Workers + Web Audio API + ElevenLabs Real
 <directory>
 以下成员数不含目录内的 AGENTS.md。
 src/ - 前端应用入口、会话编排、样式与领域类型 (5直属文件，5子目录: lib/、components/、data/、scenarios/、assets/)
-src/lib/ - 音频流处理、STT/TTS 引擎、会话生命周期、首页恢复与匿名验证辅助纯函数 (33成员)
+src/lib/ - 音频流处理、STT/TTS 引擎、会话生命周期、首页恢复与匿名验证辅助纯函数 (34成员)
 shared/ - 浏览器与 Worker 共用的 wire schema 与推导类型 (6成员)
 worker/ - Cloudflare Worker 服务端路由、模型代理、校验、签名、匿名验证与 Workflow 持久任务边界 (19成员)
 migrations/ - D1 匿名技术验证基础表、分析索引与 summary 序列迁移 (3成员)

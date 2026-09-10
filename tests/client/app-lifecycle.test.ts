@@ -866,6 +866,10 @@ describe('SessionComplete redo lifecycle', () => {
         close = vi.fn()
       },
     }))
+    vi.doMock('../../src/lib/audio-engine', async () => ({
+      ...(await vi.importActual<typeof AudioEngineModule>('../../src/lib/audio-engine')),
+      requestMicrophoneStream: vi.fn().mockResolvedValue({ getAudioTracks: () => [{ readyState: 'live' }] }),
+    }))
     const round = createRoundRecord(1, scenario.firstLine, 0)
     round.userFinal = '前髪は残してください。'
     round.timing.audioStartedAt = 1

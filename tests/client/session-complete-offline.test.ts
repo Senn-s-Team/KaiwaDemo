@@ -1,7 +1,7 @@
 /**
- * [INPUT]: 真实 SessionComplete 挂载、离线状态切换与 mock 的 token/STT 外部动作
- * [OUTPUT]: 锁定重做 token/STT 离线回收、转写保全、文字确认回退、迟到结果隔离与恢复重试契约
- * [POS]: tests/client/ 完成页重做媒体生命周期组件回归测试
+ * [INPUT]: 真实 SessionComplete 挂载、离线状态切换、可控 STT/录音/播放外部动作
+ * [OUTPUT]: 锁定重做 token/STT/本机录音的确认保存与中断废弃、懒播放 URL 回收、转写保全、文字确认回退、迟到结果隔离与恢复重试契约
+ * [POS]: tests/client/ 完成页重做媒体与本机录音生命周期组件回归测试
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 // @vitest-environment jsdom
@@ -16,6 +16,20 @@ const mocks = vi.hoisted(() => ({
   token: vi.fn(),
   starts: [] as Array<ReturnType<typeof vi.fn>>,
   sessions: [] as Array<{ close: ReturnType<typeof vi.fn>; emit: (text: string) => void; stop: ReturnType<typeof vi.fn> }>,
+  captureStart: vi.fn<() => 'started' | 'unavailable'>(), captureStop: vi.fn<() => Promise<null | { sessionId: string; turn: number; kind: 'redo'; blob: Blob; createdAt: number; durationMs: number; mimeType: string }>>(), captureDiscard: vi.fn(), saveRecording: vi.fn<() => Promise<void>>(), hasRecording: vi.fn<() => Promise<boolean>>(), getRecording: vi.fn<() => Promise<{ blob: Blob } | null>>(),
+}))
+vi.mock('../../src/lib/voice-recordings', () => ({
+  createVoiceCapture: () => ({ start: mocks.captureStart, stop: mocks.captureStop, discard: mocks.captureDiscard }),
+  saveVoiceRecording: mocks.saveRecording, hasVoiceRecording: mocks.hasRecording, getVoiceRecording: mocks.getRecording,
+}))
+vi.mock('../../src/lib/recording-setup', () => ({
+  coordinateRecordingSetup: async ({ acquireToken, connectStt, isCancelled, onMicrophoneStream }: { acquireToken: () => Promise<string>; connectStt: (token: string) => Promise<void>; isCancelled?: () => boolean; onMicrophoneStream?: (stream: MediaStream) => void }) => {
+    const token = await acquireToken()
+    if (isCancelled?.()) throw new Error('cancelled')
+    onMicrophoneStream?.({} as MediaStream)
+    await connectStt(token)
+    return true
+  },
 }))
 
 vi.mock('../../src/lib/api', async () => ({
@@ -55,10 +69,10 @@ const config: PrototypeConfig = { mode: 'real', limits: { maxTurns: 5 }, elevenl
 const report = buildSessionReport('session-id', 'real', scenario, 1, 2, [createRoundRecord(1, scenario.firstLine, 0)])
 const flush = async (): Promise<void> => { await Promise.resolve(); await new Promise<void>((resolve) => queueMicrotask(resolve)) }
 
-function props(online: boolean) {
+function props(online: boolean, saveRecordingsEnabled = false) {
   return {
     messages: [{ id: 'assistant-1', turn: 1, role: 'assistant' as const, text: scenario.firstLine }], rounds: [], report, sessionId: 'session-id', scenario, reveal: scenario.reveal, config, online, feedbackData, feedbackStatus: 'success' as const, feedbackErrorMsg: '',
-    onRetryFeedback: vi.fn(), copyStatus: '', onCopy: vi.fn(), onDownload: vi.fn(), onReplayAi: vi.fn(), onStopAudio: vi.fn(), onRequestRedo: vi.fn(), onRequestListeningScaffold: vi.fn(), onCacheListeningScaffold: vi.fn(), onNewScenario: vi.fn(), audioNotice: '', practiceComparison: null, historyNotice: '',
+    onRetryFeedback: vi.fn(), copyStatus: '', onCopy: vi.fn(), onDownload: vi.fn(), onReplayAi: vi.fn(), onStopAudio: vi.fn(), onRequestRedo: vi.fn(), onRequestListeningScaffold: vi.fn(), onCacheListeningScaffold: vi.fn(), onNewScenario: vi.fn(), audioNotice: '', practiceComparison: null, historyNotice: '', saveRecordingsEnabled,
   }
 }
 
@@ -69,6 +83,7 @@ describe('SessionComplete offline redo lifecycle', () => {
     mocks.token.mockReset()
     mocks.starts.length = 0
     mocks.sessions.length = 0
+    mocks.captureStart.mockReset().mockReturnValue('started'); mocks.captureStop.mockReset().mockResolvedValue(null); mocks.captureDiscard.mockReset(); mocks.saveRecording.mockReset().mockResolvedValue(undefined); mocks.hasRecording.mockReset().mockResolvedValue(false); mocks.getRecording.mockReset().mockResolvedValue(null)
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -125,5 +140,89 @@ describe('SessionComplete offline redo lifecycle', () => {
     resolveStop('迟到停止结果')
     await flush()
     expect(container.querySelector<HTMLTextAreaElement>('#redo-confirmed')?.value).toBe('保留这段')
+  })
+
+  it('本机录音不可用时提示但仍保持 STT 录音可用', async () => {
+    mocks.captureStart.mockReturnValue('unavailable')
+    mocks.token.mockResolvedValue('token')
+    flushSync(() => root.render(createElement(SessionComplete, props(true, true))))
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('再练这个回合'))?.click())
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('开始回答'))?.click())
+    await vi.waitFor(() => expect(container.textContent).toContain('当前浏览器无法保存录音，练习仍可继续。'), { interval: 0 })
+    expect(container.textContent).toContain('说完了，确认转写')
+  })
+
+  it('停止只保留 redo 暂存录音，确认回答才保存一次', async () => {
+    const pending = { sessionId: 'session-id', turn: 1, kind: 'redo' as const, blob: new Blob(['voice']), createdAt: 1, durationMs: 10, mimeType: 'audio/webm' }
+    mocks.captureStop.mockResolvedValue(pending)
+    mocks.token.mockResolvedValue('token')
+    const view = props(true, true)
+    flushSync(() => root.render(createElement(SessionComplete, view)))
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('再练这个回合'))?.click())
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('开始回答'))?.click())
+    await vi.waitFor(() => expect(mocks.sessions).toHaveLength(1), { interval: 0 })
+    mocks.sessions[0]!.stop.mockResolvedValue('短くしてください。')
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('说完了，确认转写'))?.click())
+    await vi.waitFor(() => expect(container.querySelector('#redo-confirmed')).not.toBeNull(), { interval: 0 })
+    expect(mocks.saveRecording).not.toHaveBeenCalled()
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('确认回答并查看比较'))?.click())
+    await vi.waitFor(() => expect(mocks.saveRecording).toHaveBeenCalledOnce(), { interval: 0 })
+    expect(mocks.saveRecording).toHaveBeenCalledWith(pending)
+  })
+
+  it('重新录音、改文字、离线或卸载都会丢弃 redo 暂存而不保存', async () => {
+    const pending = { sessionId: 'session-id', turn: 1, kind: 'redo' as const, blob: new Blob(['voice']), createdAt: 1, durationMs: 10, mimeType: 'audio/webm' }
+    mocks.captureStop.mockResolvedValue(pending)
+    mocks.token.mockResolvedValue('token')
+    flushSync(() => root.render(createElement(SessionComplete, props(true, true))))
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('再练这个回合'))?.click())
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('开始回答'))?.click())
+    await vi.waitFor(() => expect(mocks.sessions).toHaveLength(1), { interval: 0 })
+    mocks.sessions[0]!.stop.mockResolvedValue('短くしてください。')
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('说完了，确认转写'))?.click())
+    await vi.waitFor(() => expect(container.querySelector('#redo-confirmed')).not.toBeNull(), { interval: 0 })
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('重新录音'))?.click())
+    expect(mocks.captureDiscard).toHaveBeenCalled()
+    expect(mocks.saveRecording).not.toHaveBeenCalled()
+    flushSync(() => root.render(createElement(SessionComplete, props(false, true))))
+    root.unmount()
+    expect(mocks.saveRecording).not.toHaveBeenCalled()
+  })
+
+  it('播放按点击懒读取，并在替换、停止、ended 与卸载时释放对象 URL', async () => {
+    const urls = ['blob:first', 'blob:second', 'blob:third', 'blob:fourth']
+    const createUrl = vi.fn(() => urls.shift()!)
+    const revokeUrl = vi.fn()
+    const audios: FakeAudio[] = []
+    vi.stubGlobal('URL', { createObjectURL: createUrl, revokeObjectURL: revokeUrl })
+    class FakeAudio {
+      onended: (() => void) | null = null
+      pause = vi.fn()
+      play = vi.fn(async () => undefined)
+      constructor(_url: string) { audios.push(this) }
+    }
+    vi.stubGlobal('Audio', FakeAudio)
+    mocks.hasRecording.mockResolvedValue(true)
+    mocks.getRecording.mockResolvedValue({ blob: new Blob(['voice']) })
+    flushSync(() => root.render(createElement(SessionComplete, props(true))))
+    await vi.waitFor(() => expect(container.textContent).toContain('播放重做录音'), { interval: 0 })
+    expect(mocks.getRecording).not.toHaveBeenCalled()
+    const play = () => Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('播放重做录音'))?.click()
+    flushSync(play)
+    await vi.waitFor(() => expect(createUrl).toHaveBeenCalledOnce(), { interval: 0 })
+    expect(mocks.getRecording).toHaveBeenCalledOnce()
+    flushSync(play)
+    await vi.waitFor(() => expect(revokeUrl).toHaveBeenCalledWith('blob:first'), { interval: 0 })
+    const stop = Array.from(container.querySelectorAll('button')).find((item) => item.textContent === '停止')
+    flushSync(() => stop?.click())
+    expect(revokeUrl).toHaveBeenCalledWith('blob:second')
+    flushSync(play)
+    await vi.waitFor(() => expect(createUrl).toHaveBeenCalledTimes(3), { interval: 0 })
+    audios[2]?.onended?.()
+    expect(revokeUrl).toHaveBeenCalledWith('blob:third')
+    flushSync(play)
+    await vi.waitFor(() => expect(createUrl).toHaveBeenCalledTimes(4), { interval: 0 })
+    root.unmount()
+    expect(revokeUrl).toHaveBeenCalledWith('blob:fourth')
   })
 })

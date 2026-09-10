@@ -19,7 +19,7 @@ session-snapshot.ts: 当前会话 sessionStorage 快照的严格校验、读取�
 use-listening-scaffold-controller.ts: 会话内听力支架等级、请求状态、缓存、重听与渐进显示控制器，通过注入的消息/回合 store 与播放动作保持所有权隔离
 use-speech-assist-controller.ts: 录音续说辅助的请求时机、超时、失败分类、事件写回、可见结果与中止控制器
 use-completed-practice.ts: 完成复盘的 durable feedback/redo 恢复、报告、复练比较、任务启动/重试与复制协调，复用 feedback recovery 唯一轮询
-use-home-practice.ts: 首页草稿恢复、场景准备、本机练习历史、复练、删除与串行持久化协调，复用 scenario draft recovery 唯一轮询
+use-home-practice.ts: 首页草稿恢复、场景准备、本机练习历史和关联录音删除、复练、删除与串行持久化协调，复用 scenario draft recovery 唯一轮询
 home-practice-recovery.ts: 首页同场景复练准备数据的严格 sessionStorage 校验、恢复、写入与清理边界
 use-session-snapshot-persistence.ts: 当前会话 sessionStorage 快照写入与清理 lifecycle
 use-session-lifecycle.ts: 在线、离线、可见性与 pagehide 的会话中断、媒体释放和恢复状态监听
@@ -27,7 +27,8 @@ spark-practice.ts: 首页三个可编辑场景例子的抽取、换组避重与�
 home-stt.ts: 首页中文 STT 的纯生命周期规则，基于录音前草稿合并实时与最终转写，裁决迟到结果、离页/取消、准备与澄清冲突，以及不覆盖既有文字的 300 字合并边界
 api.ts: 前端 API 通信层，提供场景语音描述保真润色、可恢复场景草稿、原场景复练，验证动态会话、版本化证据反馈与听力支架响应，并直接复用 shared/ 下对应的唯一 wire schema 与推导类型
 
-practice-history.ts: 当前浏览器 IndexedDB 练习历史、完整场景分组与关联删除，不保存临时访问令牌
+practice-history.ts: 当前浏览器 IndexedDB 练习历史、完整场景分组与关联删除，不保存临时访问令牌或音频 Blob
+voice-recordings.ts: 可选本机压缩用户录音的开关、暂存、独立 IndexedDB、按会话裁剪、关联删除与懒读取边界
 practice-progress.ts: 基于有效引用与帮助事实的场景表现汇总、同标准首次完整练习比较
 validation-client.ts: 技术验证遥测的匿名客户端 UUID 生成与本地存储边界
 validation-outbox.ts: 独立 IndexedDB 遥测 record 队列，按非凭据 sessionId 路由、幂等投递与有界退避；绝不持久化令牌

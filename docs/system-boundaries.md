@@ -26,7 +26,7 @@
 │  ├─ fetch API + shared Schema parsing                   │
 │  ├─ sessionStorage: 当前会话/首页复练准备               │
 │  ├─ localStorage: 草稿任务/完成复盘 durable recovery    │
-│  ├─ IndexedDB: 本机练习历史与独立遥测 outbox          │
+│  ├─ IndexedDB: 练习历史、可选本机录音与独立遥测 outbox │
 │  └─ ElevenLabs client: STT/TTS 媒体连接                 │
 └───────────────┬─────────────────────────────────────────┘
                 │ same-origin /api/*
@@ -102,20 +102,28 @@
 - 这是跨页面/跨会话的本机历史边界，不是 Worker 数据库，也不保存 session token 或 STT/TTS 临时访问 token。保存函数显式挑选字段；调用方附带的临时令牌不会被隐式持久化。
 - IndexedDB 不可用、被阻塞或事务失败时，历史保存/读取以错误结束；本文不把浏览器历史推断为云端备份。
 
-### 4.4 IndexedDB：技术验证 outbox
+### 4.4 IndexedDB：可选本机录音
+
+- `src/lib/voice-recordings.ts` 独立拥有数据库 `kaiwa-voice-recordings` 与对象仓 `recordings`。主键由 `sessionId + turn + kind` 组成；`kind` 区分正式回合与完成页重做。记录只包含 Blob、创建时间、时长和 MIME，以及定位所需的会话/回合键。
+- 开关 `kaiwa-save-voice-recordings` 位于 `localStorage`，默认关闭。开启时，浏览器通过同一麦克风流旁路启动 `MediaRecorder`；停止录音只生成内存中的 pending Blob，普通回合在确认转写后、重做在确认第二稿后才调用持久化。重录、文字切换、取消、失败、离页或卸载会丢弃 pending Blob。
+- 录音数据库与 `kaiwa-practice-history`、`kaiwa-validation-telemetry` 相互独立；Blob 不进入报告、反馈任务、会话快照、练习历史对象、遥测批次或任何网络请求。读取只在界面确认录音存在以及用户点击播放时发生，播放使用的对象 URL 在停止、结束、替换或组件卸载时释放。
+- 保存事务完成后按各会话最新录音时间裁剪，只保留最新二十个不同会话。删除练习场景时，浏览器先删除其关联会话录音，再删除练习历史；录音删除失败时保留历史入口供用户重试，避免产生不可定位的孤儿 Blob。
+- `MediaRecorder`、IndexedDB、配额或事务不可用只产生非阻断提示，不改变 STT、转写确认、相手推进或重做比较。关闭开关只阻止后续采集和保存，不隐式删除此前已保存的确认录音；清除站点数据会删除录音数据库。
+
+### 4.5 IndexedDB：技术验证 outbox
 
 - `src/lib/validation-outbox.ts` 独立拥有数据库 `kaiwa-validation-telemetry`。它只保存已通过 `shared/validation-telemetry.ts` 严格校验的固定事实、随机 session id、尝试次数和下次尝试时间，不读取或写入 `kaiwa-practice-history`，也不保存 telemetry token。
 - 新会话自动生成并入队固定形状的匿名技术事实。在线、窗口重新获得焦点或新记录入队时尝试投递；发送器只接收与当前内存 session id 匹配的记录，旧会话残留记录会被丢弃而不会借用新 token。失败采用有界指数退避，所有失败都不得改变训练状态。
 - telemetry capability 不写入 sessionStorage、localStorage、完成复盘恢复记录或练习历史；刷新后不能恢复该页面内存凭据。旧 wire schema v1 批次可被 Worker 拒绝并由 outbox 自然丢弃。
 
-### 4.5 D1：匿名技术验证事实
+### 4.6 D1：匿名技术验证事实
 
 - `worker/validation-telemetry.ts` 在 `/api/validation/batch` 边界验证版本 2 Schema、`anonymousMetricsCollection: true`、token 会话绑定和七天事件时间窗，然后把随机客户端 UUID 经过服务端 HMAC 派生后写入 `VALIDATION_DB`；D1 不保存原始 UUID、IP 字段、User-Agent、对话、转写、场景描述、音频、访问令牌或自由文本评价。
 - `validation_sessions` 保存一行会话汇总；`validation_events` 保存阶段、完成和失败 checkpoint；`validation_rounds` 保存回合耗时、输入模式、支架、修改、重录与重试事实；`validation_reviews` 只保存结构化复盘枚举及人工复核占位，不保存模型解释文本。
 - `event_id` 与 `(session_id, sequence)` 形成幂等边界。会话汇总允许反馈或重做完成后以更高 `sequence` 单调更新，`last_summary_sequence` 拒绝乱序记录与同一事件重放；重复上传不得重复计数或覆盖既有汇总。D1 缺失或写入失败时端点失败，但客户端吞没遥测失败并继续训练。
 - 每日 UTC cron 先删除超过 180 天的 review/round/event，再删除超过 365 天的 session 汇总。
 
-### 4.6 Workflow 数据：服务端任务状态
+### 4.7 Workflow 数据：服务端任务状态
 
 - 场景草拟任务由 `SCENARIO_DRAFT` 拥有，反馈/重做任务由 `FEEDBACK_TASK` 拥有。浏览器只拥有请求封套和 capability token，不拥有 Workflow 内部状态。
 - task id 是完整请求 JSON 的 SHA-256 摘要；提交失败时路由尝试按同一 id 查询已有任务，形成请求级幂等边界。
@@ -142,6 +150,7 @@
 
 - Worker 只代理 ElevenLabs 单次 token 请求；`ELEVENLABS_API_KEY` 缺失时返回未配置错误，供应商权限、额度、条款、鉴权和其他上游失败由 `worker/elevenlabs.ts` 映射为稳定错误。
 - STT 实时连接、麦克风采集、最终/部分转写合并和取消释放由浏览器 `src/lib/stt.ts` 与 `audio-engine.ts` 所有；Worker 不接收原始音频。发送给模型的是用户确认的转写文本。
+- 用户明确开启本机录音保存时，`voice-turn-controller.ts` 和 `SessionComplete.tsx` 复用已取得的麦克风流启动独立 `MediaRecorder`；该旁路不建立第二条 STT 连接，也不改变共享麦克风释放所有权。确认前 Blob 只在内存，确认后只写入独立本机 IndexedDB。
 - TTS 播放、分块、缓存、暂停/继续、从头停止和手势解锁由 `src/lib/tts.ts` 所有。TTS token 或音频播放失败不会自动变成对转写或会话数据的成功声明；控制器可按现有状态降级或报错。
 - `worker/constants.ts` 及 `/api/config` 只说明当前配置可用性；ElevenLabs token 成功不等于浏览器麦克风权限、实时连接或播放设备一定可用。
 
@@ -166,11 +175,11 @@
 
 ## 8. 隐私与不持久化边界
 
-- 浏览器向 Worker 提交的是转写文本、会话消息、场景及任务请求；STT 原始音频由浏览器媒体管线直接提供给 ElevenLabs 实时客户端，不由本 Worker 持久化。
+- 浏览器向 Worker 提交的是转写文本、会话消息、场景及任务请求；STT 原始音频由浏览器媒体管线直接提供给 ElevenLabs 实时客户端，不由本 Worker 持久化。用户明确开启本机保存时，同一麦克风流还会生成本地压缩 Blob，但 Blob 不发送给 Worker、ElevenLabs 录音存储接口、模型或遥测端点。
 - token 的本地持久化由恢复封套决定：草稿/反馈 task capability 可随 `localStorage` 中的任务记录恢复；当前会话的 `sessionToken`、`scenarioToken` 和可选 `practiceToken` 可随 `sessionStorage` 快照保存。telemetry token 例外：它只存在当前页面内存，不进入任何本地恢复或历史存储。
-- 当前会话快照和复盘恢复记录属于浏览器本地存储，可能包含对话文本、场景、报告、反馈及上述恢复所需凭据；它们不是服务端账户数据，也不构成跨设备同步。本文不承诺浏览器、供应商或平台日志的保留策略。
+- 当前会话快照和复盘恢复记录属于浏览器本地存储，可能包含对话文本、场景、报告、反馈及上述恢复所需凭据；独立本机录音数据库只保存用户明确选择并确认后的录音及定位元数据。它们都不是服务端账户数据，也不构成跨设备同步。本文不承诺浏览器、供应商或平台日志的保留策略。
 - Workflow 在任务生命周期内持有请求参数与执行结果；当前配置只证明 1 天结果保留，不证明永久删除时间、跨区域位置或供应商侧数据策略。
-- 自动匿名验证批次只携带固定枚举、计数、耗时、粗粒度环境分类和结构化会话/回合/复盘事实。D1 保存服务端 HMAC 派生客户端标识，不保存原始客户端 UUID、原始音频、对话、转写、场景描述、访问令牌、完整浏览器标识、User-Agent 或应用级 IP 字段；平台网络日志仍服从 Cloudflare 配置。
+- 自动匿名验证批次只携带固定枚举、计数、耗时、粗粒度环境分类和结构化会话/回合/复盘事实。D1 保存服务端 HMAC 派生客户端标识，不保存原始客户端 UUID、原始音频、本机录音 Blob、对话、转写、场景描述、访问令牌、完整浏览器标识、User-Agent 或应用级 IP 字段；平台网络日志仍服从 Cloudflare 配置。
 
 ## 9. 边界变更检查
 
@@ -182,4 +191,5 @@
 4. token 签发、验签、过期和恢复器内的 task 生命周期是否同步。
 5. `wrangler.jsonc` 的 binding、变量和 `/api/*` Worker 优先规则是否仍满足运行时入口。
 6. 匿名遥测字段、自动收集标识、token 内存边界、D1 migration、索引和 retention cron 是否仍同构。
-7. 同时更新本文头部协议，并检查 `docs/AGENTS.md`。
+7. 本机录音开关、确认后落库、二十会话裁剪、关联删除、懒播放和对象 URL 释放是否仍与 `voice-recordings.ts` 及产品隐私声明一致。
+8. 同时更新本文头部协议，并检查 `docs/AGENTS.md`。

@@ -1,3 +1,10 @@
+/**
+ * [INPUT]: 真实录音协调器、受控麦克风 promise 与 Token/连接 stub
+ * [OUTPUT]: 锁定共享麦克风并发准备、连接失败回收及本机录音回调契约
+ * [POS]: tests/client 的录音准备深模块回归契约
+ * [PROTOCOL]: 变更时更新此头部,然后检查 AGENTS.md
+ */
+
 import { describe, expect, it } from 'vitest'
 import { releaseMicrophoneStream, requestMicrophoneStream } from '../../src/lib/audio-engine'
 import { coordinateRecordingSetup } from '../../src/lib/recording-setup'
@@ -37,6 +44,7 @@ describe('coordinateRecordingSetup deep module', () => {
     const tokenGate = Promise.withResolvers<string>()
     let tokenAcquireCalls = 0
     let connectedToken = ''
+    const setupEvents: string[] = []
 
     try {
       const setupPromise = coordinateRecordingSetup({
@@ -45,7 +53,11 @@ describe('coordinateRecordingSetup deep module', () => {
           return tokenGate.promise
         },
         connectStt: async (tok) => {
+          setupEvents.push('stt')
           connectedToken = tok
+        },
+        onMicrophoneStream: () => {
+          setupEvents.push('microphone')
         },
       })
 
@@ -64,6 +76,7 @@ describe('coordinateRecordingSetup deep module', () => {
 
       const isLive = await setupPromise
       expect(isLive).toBe(true)
+      expect(setupEvents).toEqual(['microphone', 'stt'])
       expect(connectedToken).toBe('valid_token_xyz')
     } finally {
       releaseMicrophoneStream()

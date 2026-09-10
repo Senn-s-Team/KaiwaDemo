@@ -1,6 +1,6 @@
 /**
- * [INPUT]: Home 组件、可控 STT 生命周期和可控润色请求
- * [OUTPUT]: 验证实时转写、录音释放、在线切换取消、润色代际、手编撤回及生成互斥
+ * [INPUT]: Home 组件、可控 STT 生命周期、可控润色请求与本机录音读取
+ * [OUTPUT]: 验证实时转写、录音释放、在线切换取消、润色代际、手编撤回、生成互斥与历史录音懒播放入口
  * [POS]: tests/components 的首页语音输入挂载回归
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -13,17 +13,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   events: [] as string[],
   handlers: null as null | { onPartial: (text: string) => void; onConnectionState: (state: 'connecting' | 'connected' | 'closed') => void; onAudioLevel: (level: number) => void },
-  stop: vi.fn<() => Promise<string>>(), polish: vi.fn<(text: string, signal?: AbortSignal) => Promise<string>>(), token: vi.fn<() => Promise<string>>(), release: vi.fn(),
+  stop: vi.fn<() => Promise<string>>(), polish: vi.fn<(text: string, signal?: AbortSignal) => Promise<string>>(), token: vi.fn<() => Promise<string>>(), release: vi.fn(), hasRecording: vi.fn<() => Promise<boolean>>(), getRecording: vi.fn<() => Promise<{ blob: Blob } | null>>(),
 }))
 vi.mock('../../src/lib/api', () => ({ requestElevenLabsToken: mocks.token, polishScenarioText: mocks.polish }))
 vi.mock('../../src/lib/audio-engine', () => ({ releaseMicrophoneStream: mocks.release, shouldTeardownOnVisibility: () => true }))
 vi.mock('../../src/lib/recording-setup', () => ({ coordinateRecordingSetup: async (options: { acquireToken: () => Promise<string>; connectStt: (token: string) => Promise<void> }) => { mocks.events.push('microphone'); await options.connectStt(await options.acquireToken()); return true } }))
 vi.mock('../../src/lib/stt', () => ({ RealtimeSttSession: class { async start(_token: string, _model: string, handlers: typeof mocks.handlers): Promise<void> { mocks.handlers = handlers; handlers?.onConnectionState('connected') } stop = mocks.stop; close(): void { mocks.events.push('close') } } }))
+vi.mock('../../src/lib/voice-recordings', () => ({ hasVoiceRecording: mocks.hasRecording, getVoiceRecording: mocks.getRecording }))
 
 import { Home } from '../../src/components/Home'
 
 const deferred = <T,>() => { let resolve!: (value: T) => void; let reject!: (reason?: unknown) => void; const promise = new Promise<T>((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
-function props(setCustomInputZh: React.Dispatch<React.SetStateAction<string>>, customInputZh: string, onDraftScenario = vi.fn()): React.ComponentProps<typeof Home> { return { loading: false, ready: true, online: true, error: null, sttAvailable: true, sttModel: 'scribe', customInputZh, setCustomInputZh, clarifications: [], pendingClarification: null, readyScenarioData: null, isDraftingScenario: false, onDraftScenario, onAnswerClarification: vi.fn(), onStartDynamic: vi.fn(), onResetCustom: vi.fn(), recentPractices: [], practiceHistory: [], historyNotice: '', historySaving: false, onPreparePractice: vi.fn(), onRemovePractice: vi.fn(), draftState: { status: 'idle', request: null, result: null, error: null, storageNotice: '' }, onRetryDraftTransport: vi.fn(), onInputEdited: vi.fn() } }
+function props(setCustomInputZh: React.Dispatch<React.SetStateAction<string>>, customInputZh: string, onDraftScenario = vi.fn()): React.ComponentProps<typeof Home> { return { loading: false, ready: true, online: true, error: null, sttAvailable: true, sttModel: 'scribe', saveRecordingsEnabled: false, onSaveRecordingsChange: vi.fn(), recordingNotice: '', customInputZh, setCustomInputZh, clarifications: [], pendingClarification: null, readyScenarioData: null, isDraftingScenario: false, onDraftScenario, onAnswerClarification: vi.fn(), onStartDynamic: vi.fn(), onResetCustom: vi.fn(), recentPractices: [], practiceHistory: [], historyNotice: '', historySaving: false, onPreparePractice: vi.fn(), onRemovePractice: vi.fn(), draftState: { status: 'idle', request: null, result: null, error: null, storageNotice: '' }, onRetryDraftTransport: vi.fn(), onInputEdited: vi.fn() } }
 function Harness({ initial = '预约理发', online = true, onDraftScenario }: { initial?: string; online?: boolean; onDraftScenario?: ReturnType<typeof vi.fn> }): React.JSX.Element { const [value, setValue] = useState(initial); return createElement(Home, { ...props(setValue, value, onDraftScenario), online }) }
 const flush = async () => { await Promise.resolve(); await Promise.resolve() }
 const button = (box: HTMLElement, copy: string) => Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes(copy)) as HTMLButtonElement
@@ -31,7 +32,7 @@ const textarea = (box: HTMLElement) => box.querySelector<HTMLTextAreaElement>('#
 
 describe('Home realtime STT', () => {
   let root: Root; let container: HTMLDivElement
-  beforeEach(() => { mocks.events.length = 0; mocks.handlers = null; mocks.stop.mockReset().mockResolvedValue('我想剪短一点'); mocks.polish.mockReset().mockResolvedValue('请帮我剪短一点'); mocks.token.mockReset().mockResolvedValue('token'); mocks.release.mockReset(); container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container); flushSync(() => root.render(createElement(Harness))) })
+  beforeEach(() => { mocks.events.length = 0; mocks.handlers = null; mocks.stop.mockReset().mockResolvedValue('我想剪短一点'); mocks.polish.mockReset().mockResolvedValue('请帮我剪短一点'); mocks.token.mockReset().mockResolvedValue('token'); mocks.release.mockReset(); mocks.hasRecording.mockReset().mockResolvedValue(false); mocks.getRecording.mockReset().mockResolvedValue(null); container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container); flushSync(() => root.render(createElement(Harness))) })
   afterEach(() => { flushSync(() => root.unmount()); container.remove(); vi.clearAllMocks() })
   async function startAndStop(final = '我想剪短一点') { mocks.stop.mockResolvedValue(final); button(container, '中文语音输入').click(); await flush(); flushSync(() => mocks.handlers?.onPartial('我想剪短')); expect(textarea(container).value).toBe('预约理发\n我想剪短'); button(container, '说完了').click(); await vi.waitFor(() => expect(mocks.polish).toHaveBeenCalled(), { interval: 0 }) }
 
@@ -76,5 +77,22 @@ describe('Home realtime STT', () => {
     await flush()
     expect(onDraftScenario).toHaveBeenCalledOnce()
     expect(onDraftScenario.mock.calls[0]?.[0]).toMatch(/理发|剪|头发/)
+  })
+  it('历史中仅有本机录音可用时显示播放入口，并在点击后才懒读取', async () => {
+    mocks.hasRecording.mockResolvedValue(true)
+    mocks.getRecording.mockResolvedValue({ blob: new Blob(['voice']) })
+    const createUrl = vi.fn(() => 'blob:history')
+    const revokeUrl = vi.fn()
+    vi.stubGlobal('URL', { createObjectURL: createUrl, revokeObjectURL: revokeUrl })
+    class FakeAudio { onended: (() => void) | null = null; pause(): void {} async play(): Promise<void> {} }
+    vi.stubGlobal('Audio', FakeAudio)
+    const input = props(vi.fn(), '预约理发')
+    const attempt = { scenarioKey: 'key', scenario: { titleZh: '理发店' }, report: { sessionId: 'history-session', rounds: [{ turn: 1 }] } } as React.ComponentProps<typeof Home>['practiceHistory'][number]
+    flushSync(() => root.render(createElement(Home, { ...input, recentPractices: [attempt], practiceHistory: [attempt] })))
+    await vi.waitFor(() => expect(button(container, '播放录音')).toBeDefined(), { interval: 0 })
+    expect(mocks.getRecording).not.toHaveBeenCalled()
+    button(container, '播放录音').click()
+    await vi.waitFor(() => expect(mocks.getRecording).toHaveBeenCalledOnce(), { interval: 0 })
+    expect(createUrl).toHaveBeenCalledOnce()
   })
 })
