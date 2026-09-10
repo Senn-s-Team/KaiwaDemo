@@ -13,6 +13,7 @@ microphone.ts: 麦克风权限预检、静默 Permissions.query 状态探测 que
 speech-assist.ts: 实时续说辅助触发规则与显示守卫
 metrics.ts: 从回合、失败/重试与 speechAssistEvents 聚合 RoundRecord / SessionReport，构建 completion、recovery 与 speechAssistUsed 事实
 text-cleaner.ts: 转写文本清洗与规整化
+ui.ts: 界面错误与时间格式化边界，集中将场景、音频和模型错误码映射为不泄露服务端正文的中文恢复提示
 scenario-draft-task.ts: 首页场景草稿未完成请求的持久化封套、前台恢复、幂等提交与 task 状态轮询控制器，成功结果保留在当前页、失败保留本页重试，但两类终态均立即清除封套
 feedback-task-recovery.ts: 完成复盘页与反馈/重做任务的 durable local recovery，集中 start/resume、幂等重投、前台轮询、HTTP 终态映射及按 sessionId/requestId 隔离
 session-snapshot.ts: 当前会话 sessionStorage 快照的严格校验、读取、清理与已提交用户消息回滚辅助函数

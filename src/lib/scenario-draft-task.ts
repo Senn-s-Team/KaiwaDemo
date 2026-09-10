@@ -1,5 +1,5 @@
 /**
- * [INPUT]: 依赖 scenario-draft 共享 wire schema、浏览器 localStorage、前端 API 通信层与页面可见性/联网状态
+ * [INPUT]: 依赖 scenario-draft 共享 wire schema、浏览器 localStorage、前端 API 通信层、统一场景错误映射与页面可见性/联网状态
  * [OUTPUT]: 提供可恢复首页场景草稿控制器及 React hook，仅持久化未完成请求并在成功或失败终态进入内存后清除封套
  * [POS]: src/lib 的首页动态场景草稿恢复边界，隔离草稿网络生命周期，避免与语音回合 phase 混用
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
@@ -15,6 +15,7 @@ import {
   type ScenarioDraftTaskStatus,
 } from '../../shared/scenario-draft'
 import { ApiError, getScenarioDraftTask, submitScenarioDraft } from './api'
+import { scenarioDraftErrorMessage } from './ui'
 
 export const SCENARIO_DRAFT_STORAGE_KEY = 'kaiwa.scenario-draft-task.v3'
 const LEGACY_SCENARIO_DRAFT_STORAGE_KEYS = ['kaiwa.scenario-draft-task.v1', 'kaiwa.scenario-draft-task.v2'] as const
@@ -82,6 +83,9 @@ function isWireError(error: unknown): boolean {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof ApiError && (error.code.startsWith('scenario_draft_') || error.code.startsWith('workflow_'))) {
+    return scenarioDraftErrorMessage(error.code)
+  }
   return error instanceof Error ? error.message : '连接暂时中断，请恢复网络后继续。'
 }
 
@@ -242,7 +246,7 @@ export function createScenarioDraftRecoveryRuntime(dependencies: ScenarioDraftRe
         removeStored()
         publish({ status: 'ready', request, result: status.result, error: null, storageNotice })
       } else {
-        failTerminal(request, new Error(status.error.message))
+        failTerminal(request, new Error(scenarioDraftErrorMessage(status.error.code)))
       }
     } catch (error) {
       if (requestEpoch !== epoch || isLifecycleAbort(controller.signal)) return

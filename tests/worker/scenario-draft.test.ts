@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 场景生成路由、模型输出与草拟契约
- * [OUTPUT]: 验证一次澄清与版本化场景生成
+ * [OUTPUT]: 验证一次澄清、版本化场景生成、durable 草稿模型的 120 秒请求预算与脱敏失败诊断
  * [POS]: tests/worker 的场景草拟契约测试
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -106,6 +106,7 @@ afterEach(() => {
 
 describe('POST /api/scenario/draft', () => {
   it('generates and signs a five-turn single-goal scenario', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(new AbortController().signal)
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(readyModelResponse))))
     const response = await fetchWorker(post({ inputZh: '我想练习在咖啡店点燕麦奶拿铁。', clarifications: [] }), env)
     const body: unknown = await response.json()
@@ -116,6 +117,7 @@ describe('POST /api/scenario/draft', () => {
       throw new Error('Ready scenario draft did not include a token.')
     }
     await expect(verifyScenarioToken(env, body.scenarioToken)).resolves.toMatchObject({ scenario })
+    expect(timeoutSpy).toHaveBeenCalledWith(120_000)
   })
 
   it('normalizes scalar contract collections without dropping new fields', async () => {
@@ -277,4 +279,26 @@ describe('POST /api/scenario/draft', () => {
     expect(response.status).toBe(502)
     await expect(response.json()).resolves.toMatchObject({ error: { code: 'scenario_draft_schema_invalid' } })
   })
+  it('logs sanitized draft failure diagnostics without exposing the upstream response body', async () => {
+    const upstreamBody = 'sensitive-upstream-diagnostic-body'
+    const logSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(Date, 'now').mockReturnValueOnce(1_000).mockReturnValueOnce(3_400)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(upstreamBody, { status: 503 })))
+
+    const output = await executeScenarioDraftTask(
+      { ...env, OPENAI_MODEL: 'diagnostic-model' },
+      { requestId: crypto.randomUUID(), createdAt: 1, inputZh: '不应进入日志的场景描述', clarifications: [], forceGenerate: false },
+    )
+
+    expect(output).toEqual({ status: 'failed', error: { code: 'scenario_draft_request_failed', message: 'Scenario draft generation failed. Retry this request.' } })
+    expect(logSpy).toHaveBeenCalledWith('scenario_draft_failed', {
+      code: 'scenario_draft_request_failed',
+      durationMs: 2_400,
+      model: 'diagnostic-model',
+    })
+    expect(JSON.stringify(logSpy.mock.calls)).not.toContain(upstreamBody)
+    expect(JSON.stringify(logSpy.mock.calls)).not.toContain('不应进入日志的场景描述')
+    expect(JSON.stringify(output)).not.toContain(upstreamBody)
+  })
+
 })

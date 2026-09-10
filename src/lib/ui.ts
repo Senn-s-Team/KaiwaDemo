@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 ./api 的 ApiError、./stt 的 SttError、./tts 的 TtsError、../types 的 UiError
- * [OUTPUT]: 对外提供 formatDuration、formatClock 与 toUiError 错误归一化纯函数
- * [POS]: src/lib 的界面错误呈现与时间格式化工具，将各引擎与 API 底层错误（包括 no_speech_detected）映射为具有明确引导和恢复动作的 UiError
+ * [OUTPUT]: 对外提供 formatDuration、formatClock、scenarioDraftErrorMessage 与 toUiError 错误归一化纯函数
+ * [POS]: src/lib 的界面错误呈现与时间格式化工具，将各引擎与 API 底层错误映射为不泄露服务端正文、具有明确引导和恢复动作的 UiError
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import type { ApiError } from './api'
@@ -19,6 +19,18 @@ export function formatClock(timestamp: number | null): string {
   if (timestamp === null) return '未记录'
   return new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false })
 }
+export function scenarioDraftErrorMessage(code: string): string {
+  if (code === 'scenario_draft_request_timeout') return '场景准备时间比预期更久，请重新准备。'
+  if (code === 'scenario_draft_request_failed' || code === 'workflow_unavailable' || code === 'workflow_unconfigured') {
+    return '场景服务暂时不可用，请稍后重新准备。'
+  }
+  if (code === 'scenario_draft_model_invalid' || code === 'scenario_draft_schema_invalid' || code === 'scenario_draft_invalid_result') {
+    return '场景服务返回的数据无效，请重新准备。'
+  }
+  if (code === 'scenario_draft_unavailable' || code === 'scenario_draft_missing') return '这份场景草稿已不可用，请重新准备。'
+  return '场景准备失败，请重新准备。'
+}
+
 
 export function toUiError(error: unknown): UiError {
   if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
@@ -48,7 +60,7 @@ export function toUiError(error: unknown): UiError {
       return { code, title: '相手语音未完成', message: '暂时无法播放相手语音。可以显示文字继续。', recovery: 'skip_tts' }
     }
     if (code.includes('scenario_draft') || code.includes('draft')) {
-      return { code, title: '场景设计失败', message: (error as { message?: string }).message || '未能成功生成定制场景，请重试。', recovery: 'retry' }
+      return { code, title: '场景设计失败', message: scenarioDraftErrorMessage(code), recovery: 'retry' }
     }
     if (code.includes('openai') || code.includes('model') || code.includes('stream')) {
       return { code, title: '相手暂时没有回复', message: '请重试当前步骤。', recovery: 'retry' }

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 可恢复场景草稿控制器、内存 storage、可控草稿 task API
- * [OUTPUT]: 验证未完成草稿请求持久化、前后台恢复、成功与失败终态清理、同封套重试、代际隔离及错误分类
+ * [OUTPUT]: 验证未完成草稿请求持久化、前后台恢复、成功与失败终态清理、同封套重试、代际隔离、错误分类及中文安全提示
  * [POS]: tests/client 的首页场景草稿恢复回归契约，不依赖真实网络或浏览器刷新
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -263,6 +263,32 @@ describe('recoverable scenario draft controller', () => {
     await tick()
     expect(expiredTask.getState().status).toBe('expired')
     expect(terminal.getState()).toMatchObject({ status: 'failed', error: '请求无效' })
+  })
+
+  it('maps terminal draft failure codes to Chinese retry guidance without surfacing server copy', async () => {
+    const cases = [
+      ['scenario_draft_request_timeout', '场景准备时间比预期更久，请重新准备。'],
+      ['scenario_draft_request_failed', '场景服务暂时不可用，请稍后重新准备。'],
+      ['scenario_draft_model_invalid', '场景服务返回的数据无效，请重新准备。'],
+      ['scenario_draft_missing', '这份场景草稿已不可用，请重新准备。'],
+    ] as const
+
+    for (const [code, expected] of cases) {
+      const runtime = createScenarioDraftRecoveryRuntime({
+        api: {
+          submit: async () => ({ taskToken: `token-${code}`, expiresAt: Date.now() + 86_400_000 }),
+          get: async () => ({ status: 'failed' as const, error: { code, message: 'Scenario draft generation failed. Retry this request.' } }),
+        },
+        storage: new MemoryStorage(),
+      })
+      runtime.mount()
+      runtime.replace('预约理发', [], false)
+      await tick()
+      await tick()
+      expect(runtime.getState()).toMatchObject({ status: 'failed', error: expected })
+      expect(runtime.getState().error).not.toContain('Scenario draft')
+      runtime.dispose()
+    }
   })
 
   it('handles unavailable browser storage without crashing the homepage runtime', async () => {
