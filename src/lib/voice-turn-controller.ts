@@ -1,7 +1,7 @@
 /**
- * [INPUT]: 依赖 ./recording-setup、./stt、./api、./audio-engine、./text-cleaner、./ui、../types、相手播放资源释放回调与 ../../shared/speech-assist 的固定中止原因契约
- * [OUTPUT]: 对外提供 useVoiceTurnController 语音回合 Hook、录音前相手播放资源释放接缝、voiceTurnReducer 状态纯机、parseFinalTranscript 校验及 RecordingStartLock 所有权锁契约
- * [POS]: src/lib 的用户语音回合核心控制器，内聚麦克风、转写、语音辅助中止、文本回退、资源释放与单轮生命周期闭环
+ * [INPUT]: 依赖 ./recording-setup、./stt、./api、./audio-engine、./voice-recordings、./text-cleaner、./ui、../types、相手播放资源释放回调与 ../../shared/speech-assist 的固定中止原因契约
+ * [OUTPUT]: 对外提供 useVoiceTurnController 语音回合 Hook、录音前相手播放资源释放接缝、确认后本机录音保存、voiceTurnReducer 状态纯机、parseFinalTranscript 校验及 RecordingStartLock 所有权锁契约
+ * [POS]: src/lib 的用户语音回合核心控制器，内聚麦克风、转写、可选本机压缩录音暂存、语音辅助中止、文本回退、资源释放与单轮生命周期闭环
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { useCallback, useEffect, useReducer, useRef } from 'react'
@@ -13,6 +13,7 @@ import { coordinateRecordingSetup } from './recording-setup'
 import { RealtimeSttSession, SttError, SttTokenManager } from './stt'
 import { cleanTranscript } from './text-cleaner'
 import { toUiError } from './ui'
+import { createVoiceCapture, saveVoiceRecording, type PendingVoiceRecording } from './voice-recordings'
 import type { AppPhase, RoundRecord, TranscriptText, UiError } from '../types'
 
 export interface VoiceTurnDependencies {
@@ -28,6 +29,10 @@ export interface VoiceTurnDependencies {
   touchRound: (update: (round: RoundRecord) => void) => void
   abortSpeechAssist?: (reason: SpeechAssistAbortReason) => void
   releaseAiPlayback?: () => void
+  saveRecordingsEnabled: boolean
+  sessionId: string
+  turn: number
+  onRecordingNotice?: (notice: string) => void
 }
 
 export interface VoiceTurnState {
@@ -270,6 +275,7 @@ export interface VoiceTurnActions {
   resetVoiceTurn: () => void
   dispose: () => void
   prefetchSttToken: () => Promise<string | null>
+  confirmRecording: () => void
 }
 
 export interface VoiceTurnController {
@@ -320,6 +326,8 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
   const lastSpeechSoundAtRef = useRef<number | null>(null)
   const lastPartialAtRef = useRef<number | null>(null)
   const transcriptVersionRef = useRef(0)
+  const voiceCaptureRef = useRef(createVoiceCapture())
+  const pendingRecordingRef = useRef<PendingVoiceRecording | null>(null)
 
   const syncMicrophoneReadiness = useCallback((readiness: MicrophoneReadiness) => {
     dispatch({ type: 'SYNC_MICROPHONE_READINESS', readiness })
@@ -351,6 +359,8 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
     recordingStartLockRef.current.invalidate()
     sttRef.current.close()
     sttTokenManagerRef.current.reset()
+    voiceCaptureRef.current.discard()
+    pendingRecordingRef.current = null
     releaseMicrophoneStream()
   }, [])
 
@@ -389,6 +399,8 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
     deps.releaseAiPlayback?.()
     const operationId = deps.operation.begin()
     const recordingStartedAt = Date.now()
+    voiceCaptureRef.current.discard()
+    pendingRecordingRef.current = null
 
     dispatch({ type: 'START_RECORDING', startedAt: recordingStartedAt })
 
@@ -431,6 +443,11 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
             () => requestElevenLabsToken('realtime_scribe', controller.signal),
           ),
         isCancelled: () => controller.signal.aborted || !deps.operation.isCurrent(operationId),
+        onMicrophoneStream: (stream) => {
+          if (!deps.operation.isCurrent(operationId) || !deps.saveRecordingsEnabled) return
+          const status = voiceCaptureRef.current.start(stream, { sessionId: deps.sessionId, turn: deps.turn, kind: 'round' })
+          if (status === 'unavailable') deps.onRecordingNotice?.('当前浏览器无法保存录音，练习仍可继续。')
+        },
         connectStt: (token) =>
           sttRef.current.start(token, deps.sttModel, {
             onPipelineReady: () => {
@@ -541,6 +558,7 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
     deps.abortSpeechAssist?.('recording_stopped')
     dispatch({ type: 'FINALIZE_START' })
     deps.transitionTo('finalizing_transcript')
+    const pendingRecording = await voiceCaptureRef.current.stop()
 
     deps.touchRound((round) => {
       round.timing.recordingStoppedAt = stoppedAt
@@ -559,7 +577,10 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
         round.timing.transcriptFinalizedAt = finalizedAt
       })
       deps.transitionTo('confirming_transcript')
+      pendingRecordingRef.current = pendingRecording
     } catch (error) {
+      voiceCaptureRef.current.discard()
+      pendingRecordingRef.current = null
       if (!deps.operation.isCurrent(operationId)) return
       deps.touchRound((round) => {
         round.failureCount += 1
@@ -573,6 +594,8 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
     const now = Date.now()
     deps.operation.begin()
     deps.abortSpeechAssist?.('text_input')
+    voiceCaptureRef.current.discard()
+    pendingRecordingRef.current = null
     dispatch({ type: 'ENTER_TEXT_INPUT' })
 
     deps.touchRound((round) => {
@@ -586,6 +609,8 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
   }, [deps])
 
   const rerecord = useCallback(async () => {
+    voiceCaptureRef.current.discard()
+    pendingRecordingRef.current = null
     deps.touchRound((round) => {
       round.rerecordCount += 1
       round.retryCount += 1
@@ -594,6 +619,13 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
     deps.transitionTo('waiting_user')
     await startRecording()
   }, [deps, startRecording])
+
+  const confirmRecording = useCallback(() => {
+    const pending = pendingRecordingRef.current
+    pendingRecordingRef.current = null
+    if (!pending || !deps.saveRecordingsEnabled) return
+    void saveVoiceRecording(pending).catch(() => deps.onRecordingNotice?.('录音未能保存到此设备，练习已继续。'))
+  }, [deps])
 
   // 录音计时周期更新
   useEffect(() => {
@@ -628,6 +660,7 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
       resetVoiceTurn,
       dispose,
       prefetchSttToken,
+      confirmRecording,
     },
     meta: {
       get lastSoundAt() {

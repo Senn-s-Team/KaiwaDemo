@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 首页场景草稿 view model、中文语音识别/可取消润色动作与结构化本机练习历史
- * [OUTPUT]: 渲染首页场景准备、澄清、实时中文语音输入、可撤回润色与示例入口
+ * [INPUT]: 首页场景草稿 view model、中文语音识别/可取消润色动作、录音保存选择与结构化本机练习历史
+ * [OUTPUT]: 渲染首页场景准备、澄清、实时中文语音输入、可撤回润色、录音保存选择与示例入口
  * [POS]: src/components 的首页纯视图；不拥有任务持久化或场景会话编排
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -13,6 +13,7 @@ import { coordinateRecordingSetup } from '../lib/recording-setup'
 import type { ScenarioDraftRecoveryState } from '../lib/scenario-draft-task'
 import { buildSparkPrompt, drawPracticeExamples } from '../lib/spark-practice'
 import { RealtimeSttSession } from '../lib/stt'
+import { getVoiceRecording, hasVoiceRecording, type VoiceRecordingKey } from '../lib/voice-recordings'
 import type { DynamicScenarioData, PreviousAdvice, UiError } from '../types'
 import type { StoredPracticeAttempt } from '../lib/practice-history'
 
@@ -23,6 +24,9 @@ interface HomeProps {
   error: UiError | null
   sttAvailable: boolean
   sttModel: string
+  saveRecordingsEnabled: boolean
+  onSaveRecordingsChange: (enabled: boolean) => void
+  recordingNotice: string
   customInputZh: string
   setCustomInputZh: React.Dispatch<React.SetStateAction<string>>
   clarifications: Array<{ questionZh: string; answerZh: string }>
@@ -46,7 +50,7 @@ interface HomeProps {
 }
 
 export function Home({
-  loading, ready, online, error, sttAvailable, sttModel, customInputZh, setCustomInputZh,
+  loading, ready, online, error, sttAvailable, sttModel, saveRecordingsEnabled, onSaveRecordingsChange, recordingNotice, customInputZh, setCustomInputZh,
   clarifications, pendingClarification, readyScenarioData, isDraftingScenario,
   onDraftScenario, onAnswerClarification, onStartDynamic, onPreviousAdviceViewed, onResetCustom, recentPractices, practiceHistory, historyNotice, historySaving, onPreparePractice, onRemovePractice, draftState, onRetryDraftTransport, onInputEdited,
 }: HomeProps): React.JSX.Element {
@@ -66,6 +70,29 @@ export function Home({
   const homePolishOriginalRef = useRef('')
   const [homePolishAvailable, setHomePolishAvailable] = useState(false)
   const [showPreviousAdvice, setShowPreviousAdvice] = useState(false)
+  const [availableHistoryRecordingIds, setAvailableHistoryRecordingIds] = useState<Set<string>>(new Set())
+  const historyAudioRef = useRef<HTMLAudioElement | null>(null)
+  const historyAudioUrlRef = useRef<string | null>(null)
+  const recordingKey = (key: VoiceRecordingKey) => `${key.sessionId}:${key.turn}:${key.kind}`
+  const stopHistoryRecording = useCallback(() => {
+    historyAudioRef.current?.pause()
+    historyAudioRef.current = null
+    if (historyAudioUrlRef.current) URL.revokeObjectURL(historyAudioUrlRef.current)
+    historyAudioUrlRef.current = null
+  }, [])
+  const playHistoryRecording = useCallback(async (key: VoiceRecordingKey) => {
+    stopHistoryRecording()
+    try {
+      const recording = await getVoiceRecording(key)
+      if (!recording) return
+      const url = URL.createObjectURL(recording.blob)
+      const audio = new Audio(url)
+      historyAudioRef.current = audio
+      historyAudioUrlRef.current = url
+      audio.onended = stopHistoryRecording
+      await audio.play()
+    } catch { setHomeSttError('本机录音暂时无法播放。') }
+  }, [stopHistoryRecording])
   useEffect(() => { setShowPreviousAdvice(false) }, [readyScenarioData?.scenarioToken, readyScenarioData?.previousAdvice?.sourceSessionId])
   const busy = loading || isDraftingScenario
   const unavailable = busy || !ready || !online
@@ -99,6 +126,15 @@ export function Home({
   const homeSttTextRef = useRef('')
 
   useEffect(() => cancelHomeStt, [cancelHomeStt])
+  useEffect(() => stopHistoryRecording, [stopHistoryRecording])
+  useEffect(() => {
+    let active = true
+    const keys = practiceHistory.flatMap((attempt) => attempt.report.rounds.map((round) => ({ sessionId: attempt.report.sessionId, turn: round.turn, kind: 'round' as const })))
+    void Promise.all(keys.map(async (key) => (await hasVoiceRecording(key)) ? recordingKey(key) : null)).then((ids) => {
+      if (active) setAvailableHistoryRecordingIds(new Set(ids.filter((id): id is string => id !== null)))
+    }).catch(() => undefined)
+    return () => { active = false }
+  }, [practiceHistory])
 
   useEffect(() => {
     const stopForPageExit = () => cancelHomeStt()
@@ -290,6 +326,8 @@ export function Home({
                 {!pendingClarification && <button className="primary-button" type="submit" disabled={!customInputZh.trim() || unavailable || homeSttState !== 'idle'}>{isDraftingScenario ? '正在准备…' : '准备练习'} <ArrowRight size={18} aria-hidden="true" /></button>}
               </div>
             </div>
+            <label className="topic-help"><input type="checkbox" checked={saveRecordingsEnabled} onChange={(event) => onSaveRecordingsChange(event.target.checked)} /> 在此设备保存我的录音</label>
+            {recordingNotice && <p className="topic-stt-status" role="status">{recordingNotice}</p>}
             {draftState.status === 'submitting' || draftState.status === 'pending' ? (
               <p className="topic-stt-status" role="status">{draftState.storageNotice || '正在准备，可以暂时离开；回来后会继续显示结果。'}</p>
             ) : null}
@@ -314,7 +352,7 @@ export function Home({
           </form>
           <p id="topic-help" className="topic-help">中文描述即可，只写“美容院”也可以。</p>
           <section className="practice-history" aria-label="本机练习历史">
-            {recentPractices.length > 0 && <><h2>最近练过</h2><ul className="practice-history-list">{recentPractices.map((attempt) => <li key={attempt.scenarioKey}><button className="practice-history-open" type="button" disabled={isDraftingScenario || !online || loading} onClick={() => onPreparePractice(attempt)}><strong>{attempt.scenario.titleZh}</strong><span>{new Date(attempt.report.startedAt).toLocaleDateString('zh-CN')} · {practiceHistory.filter((item) => item.scenarioKey === attempt.scenarioKey).length} 次练习</span></button><button className="text-button" type="button" disabled={isDraftingScenario || historySaving} onClick={() => onRemovePractice(attempt)} aria-label={`删除${attempt.scenario.titleZh}的练习记录`}>删除</button></li>)}</ul></>}
+            {recentPractices.length > 0 && <><h2>最近练过</h2><ul className="practice-history-list">{recentPractices.map((attempt) => { const recording = attempt.report.rounds.find((round) => availableHistoryRecordingIds.has(recordingKey({ sessionId: attempt.report.sessionId, turn: round.turn, kind: 'round' }))); return <li key={attempt.scenarioKey}><button className="practice-history-open" type="button" disabled={isDraftingScenario || !online || loading} onClick={() => onPreparePractice(attempt)}><strong>{attempt.scenario.titleZh}</strong><span>{new Date(attempt.report.startedAt).toLocaleDateString('zh-CN')} · {practiceHistory.filter((item) => item.scenarioKey === attempt.scenarioKey).length} 次练习</span></button>{recording && <button className="text-button" type="button" onClick={() => void playHistoryRecording({ sessionId: attempt.report.sessionId, turn: recording.turn, kind: 'round' })}>播放录音</button>}<button className="text-button" type="button" onClick={stopHistoryRecording}>停止</button><button className="text-button" type="button" disabled={isDraftingScenario || historySaving} onClick={() => onRemovePractice(attempt)} aria-label={`删除${attempt.scenario.titleZh}的练习记录`}>删除</button></li>})}</ul></>}
             {recentPractices.length > 0 && <p className="practice-storage-note">练习记录仅保存在当前浏览器，清理浏览器数据会删除记录。</p>}
             {historyNotice && <p role="status" className="practice-storage-note">{historyNotice}</p>}
           </section>

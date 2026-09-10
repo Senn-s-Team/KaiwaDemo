@@ -1,15 +1,17 @@
 /**
- * [INPUT]: 完成页 view model、反馈恢复状态与完成页用户动作
- * [OUTPUT]: 对外提供完成页证据反馈、重做练习、表现比较与历史状态纯视图；独立拥有重做媒体生命周期
- * [POS]: src/components 的完成页，接收 recovery 驱动的任务状态和动作，并负责重做 STT/token 的代际隔离与资源释放
+ * [INPUT]: 完成页 view model、反馈恢复状态、可选本机录音与完成页用户动作
+ * [OUTPUT]: 对外提供完成页证据反馈、重做练习、表现比较、确认后本机 redo 录音与懒播放控件；独立拥有重做媒体生命周期
+ * [POS]: src/components 的完成页，接收 recovery 驱动的任务状态和动作，并负责重做 STT/token、可选压缩录音的代际隔离与资源释放
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { Mic, Volume2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { requestElevenLabsToken, requestListeningScaffold } from '../lib/api'
+import { coordinateRecordingSetup } from '../lib/recording-setup'
 import { cleanTranscript } from '../lib/text-cleaner'
 import { RealtimeSttSession } from '../lib/stt'
 import { comparePracticeAttempts } from '../lib/practice-progress'
+import { createVoiceCapture, getVoiceRecording, hasVoiceRecording, saveVoiceRecording, type PendingVoiceRecording, type VoiceRecordingKey } from '../lib/voice-recordings'
 import type { ListeningScaffoldResponse } from '../../shared/listening-scaffold'
 import type { StoredFeedbackTask } from '../lib/feedback-task-recovery'
 import type { ConversationFeedbackResponse, ConversationMessage, FeedbackLoadingState, ListeningScaffoldLevel, PrototypeConfig, RedoFeedbackRequest, RoundRecord, SessionReport, SessionScenario } from '../types'
@@ -51,6 +53,7 @@ interface SessionCompleteProps {
   onRepeatScenario?: () => void
   historyNotice: string
   onRetrySave?: () => void
+  saveRecordingsEnabled?: boolean
 }
 
 export function SessionComplete({
@@ -78,6 +81,7 @@ export function SessionComplete({
   onRepeatScenario,
   historyNotice,
   onRetrySave,
+  saveRecordingsEnabled = false,
 }: SessionCompleteProps): React.JSX.Element {
   const [redoState, setRedoState] = useState<'idle' | 'ready' | 'recording' | 'confirming' | 'loading' | 'complete'>('idle')
   const [redoTranscript, setRedoTranscript] = useState('')
@@ -96,12 +100,40 @@ export function SessionComplete({
   const redoMountedRef = useRef(true)
   const redoStartLockRef = useRef(false)
   const redoSubmitLockRef = useRef(false)
+  const redoCaptureRef = useRef(createVoiceCapture())
+  const pendingRedoRecordingRef = useRef<PendingVoiceRecording | null>(null)
+  const [availableRecordingIds, setAvailableRecordingIds] = useState<Set<string>>(new Set())
+  const playbackRef = useRef<HTMLAudioElement | null>(null)
+  const playbackUrlRef = useRef<string | null>(null)
+  const recordingKey = (key: VoiceRecordingKey) => `${key.sessionId}:${key.turn}:${key.kind}`
+
+  const stopLocalPlayback = () => {
+    playbackRef.current?.pause()
+    playbackRef.current = null
+    if (playbackUrlRef.current) URL.revokeObjectURL(playbackUrlRef.current)
+    playbackUrlRef.current = null
+  }
+  const playLocalRecording = async (key: VoiceRecordingKey) => {
+    stopLocalPlayback()
+    try {
+      const stored = await getVoiceRecording(key)
+      if (!stored) return
+      const url = URL.createObjectURL(stored.blob)
+      const audio = new Audio(url)
+      playbackUrlRef.current = url
+      playbackRef.current = audio
+      audio.onended = stopLocalPlayback
+      await audio.play()
+    } catch { setRedoError('本机录音暂时无法播放。') }
+  }
 
   const cancelRedo = (updateState = true) => {
     redoGenerationRef.current += 1
     redoTokenAbortRef.current?.abort()
     redoTokenAbortRef.current = null
     redoSttRef.current?.close()
+    redoCaptureRef.current.discard()
+    pendingRedoRecordingRef.current = null
     redoSttRef.current = null
     redoStartLockRef.current = false
     const activeRedo = ['ready', 'recording', 'confirming'].includes(redoState)
@@ -141,7 +173,17 @@ export function SessionComplete({
   useEffect(() => () => {
     redoMountedRef.current = false
     cancelRedo(false)
+    stopLocalPlayback()
   }, [])
+  useEffect(() => {
+    let active = true
+    const keys: VoiceRecordingKey[] = rounds.map((round) => ({ sessionId, turn: round.turn, kind: 'round' }))
+    if (feedbackData) keys.push({ sessionId, turn: feedbackData.redoTask.turn, kind: 'redo' })
+    void Promise.all(keys.map(async (key) => (await hasVoiceRecording(key)) ? recordingKey(key) : null)).then((ids) => {
+      if (active) setAvailableRecordingIds(new Set(ids.filter((id): id is string => id !== null)))
+    }).catch(() => undefined)
+    return () => { active = false }
+  }, [feedbackData, rounds, sessionId])
   const redoAssistantMessage = feedbackData
     ? messages.find((message) => message.role === 'assistant' && message.turn === feedbackData.redoTask.turn)
     : undefined
@@ -163,6 +205,8 @@ export function SessionComplete({
     redoSubmitLockRef.current = false
     onStopAudio()
     redoSttRef.current?.close()
+    redoCaptureRef.current.discard()
+    pendingRedoRecordingRef.current = null
     redoSttRef.current = null
     setRedoState('ready')
     setRedoInputMode('stt')
@@ -230,6 +274,8 @@ export function SessionComplete({
     }
     redoStartLockRef.current = true
     const generation = ++redoGenerationRef.current
+    redoCaptureRef.current.discard()
+    pendingRedoRecordingRef.current = null
     const expectedSessionToken = scenario.sessionToken
     const expectedSessionId = sessionId
     const expectedTurn = feedbackData.redoTask.turn
@@ -244,23 +290,35 @@ export function SessionComplete({
       return
     }
     try {
-      const token = await requestElevenLabsToken('realtime_scribe', tokenAbort.signal)
-      if (!redoMountedRef.current || generation !== redoGenerationRef.current || !feedbackData || sessionId !== expectedSessionId || scenario.sessionToken !== expectedSessionToken || feedbackData.redoTask.turn !== expectedTurn) return
-      const session = new RealtimeSttSession()
-      redoSttRef.current = session
       setRedoTranscript('')
       setRedoState('recording')
-      await session.start(token, config.elevenlabs.sttModel, {
-        onPartial: (text) => {
-          if (redoMountedRef.current && generation === redoGenerationRef.current) setRedoTranscript(text)
+      await coordinateRecordingSetup({
+        acquireToken: () => requestElevenLabsToken('realtime_scribe', tokenAbort.signal),
+        isCancelled: () => !redoMountedRef.current || generation !== redoGenerationRef.current || !feedbackData || sessionId !== expectedSessionId || scenario.sessionToken !== expectedSessionToken || feedbackData.redoTask.turn !== expectedTurn,
+        onMicrophoneStream: (stream) => {
+          if (generation !== redoGenerationRef.current || !saveRecordingsEnabled) return
+          if (redoCaptureRef.current.start(stream, { sessionId: expectedSessionId, turn: expectedTurn, kind: 'redo' }) === 'unavailable') {
+            setRedoError('当前浏览器无法保存录音，练习仍可继续。')
+          }
         },
-        onConnectionState: () => {},
-        onAudioLevel: () => {},
+        connectStt: (token) => {
+          const session = new RealtimeSttSession()
+          redoSttRef.current = session
+          return session.start(token, config.elevenlabs.sttModel, {
+          onPartial: (text) => {
+            if (redoMountedRef.current && generation === redoGenerationRef.current) setRedoTranscript(text)
+          },
+          onConnectionState: () => {},
+          onAudioLevel: () => {},
+          })
+        },
       })
     } catch (error) {
       if (!redoMountedRef.current || generation !== redoGenerationRef.current) return
       redoSttRef.current?.close()
       redoSttRef.current = null
+      redoCaptureRef.current.discard()
+      pendingRedoRecordingRef.current = null
       setRedoInputMode('text')
       setRedoState('confirming')
       setRedoError(error instanceof Error ? error.message : '麦克风不可用，已切换为文字输入。')
@@ -275,8 +333,12 @@ export function SessionComplete({
     if (!session) return
     const generation = redoGenerationRef.current
     try {
+      const pending = await redoCaptureRef.current.stop()
       const rawText = await session.stop()
-      if (redoMountedRef.current && generation === redoGenerationRef.current) setRedoTranscript(cleanTranscript(rawText).cleanedText)
+      if (redoMountedRef.current && generation === redoGenerationRef.current) {
+        setRedoTranscript(cleanTranscript(rawText).cleanedText)
+        pendingRedoRecordingRef.current = pending
+      }
     } finally {
       session.close()
       if (redoSttRef.current === session) redoSttRef.current = null
@@ -292,6 +354,11 @@ export function SessionComplete({
     redoSubmitLockRef.current = true
     setRedoState('loading')
     setRedoError('')
+    const pending = pendingRedoRecordingRef.current
+    pendingRedoRecordingRef.current = null
+    if (pending && saveRecordingsEnabled) {
+      void saveVoiceRecording(pending).then(() => setAvailableRecordingIds((ids) => new Set(ids).add(recordingKey(pending)))).catch(() => setRedoError('录音未能保存到此设备，比较仍会继续。'))
+    }
     onRequestRedo({
       scenarioType: 'dynamic', sessionToken: scenario.sessionToken, turn: feedbackData.redoTask.turn,
       partnerPromptJa: feedbackData.redoTask.partnerPromptJa, firstConfirmedJa: feedbackData.redoTask.firstConfirmedJa,
@@ -328,6 +395,7 @@ export function SessionComplete({
       <h1 id="conversation-heading">{reveal.titleZh}</h1>
       <p className="reveal-summary">{reveal.summaryZh}</p>
       {audioNotice && <p className="network-notice" role="status">{audioNotice}</p>}
+      {rounds.some((round) => availableRecordingIds.has(recordingKey({ sessionId, turn: round.turn, kind: 'round' }))) && <div className="retry-actions"><span>我的录音</span>{rounds.filter((round) => availableRecordingIds.has(recordingKey({ sessionId, turn: round.turn, kind: 'round' }))).map((round) => <button key={round.turn} className="text-button" type="button" onClick={() => void playLocalRecording({ sessionId, turn: round.turn, kind: 'round' })}>播放第 {round.turn} 轮</button>)}<button className="text-button" type="button" onClick={stopLocalPlayback}>停止</button></div>}
       {feedbackStatus === 'loading' && <div className="feedback-loading-card"><span className="pulse-dot" /><p>正在整理本场反馈...</p></div>}
       {feedbackStatus === 'error' && <div className="feedback-error-card" role="alert"><p>{feedbackErrorMsg}</p><button className="primary-button" type="button" onClick={onRetryFeedback}>重新生成</button></div>}
       {feedbackStatus === 'success' && feedbackData && (
@@ -350,6 +418,7 @@ export function SessionComplete({
           <section className="feedback-section retry-task-card">
             <h2>把这一句再说顺一点</h2>
             <p lang="ja"><strong>这次回答：</strong>{feedbackData.redoTask.firstConfirmedJa}</p>
+            {availableRecordingIds.has(recordingKey({ sessionId, turn: feedbackData.redoTask.turn, kind: 'redo' })) && <div className="retry-actions"><button className="text-button" type="button" onClick={() => void playLocalRecording({ sessionId, turn: feedbackData.redoTask.turn, kind: 'redo' })}>播放重做录音</button><button className="text-button" type="button" onClick={stopLocalPlayback}>停止</button></div>}
             {redoState === 'idle' && <div className="retry-actions"><button className="primary-button" type="button" onClick={startRedo}><Volume2 size={16} /> 再练这个回合</button></div>}
             {redoState === 'ready' && <div className="retry-actions"><button className="primary-button" type="button" onClick={() => void startRedoRecording()}><Mic size={16} /> 开始回答</button><button className="text-button" type="button" onClick={() => { setRedoInputMode('text'); setRedoState('confirming') }}>改用文字</button></div>}
             {(redoState === 'ready' || redoState === 'recording' || redoState === 'confirming') && (

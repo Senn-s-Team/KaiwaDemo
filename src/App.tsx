@@ -1,7 +1,7 @@
 /**
- * [INPUT]: 依赖首页/会话/复盘控制器、既有本机练习历史与独立技术验证遥测出站控制器
- * [OUTPUT]: 对外提供 App 根组件，驱动训练流程并在稳定生命周期 seam 派生匿名技术验证 checkpoint/汇总
- * [POS]: src/ 核心入口；训练状态始终独立于遥测存储与传输失败
+ * [INPUT]: 依赖首页/会话/复盘控制器、既有本机练习历史、可选本机录音与独立技术验证遥测出站控制器
+ * [OUTPUT]: 对外提供 App 根组件，驱动训练流程、确认后本机录音保存并在稳定生命周期 seam 派生匿名技术验证 checkpoint/汇总
+ * [POS]: src/ 核心入口；训练状态始终独立于录音存储、遥测存储与传输失败
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type SetStateAction } from 'react'
@@ -30,6 +30,7 @@ import { useHomePractice } from './lib/use-home-practice'
 import { useSessionSnapshotPersistence } from './lib/use-session-snapshot-persistence'
 import { useSessionLifecycle } from './lib/use-session-lifecycle'
 import { useValidationLifecycle } from './lib/use-validation-lifecycle'
+import { readVoiceRecordingEnabled, writeVoiceRecordingEnabled } from './lib/voice-recordings'
 import type { ValidationTelemetrySession } from './lib/use-validation-telemetry'
 import { clearSessionSnapshot, readSessionSnapshot, removeLastSubmittedUserMessage, type SessionSnapshot } from './lib/session-snapshot'
 import type {
@@ -62,6 +63,8 @@ function App() {
   const [lastFailedStep, setLastFailedStep] = useState<'config' | 'scenario' | 'token' | 'stt' | 'llm' | 'tts' | null>(null)
   const [telemetrySession, setTelemetrySession] = useState<ValidationTelemetrySession | null>(null)
   const [pendingHistory, setPendingHistory] = useState<ConversationMessage[]>([])
+  const [saveRecordingsEnabled, setSaveRecordingsEnabled] = useState(readVoiceRecordingEnabled)
+  const [recordingNotice, setRecordingNotice] = useState('')
   const requestAbortRef = useRef<AbortController | null>(null)
   const resetSessionRef = useRef<() => void>(() => undefined)
   const [hintData, setHintData] = useState<HintResponse | null>(null)
@@ -164,6 +167,10 @@ function App() {
     touchRound,
     abortSpeechAssist: (reason) => abortSpeechAssistRef.current(reason),
     releaseAiPlayback: () => releaseAiPlaybackRef.current(),
+    saveRecordingsEnabled,
+    sessionId,
+    turn,
+    onRecordingNotice: setRecordingNotice,
   })
   const {
     confirmedTranscript,
@@ -194,6 +201,7 @@ function App() {
     resetVoiceTurn,
     dispose: disposeVoiceTurn,
     prefetchSttToken,
+    confirmRecording,
   } = voiceTurn.actions
   const speechAssist = useSpeechAssistController({
     phase, scenario, turn, confirmedTranscript, interimTranscript, partialTranscript, recordingUiStartedAt,
@@ -541,6 +549,7 @@ function App() {
       round.transcriptModificationCount = round.transcriptModified ? 1 : 0
       round.timing.transcriptConfirmedAt = confirmedAt
     })
+    confirmRecording()
     const userMessage: ConversationMessage = {
       id: createMessageId(turn, 'user'),
       turn,
@@ -558,7 +567,7 @@ function App() {
     restoredTranscriptRef.current = null
     await generateNextReply(history, false)
     submitLockRef.current = false
-  }, [generateNextReply, replaceMessages, touchRound, transcript, turn])
+  }, [confirmRecording, generateNextReply, replaceMessages, touchRound, transcript, turn])
   const activeError = uiError ?? voiceError ?? aiError
   const activeFailedStep = lastFailedStep ?? voiceTurn.state.lastFailedStep ?? aiTurn.state.lastFailedStep
   const validationLifecycle = useValidationLifecycle({
@@ -714,6 +723,12 @@ function App() {
               error={uiError}
               sttAvailable={Boolean(config?.elevenlabs.sttAvailable)}
               sttModel={config?.elevenlabs.sttModel ?? ''}
+              saveRecordingsEnabled={saveRecordingsEnabled}
+              onSaveRecordingsChange={(enabled) => {
+                setSaveRecordingsEnabled(enabled)
+                if (!writeVoiceRecordingEnabled(enabled)) setRecordingNotice('无法记住录音保存设置，本次选择仍有效。')
+              }}
+              recordingNotice={recordingNotice}
               customInputZh={customInputZh}
               setCustomInputZh={setCustomInputZh}
               clarifications={clarifications}
@@ -764,6 +779,7 @@ function App() {
               onRepeatScenario={currentPractice ? () => void preparePracticeAgain(currentPractice) : undefined}
               historyNotice={historySaving ? '正在保存本次练习…' : historyNotice}
               onRetrySave={historySaveFailed && currentPractice ? () => void persistPractice(currentPractice) : undefined}
+              saveRecordingsEnabled={saveRecordingsEnabled}
             />
           </section>
         )}

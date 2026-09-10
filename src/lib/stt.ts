@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 @elevenlabs/client 的 Scribe 实时连接、./audio-engine 的麦克风音频采集流水线与缓冲环
- * [OUTPUT]: 对外提供 RealtimeSttSession（可选识别语言）、SttTokenManager 类（含 single-flight 与代际隔离）、SttHandlers 接口（含 onPipelineReady 就绪回调）、selectFinalSttText 与转写规约纯函数
+ * [OUTPUT]: 对外提供 RealtimeSttSession（可选识别语言及共享流取得回调）、SttTokenManager 类（含 single-flight 与代际隔离）、SttHandlers 接口（含 onPipelineReady 就绪回调）、selectFinalSttText 与转写规约纯函数
  * [POS]: src/lib 的语音识别核心模块，负责低延迟音频缓冲、实时转写 WebSocket 流处理与取消后的共享麦克风释放，并在最终提交连接关闭或超时时保全已观察到的有效转写
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -26,6 +26,7 @@ export interface SttHandlers {
   onConnectionState: (state: 'connecting' | 'connected' | 'closed') => void
   onAudioLevel: (level: number) => void
   onPipelineReady?: () => void
+  onMicrophoneStream?: (stream: MediaStream) => void
 }
 
 export interface SttTranscriptState {
@@ -157,6 +158,7 @@ export class RealtimeSttSession {
     try {
       await unlockAudio()
       stream = await requestMicrophoneStream()
+      handlers.onMicrophoneStream?.(stream)
     } catch (error) {
       this.state = 'closed'
       throw this.mapStartError(error)

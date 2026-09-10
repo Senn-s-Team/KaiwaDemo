@@ -1,12 +1,13 @@
 /**
  * [INPUT]: 首页会话活跃条件、在线状态、重置回调与 UI 错误写回
- * [OUTPUT]: 首页草稿恢复、场景准备、本机练习历史、复练、删除和串行持久化动作
+ * [OUTPUT]: 首页草稿恢复、场景准备、本机练习历史与关联本机录音、复练、删除和串行持久化动作
  * [POS]: src/lib 的首页练习编排；复用 scenario draft recovery 作为唯一草稿轮询所有者
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
 import { restartPractice } from './api'
 import { deletePracticeScenario, listPracticeAttempts, savePracticeAttempt, type PracticeAttempt, type StoredPracticeAttempt } from './practice-history'
+import { deleteVoiceRecordingsForSessions } from './voice-recordings'
 import { clearPreparedRestart, readPreparedRestart, writePreparedRestart, type PreparedRestartData } from './home-practice-recovery'
 import { useScenarioDraftRecovery } from './scenario-draft-task'
 import { toUiError } from './ui'
@@ -38,6 +39,6 @@ export function useHomePractice({ online, activeSession, resetSession, setUiErro
   const preparePracticeAgain = useCallback(async (attempt: PracticeAttempt) => { if (!online || isDraftingScenario) return; resetSession(); clearPreparedRestart(); setCustomInputZh(attempt.scenario.userGoal); restartAbort.current?.abort(); const controller = new AbortController(); restartAbort.current = controller; setIsRestartingPractice(true); try { const ready = await restartPractice(attempt.practiceToken, AbortSignal.any([controller.signal, AbortSignal.timeout(25_000)])); const improvement = attempt.feedback?.expressionImprovement; const previousAdvice = improvement ? { expressionImprovement: improvement, sourceSessionId: attempt.report.sessionId, sourceStartedAt: attempt.report.startedAt, viewed: false } : undefined; if (!controller.signal.aborted) { const prepared = { ...ready, previousAdvice }; setReadyScenarioData(prepared); writePreparedRestart(prepared) } } catch (error) { if (!controller.signal.aborted) { setUiError(toUiError(error)); setHistoryNotice('原场景暂时无法载入，可从最近练过中重试。') } } finally { if (restartAbort.current === controller) setIsRestartingPractice(false) } }, [isDraftingScenario, online, resetSession, setUiError])
   const markReadyAdviceViewed = useCallback(() => setReadyScenarioData((ready) => { if (!ready?.previousAdvice || ready.previousAdvice.viewed) return ready; const updated = { ...ready, previousAdvice: { ...ready.previousAdvice, viewed: true } }; writePreparedRestart(updated); return updated }), [])
   const consumeReadyScenario = useCallback(() => { const consumed = readyScenarioData; clearPreparedRestart(); setReadyScenarioData(null); return consumed }, [readyScenarioData])
-  const removePractice = useCallback(async (attempt: StoredPracticeAttempt) => { if (!window.confirm(`删除“${attempt.scenario.titleZh}”及其全部本机练习记录？`)) return; await historyWrite.current; try { const deleted = practiceHistory.filter((item) => item.scenarioKey === attempt.scenarioKey).map((item) => item.report.sessionId); await deletePracticeScenario(attempt.scenarioKey); deleted.forEach((id) => deletedSessions.current.add(id)); setPracticeHistory(await listPracticeAttempts()); setHistoryNotice('已删除该场景的本机练习记录。') } catch { setHistoryNotice('删除失败，练习记录仍保留，请重试。') } }, [practiceHistory])
+  const removePractice = useCallback(async (attempt: StoredPracticeAttempt) => { if (!window.confirm(`删除“${attempt.scenario.titleZh}”及其全部本机练习记录？`)) return; await historyWrite.current; try { const deleted = practiceHistory.filter((item) => item.scenarioKey === attempt.scenarioKey).map((item) => item.report.sessionId); await deleteVoiceRecordingsForSessions(deleted); await deletePracticeScenario(attempt.scenarioKey); deleted.forEach((id) => deletedSessions.current.add(id)); setPracticeHistory(await listPracticeAttempts()); setHistoryNotice('已删除该场景的本机练习记录。') } catch { setHistoryNotice('删除失败，练习记录仍保留，请重试。') } }, [practiceHistory])
   return { model: { customInputZh, clarifications, pendingClarification, readyScenarioData, isDraftingScenario, draftState: draftRecovery.state, practiceHistory, recentPractices, historyNotice, historySaving, historySaveFailed }, actions: { setCustomInputZh: updateCustomInputZh, submitDraft, answerClarification, resetCustom, retryDraftTransport: draftRecovery.retryTransport, discardDraft, persistPractice, preparePracticeAgain, markReadyAdviceViewed, consumeReadyScenario, removePractice } }
 }
