@@ -71,7 +71,7 @@ function openRecordings(): Promise<IDBDatabase> {
   })
 }
 
-export async function saveVoiceRecording(pending: PendingVoiceRecording): Promise<void> {
+async function saveVoiceRecordingNow(pending: PendingVoiceRecording): Promise<void> {
   const database = await openRecordings()
   return new Promise((resolve, reject) => {
     const transaction = database.transaction(storeName, 'readwrite')
@@ -92,6 +92,18 @@ export async function saveVoiceRecording(pending: PendingVoiceRecording): Promis
       }
     }
   })
+}
+
+let recordingWriteQueue: Promise<void> = Promise.resolve()
+
+function enqueueRecordingWrite(operation: () => Promise<void>): Promise<void> {
+  const queued = recordingWriteQueue.then(operation, operation)
+  recordingWriteQueue = queued.catch(() => undefined)
+  return queued
+}
+
+export function saveVoiceRecording(pending: PendingVoiceRecording): Promise<void> {
+  return enqueueRecordingWrite(() => saveVoiceRecordingNow(pending))
 }
 
 export async function getVoiceRecording(key: VoiceRecordingKey): Promise<StoredVoiceRecording | null> {
@@ -118,8 +130,7 @@ export async function hasVoiceRecording(key: VoiceRecordingKey): Promise<boolean
   })
 }
 
-export async function deleteVoiceRecordingsForSessions(sessionIds: readonly string[]): Promise<void> {
-  if (sessionIds.length === 0) return
+async function deleteVoiceRecordingsForSessionsNow(sessionIds: readonly string[]): Promise<void> {
   const targets = new Set(sessionIds)
   const database = await openRecordings()
   return new Promise((resolve, reject) => {
@@ -132,6 +143,11 @@ export async function deleteVoiceRecordingsForSessions(sessionIds: readonly stri
     transaction.oncomplete = () => { database.close(); resolve() }
     transaction.onabort = () => { database.close(); reject(transaction.error ?? new Error('本机录音删除失败')) }
   })
+}
+
+export function deleteVoiceRecordingsForSessions(sessionIds: readonly string[]): Promise<void> {
+  if (sessionIds.length === 0) return Promise.resolve()
+  return enqueueRecordingWrite(() => deleteVoiceRecordingsForSessionsNow(sessionIds))
 }
 
 export interface VoiceCapture {

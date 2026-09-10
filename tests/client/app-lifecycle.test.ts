@@ -687,6 +687,7 @@ describe('SessionComplete redo lifecycle', () => {
     else delete (window as { localStorage?: Storage }).localStorage
     vi.doUnmock('../../src/lib/api')
     vi.doUnmock('../../src/lib/stt')
+    vi.doUnmock('../../src/lib/audio-engine')
     vi.clearAllMocks()
   })
 
@@ -805,6 +806,12 @@ describe('SessionComplete redo lifecycle', () => {
         close = vi.fn()
       },
     }))
+    const releaseMicrophoneStream = vi.fn()
+    vi.doMock('../../src/lib/audio-engine', async () => ({
+      ...(await vi.importActual<typeof AudioEngineModule>('../../src/lib/audio-engine')),
+      requestMicrophoneStream: vi.fn().mockResolvedValue({ getAudioTracks: () => [{ readyState: 'live' }] }),
+      releaseMicrophoneStream,
+    }))
     window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({
       version: 1,
       phase: 'preparing_tts',
@@ -834,10 +841,12 @@ describe('SessionComplete redo lifecycle', () => {
       return button as HTMLButtonElement
     }, { interval: 0 })
     flushSync(() => startButton.click())
+    const releaseCallsBeforeUnmount = releaseMicrophoneStream.mock.calls.length
     root.unmount()
     activeRoot = null
     container.remove()
     activeContainer = null
+    expect(releaseMicrophoneStream.mock.calls.length).toBeGreaterThan(releaseCallsBeforeUnmount)
     tokenDeferred.resolve('late-token')
     await flush()
     expect(sttStart).not.toHaveBeenCalled()
@@ -866,9 +875,11 @@ describe('SessionComplete redo lifecycle', () => {
         close = vi.fn()
       },
     }))
+    const releaseMicrophoneStream = vi.fn()
     vi.doMock('../../src/lib/audio-engine', async () => ({
       ...(await vi.importActual<typeof AudioEngineModule>('../../src/lib/audio-engine')),
       requestMicrophoneStream: vi.fn().mockResolvedValue({ getAudioTracks: () => [{ readyState: 'live' }] }),
+      releaseMicrophoneStream,
     }))
     const round = createRoundRecord(1, scenario.firstLine, 0)
     round.userFinal = '前髪は残してください。'
@@ -919,8 +930,10 @@ describe('SessionComplete redo lifecycle', () => {
     flushSync(() => startButton.click())
     await vi.waitFor(() => expect(sttStart).toHaveBeenCalledOnce(), { interval: 0 })
     expect(sttStart).toHaveBeenCalledOnce()
+    const releaseCallsBeforeUnmount = releaseMicrophoneStream.mock.calls.length
     root.unmount()
     activeRoot = null
+    expect(releaseMicrophoneStream.mock.calls.length).toBeGreaterThan(releaseCallsBeforeUnmount)
     container.remove()
     activeContainer = null
   })

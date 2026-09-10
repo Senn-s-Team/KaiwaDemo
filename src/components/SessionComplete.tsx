@@ -1,5 +1,5 @@
 /**
- * [INPUT]: 完成页 view model、反馈恢复状态、可选本机录音与完成页用户动作
+ * [INPUT]: 完成页 view model、反馈恢复状态、可选本机录音、共享麦克风流与完成页用户动作
  * [OUTPUT]: 对外提供完成页证据反馈、重做练习、表现比较、确认后本机 redo 录音与懒播放控件；独立拥有重做媒体生命周期
  * [POS]: src/components 的完成页，接收 recovery 驱动的任务状态和动作，并负责重做 STT/token、可选压缩录音的代际隔离与资源释放
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from 'react'
 import { requestElevenLabsToken, requestListeningScaffold } from '../lib/api'
 import { coordinateRecordingSetup } from '../lib/recording-setup'
 import { cleanTranscript } from '../lib/text-cleaner'
+import { releaseMicrophoneStream } from '../lib/audio-engine'
 import { RealtimeSttSession } from '../lib/stt'
 import { comparePracticeAttempts } from '../lib/practice-progress'
 import { createVoiceCapture, getVoiceRecording, hasVoiceRecording, saveVoiceRecording, type PendingVoiceRecording, type VoiceRecordingKey } from '../lib/voice-recordings'
@@ -126,13 +127,13 @@ export function SessionComplete({
       await audio.play()
     } catch { setRedoError('本机录音暂时无法播放。') }
   }
-
   const cancelRedo = (updateState = true) => {
     redoGenerationRef.current += 1
     redoTokenAbortRef.current?.abort()
     redoTokenAbortRef.current = null
     redoSttRef.current?.close()
     redoCaptureRef.current.discard()
+    releaseMicrophoneStream()
     pendingRedoRecordingRef.current = null
     redoSttRef.current = null
     redoStartLockRef.current = false
@@ -193,6 +194,7 @@ export function SessionComplete({
   const startRedo = () => {
     if (!feedbackData) return
     if (!online) {
+      releaseMicrophoneStream()
       setRedoInputMode('text')
       setRedoState('confirming')
       setRedoError('网络已断开，已切换为文字输入。')
@@ -206,6 +208,7 @@ export function SessionComplete({
     onStopAudio()
     redoSttRef.current?.close()
     redoCaptureRef.current.discard()
+    if (redoSttRef.current || ['ready', 'recording', 'confirming'].includes(redoState)) releaseMicrophoneStream()
     pendingRedoRecordingRef.current = null
     redoSttRef.current = null
     setRedoState('ready')
@@ -285,6 +288,7 @@ export function SessionComplete({
     if (!config?.elevenlabs.sttAvailable) {
       setRedoInputMode('text')
       setRedoState('confirming')
+      releaseMicrophoneStream()
       redoStartLockRef.current = false
       redoTokenAbortRef.current = null
       return
@@ -295,6 +299,7 @@ export function SessionComplete({
       await coordinateRecordingSetup({
         acquireToken: () => requestElevenLabsToken('realtime_scribe', tokenAbort.signal),
         isCancelled: () => !redoMountedRef.current || generation !== redoGenerationRef.current || !feedbackData || sessionId !== expectedSessionId || scenario.sessionToken !== expectedSessionToken || feedbackData.redoTask.turn !== expectedTurn,
+        releaseOnCancelled: false,
         onMicrophoneStream: (stream) => {
           if (generation !== redoGenerationRef.current || !saveRecordingsEnabled) return
           if (redoCaptureRef.current.start(stream, { sessionId: expectedSessionId, turn: expectedTurn, kind: 'redo' }) === 'unavailable') {
@@ -305,11 +310,11 @@ export function SessionComplete({
           const session = new RealtimeSttSession()
           redoSttRef.current = session
           return session.start(token, config.elevenlabs.sttModel, {
-          onPartial: (text) => {
-            if (redoMountedRef.current && generation === redoGenerationRef.current) setRedoTranscript(text)
-          },
-          onConnectionState: () => {},
-          onAudioLevel: () => {},
+            onPartial: (text) => {
+              if (redoMountedRef.current && generation === redoGenerationRef.current) setRedoTranscript(text)
+            },
+            onConnectionState: () => {},
+            onAudioLevel: () => {},
           })
         },
       })
@@ -318,6 +323,7 @@ export function SessionComplete({
       redoSttRef.current?.close()
       redoSttRef.current = null
       redoCaptureRef.current.discard()
+      releaseMicrophoneStream()
       pendingRedoRecordingRef.current = null
       setRedoInputMode('text')
       setRedoState('confirming')
@@ -341,6 +347,7 @@ export function SessionComplete({
       }
     } finally {
       session.close()
+      releaseMicrophoneStream()
       if (redoSttRef.current === session) redoSttRef.current = null
       if (redoMountedRef.current && generation === redoGenerationRef.current) setRedoState('confirming')
     }

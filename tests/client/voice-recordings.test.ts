@@ -42,6 +42,33 @@ function installRecordingDatabase(records = new Map<string, Record<string, unkno
   vi.stubGlobal('indexedDB', { open })
   return records
 }
+function installDelayedRecordingDatabase(): { records: Map<string, Record<string, unknown>>; releaseLatestOpen: () => void; waitForOpen: () => Promise<void> } {
+  const records = new Map<string, Record<string, unknown>>()
+  const opens: Array<{ result?: IDBDatabase; onsuccess?: () => void }> = []
+  const openWaiters: Array<() => void> = []
+  const open = () => {
+    const request: { result?: IDBDatabase; onsuccess?: () => void } = {}
+    opens.push(request)
+    for (const resolve of openWaiters.splice(0)) resolve()
+    return request
+  }
+  const store = {
+    put: (value: Record<string, unknown>) => { queueMicrotask(() => records.set(String(value.id), value)) },
+    delete: (id: string) => records.delete(id),
+    getAll: () => { const result = { result: undefined as unknown, onsuccess: undefined as (() => void) | undefined }; queueMicrotask(() => { result.result = [...records.values()]; result.onsuccess?.() }); return result },
+  }
+  const database = { close: vi.fn(), transaction: () => {
+    const transaction = { objectStore: () => store, oncomplete: undefined as (() => void) | undefined, onabort: undefined as (() => void) | undefined, onerror: undefined as (() => void) | undefined, error: null }
+    queueMicrotask(() => queueMicrotask(() => transaction.oncomplete?.()))
+    return transaction
+  } }
+  vi.stubGlobal('indexedDB', { open: () => { const request = open(); request.result = database as unknown as IDBDatabase; return request } })
+  return {
+    records,
+    releaseLatestOpen: () => opens.pop()?.onsuccess?.(),
+    waitForOpen: () => opens.length > 0 ? Promise.resolve() : new Promise(resolve => openWaiters.push(resolve)),
+  }
+}
 
 describe('本机确认录音', () => {
   it('按 opus、mp4、浏览器默认的顺序选择 MIME', () => {
@@ -79,6 +106,20 @@ describe('本机确认录音', () => {
     await saveVoiceRecording(pending)
     expect(await hasVoiceRecording(pending)).toBe(true)
     expect((await getVoiceRecording(pending))?.blob).toBe(pending.blob)
+  })
+
+  it('删除排在保存之后时不会留下迟到的录音', async () => {
+    const delayed = installDelayedRecordingDatabase()
+    const pending = { sessionId: 'deleted-session', turn: 1, kind: 'round' as const, blob: new Blob(['voice']), createdAt: 1, durationMs: 1, mimeType: 'audio/webm' }
+    const firstOpen = delayed.waitForOpen()
+    const save = saveVoiceRecording(pending)
+    const deletion = deleteVoiceRecordingsForSessions([pending.sessionId])
+    await firstOpen
+    delayed.releaseLatestOpen()
+    await delayed.waitForOpen()
+    delayed.releaseLatestOpen()
+    await Promise.all([save, deletion])
+    expect(delayed.records.has('deleted-session:1:round')).toBe(false)
   })
 
   it('写入事务失败会拒绝', async () => {
