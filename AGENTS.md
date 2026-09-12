@@ -11,6 +11,7 @@ migrations/ - D1 匿名技术验证基础表、分析索引与 summary 序列迁
 scripts/ - 构建期依赖校验与产物清洗脚本 (2成员)
 tests/ - 客户端、Worker 与组件契约测试 (3子目录: client/、worker/、components/)
 docs/ - 活文档入口：产品契约、系统边界与人工测试模板 (3成员)
+DESIGN.md - Calm Conversational Studio 视觉、组件、移动优先布局与实现边界规范
 </directory>
 
 <config>

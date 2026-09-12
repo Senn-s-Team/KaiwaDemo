@@ -148,6 +148,9 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
   const [intentionError, setIntentionError] = useState('')
   const [intentionSubmitted, setIntentionSubmitted] = useState(false)
   const [showPreviousAdvice, setShowPreviousAdvice] = useState(false)
+  const [showTopMoreMenu, setShowTopMoreMenu] = useState(false)
+  const topMoreMenuRef = useRef<HTMLDivElement | null>(null)
+  const topMoreButtonRef = useRef<HTMLButtonElement | null>(null)
   const intentionSttRef = useRef<RealtimeSttSession | null>(null)
   const intentionAbortRef = useRef<AbortController | null>(null)
   const intentionGenerationRef = useRef(0)
@@ -195,6 +198,23 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
     setIntentionSubmitted(false)
     setShowPreviousAdvice(false)
   }, [cancelIntentionRecording, turn])
+  useEffect(() => {
+    if (!showTopMoreMenu) return
+    const closeOnPointerDown = (event: PointerEvent): void => {
+      const target = event.target
+      if (!(target instanceof Node) || topMoreMenuRef.current?.contains(target) || topMoreButtonRef.current?.contains(target)) return
+      setShowTopMoreMenu(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setShowTopMoreMenu(false)
+    }
+    document.addEventListener('pointerdown', closeOnPointerDown)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [showTopMoreMenu])
   useEffect(() => { if (!showHintSheet) cancelIntentionRecording() }, [cancelIntentionRecording, showHintSheet])
   const startIntentionRecording = useCallback(async () => {
     if (!model.sttAvailable || !model.sttModel || phase === 'recording' || intentionSttRef.current) return
@@ -256,6 +276,27 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
   const startJapaneseRecording = (): void => {
     void startRecording()
   }
+  const toggleGoalsSheet = (): void => {
+    setShowGoalsSheet((show) => !show)
+  }
+  const togglePreviousAdvice = (): void => {
+    if (!showPreviousAdvice) onPreviousAdviceViewed?.()
+    setShowPreviousAdvice((shown) => !shown)
+  }
+  const endSessionEarly = (): void => {
+    endSession(true)
+  }
+  const toggleTopMoreMenu = (): void => {
+    setShowTopMoreMenu((shown) => !shown)
+  }
+  const showPreviousAdviceFromMenu = (): void => {
+    setShowTopMoreMenu(false)
+    togglePreviousAdvice()
+  }
+  const endSessionFromMenu = (): void => {
+    setShowTopMoreMenu(false)
+    endSessionEarly()
+  }
   return (
           <section className="im-chat-app" aria-label="会话">
             {/* 顶部极简 IM 导航栏 */}
@@ -272,24 +313,37 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                 </div>
               </div>
               <div className="im-top-actions">
-                {model.previousAdvice && (phase === 'waiting_user' || phase === 'round_complete') && <button className="im-icon-pill-btn" type="button" onClick={() => { if (!showPreviousAdvice) onPreviousAdviceViewed?.(); setShowPreviousAdvice((shown) => !shown) }} aria-label="查看上次建议">上次建议</button>}
+                <div className="im-top-desktop-actions">
+                  {model.previousAdvice && (phase === 'waiting_user' || phase === 'round_complete') && <button className="im-icon-pill-btn" type="button" onClick={togglePreviousAdvice} aria-label="查看上次建议">上次建议</button>}
+                  <button
+                    className={`im-icon-pill-btn ${showGoalsSheet ? 'is-active' : ''}`}
+                    type="button"
+                    onClick={toggleGoalsSheet}
+                    aria-label={sessionCoreGoal ? `查看会话目标：${sessionCoreGoal.titleZh}` : '查看会话目标'}
+                  >
+                    <Target size={15} />
+                    <span className="im-btn-text-full">目标</span>
+                  </button>
+                  <button className="im-finish-pill-btn" type="button" onClick={endSessionEarly} disabled={controlsLocked} aria-label="提前复盘并结束会话">提前复盘</button>
+                </div>
                 <button
-                  className={`im-icon-pill-btn ${showGoalsSheet ? 'is-active' : ''}`}
+                  className={`im-icon-pill-btn im-top-mobile-target-btn ${showGoalsSheet ? 'is-active' : ''}`}
                   type="button"
-                  onClick={() => setShowGoalsSheet((show) => !show)}
+                  onClick={toggleGoalsSheet}
                   aria-label={sessionCoreGoal ? `查看会话目标：${sessionCoreGoal.titleZh}` : '查看会话目标'}
                 >
                   <Target size={15} />
                   <span className="im-btn-text-full">目标</span>
                 </button>
-                <button
-                  className="im-finish-pill-btn"
-                  type="button"
-                  onClick={() => endSession(true)}
-                  disabled={controlsLocked}
-                >
-                  提前复盘
+                <button ref={topMoreButtonRef} className="im-icon-pill-btn im-top-more-btn" type="button" aria-label="更多会话选项" aria-expanded={showTopMoreMenu} aria-controls="im-top-more-menu" aria-haspopup="true" onClick={toggleTopMoreMenu}>
+                  <span aria-hidden="true">•••</span>
                 </button>
+                {showTopMoreMenu && (
+                  <div ref={topMoreMenuRef} id="im-top-more-menu" className="im-top-more-menu" aria-label="更多会话选项">
+                    {model.previousAdvice && (phase === 'waiting_user' || phase === 'round_complete') && <button type="button" onClick={showPreviousAdviceFromMenu} aria-label="查看上次建议">上次建议</button>}
+                    <button type="button" onClick={endSessionFromMenu} disabled={controlsLocked} aria-label="提前复盘并结束会话">提前复盘</button>
+                  </div>
+                )}
               </div>
             </header>
 
@@ -512,9 +566,12 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                     type="button"
                     onClick={() => setDockInputMode((m) => m === 'voice' ? 'text' : 'voice')}
                     title={dockInputMode === 'voice' ? '切换为键盘打字' : '切换为语音输入'}
+                    aria-label={dockInputMode === 'voice' ? '切换为键盘打字' : '切换为语音输入'}
                   >
                     {dockInputMode === 'voice' ? <Keyboard size={18} /> : <Mic size={18} />}
                   </button>
+
+
 
                   {dockInputMode === 'voice' ? (
                     <button
@@ -591,6 +648,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                     type="button"
                     onClick={enterTextInput}
                     title="放弃录音改用打字"
+                    aria-label="放弃录音并改用打字"
                   >
                     <Keyboard size={18} />
                   </button>
@@ -635,7 +693,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                   <div className="im-sheet-drag-handle" />
                   <div className="im-sheet-header">
                     <h3 className="im-sheet-title">{manualInput ? '确认文字回答' : <><Mic size={18} /> 确认语音转写</>}</h3>
-                    <button className="im-sheet-close-btn" type="button" onClick={closeTranscriptSheet}><X size={18} /></button>
+                    <button className="im-sheet-close-btn" type="button" onClick={closeTranscriptSheet} aria-label="关闭转写确认"><X size={18} /></button>
                   </div>
                   <div className="im-sheet-content">
                     <label htmlFor="transcript-sheet-input" style={{ fontSize: '0.85rem', fontWeight: 700, display: 'block', marginBottom: '6px' }}>
@@ -710,7 +768,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                   <div className="im-sheet-drag-handle" />
                   <div className="im-sheet-header">
                     <h3 className="im-sheet-title"><Lightbulb size={18} /> 怎么说</h3>
-                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowHintSheet(false)}><X size={18} /></button>
+                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowHintSheet(false)} aria-label="关闭表达帮助"><X size={18} /></button>
                   </div>
                   <div className="im-sheet-content">
                     <label className="im-hint-intention-field">
@@ -803,7 +861,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                   <div className="im-sheet-drag-handle" />
                   <div className="im-sheet-header">
                     <h3 className="im-sheet-title"><Target size={16} /> 场景目标：{scenario.dynamicData.titleZh}</h3>
-                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowGoalsSheet(false)}><X size={18} /></button>
+                    <button className="im-sheet-close-btn" type="button" onClick={() => setShowGoalsSheet(false)} aria-label="关闭训练目标"><X size={18} /></button>
                   </div>
                   <div className="im-sheet-content">
                     <p style={{ fontSize: '0.85rem', color: 'var(--muted)', marginTop: 0 }}>

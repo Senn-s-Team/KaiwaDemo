@@ -408,20 +408,6 @@ export function SessionComplete({
       {feedbackStatus === 'success' && feedbackData && (
         <div className="feedback-content">
           <section className="feedback-section goal-summary-card"><h2>这次收获</h2><p><strong>{outcomeLabel[feedbackData.outcome]}</strong></p><p>{feedbackData.outcomeEvidenceZh}</p></section>
-          {feedbackData.performance && <section className="feedback-section performance-section" aria-labelledby="performance-heading">
-            <h2 id="performance-heading">四维会后评价</h2>
-            <p className="practice-storage-note">等级描述本场对话表现；没有证据时保留为未观察，不合成总分。</p>
-            {practiceComparison?.performanceBaselineAttempt && <p className="practice-storage-note">比较基线：{new Date(practiceComparison.performanceBaselineAttempt.report.startedAt).toLocaleDateString('zh-CN')} 的首次完整有效练习。</p>}
-            <ul className="performance-list">{(Object.keys(performanceLabels) as (keyof typeof performanceLabels)[]).map((key) => {
-              const dimension = feedbackData.performance!.dimensions[key]
-              const label = performanceLabels[key]
-              const status = dimension.status === 'not_needed' ? '无需澄清' : dimension.status === 'unobserved' ? '未观察' : `等级 ${dimension.rating}：${label.anchors[dimension.rating!]}`
-              const baseline = practiceComparison?.performanceBaseline?.dimensions[key]
-              const comparison = baseline === undefined ? null : baseline === null || dimension.rating === null ? '本维度不可比较' : `比较：基线 ${baseline} · 本次 ${dimension.rating}`
-              return <li key={key}><strong>{label.title}</strong><span>{status}</span><p>{dimension.reasonZh}</p>{comparison && <p>{comparison}</p>}{dimension.evidence.map((item, index) => <p key={`${item.turn}-${item.role}-${index}`} lang="ja">第 {item.turn} 轮 {item.role === 'assistant' ? '相手' : '我'}：「{item.quoteJa}」</p>)}</li>
-            })}</ul>
-            <p className="practice-storage-note">程序记录：听力帮助 {helpFacts.listening} 轮，表达帮助 {helpFacts.expression} 轮，语音输入 {helpFacts.voice} 轮，文字输入 {helpFacts.text} 轮，重录 {helpFacts.rerecords} 次，确认稿编辑 {helpFacts.edited} 轮。</p>
-          </section>}
           <section className="feedback-section retry-task-card">
             <h2>把这一句再说顺一点</h2>
             <p lang="ja"><strong>这次回答：</strong>{feedbackData.redoTask.firstConfirmedJa}</p>
@@ -476,6 +462,20 @@ export function SessionComplete({
             {redoError && <p className="inline-error" role="alert">{redoError}</p>}
             {redoState === 'complete' && redoResult && <div className="retry-completed-panel"><p>{redoResult.comparisonZh}</p><p lang="ja"><strong>参考表达：</strong>{redoResult.referenceExpressionJa}</p><button className="text-button" type="button" onClick={startRedo}>再做一次</button></div>}
           </section>
+          {feedbackData.performance && <section className="feedback-section performance-section" aria-labelledby="performance-heading">
+            <h2 id="performance-heading">四维会后评价</h2>
+            <p className="practice-storage-note">等级描述本场对话表现；没有证据时保留为未观察，不合成总分。</p>
+            {practiceComparison?.performanceBaselineAttempt && <p className="practice-storage-note">比较基线：{new Date(practiceComparison.performanceBaselineAttempt.report.startedAt).toLocaleDateString('zh-CN')} 的首次完整有效练习。</p>}
+            <ul className="performance-list">{(Object.keys(performanceLabels) as (keyof typeof performanceLabels)[]).map((key) => {
+              const dimension = feedbackData.performance!.dimensions[key]
+              const label = performanceLabels[key]
+              const status = dimension.status === 'not_needed' ? '无需澄清' : dimension.status === 'unobserved' ? '未观察' : `等级 ${dimension.rating}：${label.anchors[dimension.rating!]}`
+              const baseline = practiceComparison?.performanceBaseline?.dimensions[key]
+              const comparison = baseline === undefined ? null : baseline === null || dimension.rating === null ? '本维度不可比较' : `比较：基线 ${baseline} · 本次 ${dimension.rating}`
+              return <li key={key}><strong>{label.title}</strong><span>{status}</span><p>{dimension.reasonZh}</p>{comparison && <p>{comparison}</p>}{dimension.evidence.map((item, index) => <p key={`${item.turn}-${item.role}-${index}`} lang="ja">第 {item.turn} 轮 {item.role === 'assistant' ? '相手' : '我'}：「{item.quoteJa}」</p>)}</li>
+            })}</ul>
+            <p className="practice-storage-note">程序记录：听力帮助 {helpFacts.listening} 轮，表达帮助 {helpFacts.expression} 轮，语音输入 {helpFacts.voice} 轮，文字输入 {helpFacts.text} 轮，重录 {helpFacts.rerecords} 次，确认稿编辑 {helpFacts.edited} 轮。</p>
+          </section>}
           <details className="complete-review-details">
             <summary>查看完整复盘</summary>
             {practiceComparison && <section className="practice-comparison" aria-labelledby="practice-comparison-heading">

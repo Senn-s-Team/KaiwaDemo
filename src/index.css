@@ -1,7 +1,7 @@
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", "PingFang SC", "Noto Sans CJK JP", sans-serif;
-  color: #1B2B38;
-  background: #EAF8E9;
+  color: var(--ink, #203039);
+  background: var(--canvas, #F5F6F2);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -13,14 +13,14 @@
 html {
   min-width: 320px;
   min-height: 100%;
-  background: #EAF8E9;
+  background: var(--canvas, #F5F6F2);
 }
 
 body {
   min-width: 320px;
   min-height: 100dvh;
   margin: 0;
-  background: #EAF8E9;
+  background: var(--canvas, #F5F6F2);
 }
 
 button,
@@ -32,8 +32,9 @@ button:focus-visible,
 textarea:focus-visible,
 summary:focus-visible,
 a:focus-visible {
-  outline: 3px solid #FABA9D;
+  outline: 3px solid var(--focus, #287B78);
   outline-offset: 3px;
+  box-shadow: var(--shadow-focus, 0 0 0 3px rgba(40, 123, 120, 0.22));
 }
 
 button:disabled {
@@ -42,6 +43,6 @@ button:disabled {
 }
 
 ::selection {
-  color: #1B2B38;
-  background: #EDDEA5;
+  color: var(--ink, #203039);
+  background: var(--accent-soft, #DCEDEA);
 }
