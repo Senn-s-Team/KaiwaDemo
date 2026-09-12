@@ -5,7 +5,7 @@ ai-turn-controller.test.ts: 相手 AI 回合状态机、运行时代际隔离与
 audio-engine.test.ts: 音频引擎采样、编码与资源释放纯逻辑契约
 audio-feedback.test.ts: 录音计时、音量反馈与静音保全提示阈值契约
 audio-lifecycle.test.ts: 浏览器当前音频权限预检、共享麦克风流、TTS 与 Token 生命周期集成契约
-app-lifecycle.test.ts: 真实 App 挂载下录音前相手播放器释放、草稿/前后台生命周期、无同意决策的匿名遥测 checkpoint seam 以及提前退出原因与遥测凭据不进入会话恢复序列的回归契约
+app-lifecycle.test.ts: 真实 App 挂载下录音前相手播放器释放、草稿/前后台生命周期、后台中断后的真实重试与音频解锁时序、无同意决策的匿名遥测 checkpoint seam 以及提前退出原因与遥测凭据不进入会话恢复序列的回归契约
 elevenlabs-guard.test.ts: ElevenLabs 浏览器入口构建守卫契约
 feedback-data.test.ts: 会话反馈数据转换与展示输入契约
 feedback-task-recovery.test.ts: 完成复盘封套持久化、前后台与刷新恢复、任务过期及迟到结果隔离契约

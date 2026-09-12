@@ -5,7 +5,7 @@ session.ts: 会话生命周期、固定五回合推进与显式中断恢复状�
 stt.ts: 实时语音识别会话与流水线管理，支持按会话选择识别语言，取消时释放共享麦克风，并以 selectFinalSttText 在远端最终提交关闭或超时时保全已观察转写
 tts.ts: 语音合成与播放管理，含手势解锁状态缓存、文本分块生成、原位置暂停继续与从头停止，CachedTtsPlayer / parseTtsMessage
 audio-engine.ts: 基础音频处理管线与流复用管理，包含麦克风采样、重采样、环形缓冲、当前麦克风权限预检、硬件流安全释放与前后台 teardown 裁决 shouldTeardownOnVisibility / isPermissionRequesting
-recording-setup.ts: 录音准备与并发协调深模块，隐藏麦克风与 Token 并发获取、连接就绪判定与失败回收，允许主动取消方避免二次释放新流，coordinateRecordingSetup
+recording-setup.ts: 录音准备与并发协调深模块，在用户手势入口同步触发现有音频解锁，随后隐藏麦克风与 Token 并发获取、连接就绪判定与失败回收，允许主动取消方避免二次释放新流，coordinateRecordingSetup
 voice-turn-controller.ts: 用户语音回合核心控制器深模块，以代际所有权锁隔离 dispose/retry 与迟到 finally，录音前释放相手播放资源，聚合麦克风权限状态、转写流与草稿、空语音/静音防护拦截、文本输入回退与单轮资源生命周期闭环，useVoiceTurnController / voiceTurnReducer / parseFinalTranscript / createRecordingStartLock
 ai-turn-controller.ts: 相手 AI 回合控制器深模块，闭环拥有 LLM 流式应答、TTS 播放/暂停/继续/降级及录音前资源释放、五回合自然判定与回合流转，useAiTurnController / createAiTurnRuntime / aiTurnReducer
 audio-feedback.ts: 麦克风电平与录音时长计算，以及基于可用计量的静音保全提示纯规则

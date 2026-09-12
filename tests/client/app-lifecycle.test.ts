@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 真实浏览器可见 App DOM、会话快照、visibilitychange 生命周期事件与匿名遥测控制器
- * [OUTPUT]: 锁定会话媒体/草稿生命周期、异步所有权及自动匿名遥测 checkpoint seam
+ * [OUTPUT]: 锁定会话媒体/草稿生命周期、异步所有权、后台中断后的真实重试与录音入口音频解锁时序及自动匿名遥测 checkpoint seam
  * [POS]: tests/client 的 App 根组件生命周期集成回归契约
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -8,7 +8,7 @@
 import { type ComponentType, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { flushSync } from 'react-dom'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { buildSessionReport, createRoundRecord } from '../../src/lib/metrics'
 import { writePreparedRestart, type PreparedRestartData } from '../../src/lib/home-practice-recovery'
 import type { ConversationFeedbackResponse, SessionScenario } from '../../src/types'
@@ -20,8 +20,8 @@ import type * as SttModule from '../../src/lib/stt'
 import type * as AudioEngineModule from '../../src/lib/audio-engine'
 
 let App: ComponentType
-let fetchConfig: ReturnType<typeof vi.fn>
-let listPracticeAttempts: ReturnType<typeof vi.fn>
+let fetchConfig: Mock
+let listPracticeAttempts: Mock
 
 const scenario: SessionScenario = {
   id: 'haircut',
@@ -80,7 +80,50 @@ function installWaitingSessionSnapshot(listeningScaffoldLevel = 0): void {
     transcript: { rawText: '', cleanedText: '', finalText: '' },
   }))
 }
+type RealtimeSttSessionStub = new () => object
 
+type RecordingLifecycleMockOptions = {
+  fetchConfig?: Mock
+  sttAvailable?: boolean
+  requestElevenLabsToken?: Mock
+  requestMicrophoneStream?: Mock
+  unlockAudio?: Mock
+  sttSession?: RealtimeSttSessionStub
+  listPracticeAttempts?: Mock
+  extraApi?: Record<string, unknown>
+}
+
+function installRecordingLifecycleMocks(options: RecordingLifecycleMockOptions = {}): void {
+  const fetchConfig = options.fetchConfig ?? vi.fn().mockResolvedValue({
+    mode: 'mock', limits: { maxTurns: 5 },
+    elevenlabs: { sttAvailable: options.sttAvailable ?? true, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' },
+    openai: { available: false, model: 'mock', mockAllowed: true },
+  })
+  const requestElevenLabsToken = options.requestElevenLabsToken ?? vi.fn().mockResolvedValue('stt-token')
+  const requestMicrophoneStream = options.requestMicrophoneStream ?? vi.fn().mockResolvedValue({ getAudioTracks: () => [{ readyState: 'live' as const }] })
+  const unlockAudio = options.unlockAudio ?? vi.fn().mockResolvedValue(undefined)
+  const listPracticeAttempts = options.listPracticeAttempts ?? vi.fn().mockResolvedValue([])
+
+  vi.doMock('../../src/lib/api', async () => ({
+    ...(await vi.importActual<typeof ApiModule>('../../src/lib/api')),
+    fetchConfig,
+    requestElevenLabsToken,
+    ...(options.extraApi ?? {}),
+  }))
+  vi.doMock('../../src/lib/practice-history', async () => ({
+    ...(await vi.importActual<typeof PracticeHistoryModule>('../../src/lib/practice-history')),
+    listPracticeAttempts,
+  }))
+  vi.doMock('../../src/lib/stt', async () => ({
+    ...(await vi.importActual<typeof SttModule>('../../src/lib/stt')),
+    ...(options.sttSession ? { RealtimeSttSession: options.sttSession } : {}),
+  }))
+  vi.doMock('../../src/lib/audio-engine', async () => ({
+    ...(await vi.importActual<typeof AudioEngineModule>('../../src/lib/audio-engine')),
+    requestMicrophoneStream,
+    unlockAudio,
+  }))
+}
 describe('App lifecycle integration', () => {
   let root: Root
   let container: HTMLDivElement
@@ -204,29 +247,7 @@ describe('App config lifecycle regression', () => {
       stop = stopStt
       close = vi.fn()
     }
-    vi.doMock('../../src/lib/api', async () => ({
-      ...(await vi.importActual<typeof ApiModule>('../../src/lib/api')),
-      fetchConfig: vi.fn().mockResolvedValue({
-        mode: 'mock', limits: { maxTurns: 5 },
-        elevenlabs: { sttAvailable: true, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' },
-        openai: { available: false, model: 'mock', mockAllowed: true },
-      }),
-      requestElevenLabsToken: vi.fn().mockResolvedValue('stt-token'),
-    }))
-    vi.doMock('../../src/lib/practice-history', async () => ({
-      ...(await vi.importActual<typeof PracticeHistoryModule>('../../src/lib/practice-history')),
-      listPracticeAttempts: vi.fn().mockResolvedValue([]),
-    }))
-    vi.doMock('../../src/lib/stt', async () => ({
-      ...(await vi.importActual<typeof SttModule>('../../src/lib/stt')),
-      RealtimeSttSession: FakeRealtimeSttSession,
-    }))
-    vi.doMock('../../src/lib/audio-engine', async () => ({
-      ...(await vi.importActual<typeof AudioEngineModule>('../../src/lib/audio-engine')),
-      requestMicrophoneStream: vi.fn().mockResolvedValue({
-        getAudioTracks: () => [{ readyState: 'live' }],
-      }),
-    }))
+    installRecordingLifecycleMocks({ sttSession: FakeRealtimeSttSession })
     const scrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
     const box = document.createElement('div')
@@ -269,6 +290,104 @@ describe('App config lifecycle regression', () => {
       if (scrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollIntoView)
       else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
       vi.useRealTimers()
+      vi.doUnmock('../../src/lib/api')
+      vi.doUnmock('../../src/lib/practice-history')
+      vi.doUnmock('../../src/lib/stt')
+      vi.doUnmock('../../src/lib/audio-engine')
+      vi.clearAllMocks()
+    }
+  })
+  it('在后台中断后重试会在受控麦克风与 token 完成前同步解锁音频', async () => {
+    vi.resetModules()
+    window.sessionStorage.clear()
+    installWaitingSessionSnapshot()
+    const stream = {
+      active: true,
+      getAudioTracks: () => [{ readyState: 'live' as const }],
+    }
+    const firstMic = deferred<typeof stream>()
+    const secondMic = deferred<typeof stream>()
+    const firstToken = deferred<string>()
+    const secondToken = deferred<string>()
+    const unlockAudio = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+    const requestMicrophoneStream = vi.fn()
+      .mockImplementationOnce(() => firstMic.promise)
+      .mockImplementationOnce(() => secondMic.promise)
+    const requestElevenLabsToken = vi.fn()
+      .mockImplementationOnce(() => firstToken.promise)
+      .mockImplementationOnce(() => secondToken.promise)
+    let handlers: SttHandlers | null = null
+    class FakeRealtimeSttSession {
+      start = async (_token: string, _model: string, nextHandlers: SttHandlers): Promise<void> => {
+        handlers = nextHandlers
+        nextHandlers.onConnectionState('connected')
+        nextHandlers.onPipelineReady?.()
+      }
+      stop = vi.fn<() => Promise<string>>().mockResolvedValue('')
+      close = vi.fn()
+    }
+    installRecordingLifecycleMocks({
+      requestMicrophoneStream,
+      requestElevenLabsToken,
+      unlockAudio,
+      sttSession: FakeRealtimeSttSession,
+    })
+    const hidden = Object.getOwnPropertyDescriptor(document, 'hidden')
+    const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    const scrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
+    const box = document.createElement('div')
+    const appRoot = createRoot(box)
+    document.body.appendChild(box)
+    try {
+      const appModule = await import('../../src/App')
+      flushSync(() => appRoot.render(createElement(appModule.default)))
+      const startButton = await vi.waitFor(() => {
+        const button = Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes('开始回答'))
+        expect(button).toBeDefined()
+        return button as HTMLButtonElement
+      }, { interval: 0 })
+
+      flushSync(() => startButton.click())
+      expect(unlockAudio).toHaveBeenCalledTimes(1)
+      expect(unlockAudio.mock.invocationCallOrder[0]).toBeLessThan(requestMicrophoneStream.mock.invocationCallOrder[0])
+      expect(requestMicrophoneStream).toHaveBeenCalledTimes(1)
+      expect(requestElevenLabsToken).toHaveBeenCalledTimes(1)
+
+      firstMic.resolve(stream)
+      firstToken.resolve('first-token')
+      await vi.waitFor(() => {
+        expect(handlers).not.toBeNull()
+        expect(box.textContent).toContain('正在录音中')
+      }, { interval: 0 })
+
+      flushSync(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+        Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+        document.dispatchEvent(new Event('visibilitychange'))
+      })
+      const retryButton = await vi.waitFor(() => {
+        const button = Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes('重试'))
+        expect(button).toBeDefined()
+        return button as HTMLButtonElement
+      }, { interval: 0 })
+
+      flushSync(() => retryButton.click())
+      expect(unlockAudio).toHaveBeenCalledTimes(2)
+      expect(requestMicrophoneStream).toHaveBeenCalledTimes(2)
+      expect(requestElevenLabsToken).toHaveBeenCalledTimes(2)
+      expect(unlockAudio.mock.invocationCallOrder[1]).toBeLessThan(requestMicrophoneStream.mock.invocationCallOrder[1])
+      expect(unlockAudio.mock.invocationCallOrder[1]).toBeLessThan(requestElevenLabsToken.mock.invocationCallOrder[1])
+    } finally {
+      appRoot.unmount()
+      box.remove()
+      window.sessionStorage.clear()
+      if (hidden) Object.defineProperty(document, 'hidden', hidden)
+      else delete (document as { hidden?: boolean }).hidden
+      if (visibility) Object.defineProperty(document, 'visibilityState', visibility)
+      else delete (document as { visibilityState?: DocumentVisibilityState }).visibilityState
+      if (scrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollIntoView)
+      else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
       vi.doUnmock('../../src/lib/api')
       vi.doUnmock('../../src/lib/practice-history')
       vi.doUnmock('../../src/lib/stt')
