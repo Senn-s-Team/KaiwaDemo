@@ -26,14 +26,15 @@ import { ActiveSession, type ActiveSessionActions, type ActiveSessionModel } fro
 
 const flush = async () => { await Promise.resolve(); await Promise.resolve() }
 const click = (box: HTMLElement, text: string) => Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes(text)) as HTMLButtonElement
-function Harness({ phase = 'waiting_user' as const, notice = '', previousAdvice = false, online = true, silencePromptVisible = false, userOpening = false }: { phase?: ActiveSessionModel['phase']; notice?: string; previousAdvice?: boolean; online?: boolean; silencePromptVisible?: boolean; userOpening?: boolean }): React.JSX.Element {
-  const [sheet, setSheet] = useState(true)
+function Harness({ phase = 'waiting_user' as const, notice = '', previousAdvice = false, online = true, silencePromptVisible = false, userOpening = false, hintVisible = true, transcriptVisible = false }: { phase?: ActiveSessionModel['phase']; notice?: string; previousAdvice?: boolean; online?: boolean; silencePromptVisible?: boolean; userOpening?: boolean; hintVisible?: boolean; transcriptVisible?: boolean }): React.JSX.Element {
+  const [sheet, setSheet] = useState(hintVisible)
+  const [transcriptSheet, setTranscriptSheet] = useState(transcriptVisible)
   const model = {
-    phase, scenario: { maxTurns: 5, dynamicData: { aiRole: '店员', titleZh: '测试', summaryZh: '', coreGoal: { titleZh: '', descriptionZh: '' }, opening: userOpening ? { speaker: 'user', planZh: '说明来意。' } : { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。', planZh: '迎客并询问需求。' } } }, turn: 1, controlsLocked: false, showGoalsSheet: false, sessionCoreGoal: null, recoveryMessage: '', interruptionRecovery: { status: 'idle' }, interruptionRecoveryAffordances: {}, recoveryTarget: null, online, effectiveForegroundNotice: '', messages: [], listeningRequestStates: {}, activeAiMessageId: null, pausedAiMessageId: null, playedAiMessageIds: new Set(), activeError: null, activeFailedStep: null, silencePromptVisible, activeAssistIsVisible: false, activeAssistState: null, confirmedTranscript: '', interimTranscript: '', partialTranscript: '', recordingSeconds: 0, dockInputMode: 'voice', dockTextValue: '', hintData: { directionZh: '说明', keyPhrasesJa: ['料金'], sentenceStarterJa: '料金は', fullExampleJa: '追加料金はかかりますか？' }, isLoadingHint: false, hintLevel: 4, showHintSheet: sheet, showTranscriptSheet: false, manualInput: false, transcript: { rawText: '', cleanedText: '', finalText: '' }, showOriginalTranscript: false, inlineError: '', canConfirmTranscript: false, sttAvailable: true, sttModel: 'scribe', ttsAvailable: true, reviewAudioNotice: notice,
+    phase, scenario: { maxTurns: 5, dynamicData: { aiRole: '店员', titleZh: '测试', summaryZh: '', coreGoal: { titleZh: '', descriptionZh: '' }, opening: userOpening ? { speaker: 'user', planZh: '说明来意。' } : { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。', planZh: '迎客并询问需求。' } } }, turn: 1, controlsLocked: false, showGoalsSheet: false, sessionCoreGoal: null, recoveryMessage: '', interruptionRecovery: { status: 'idle' }, interruptionRecoveryAffordances: {}, recoveryTarget: null, online, effectiveForegroundNotice: '', messages: [], listeningRequestStates: {}, activeAiMessageId: null, pausedAiMessageId: null, playedAiMessageIds: new Set(), activeError: null, activeFailedStep: null, silencePromptVisible, activeAssistIsVisible: false, activeAssistState: null, confirmedTranscript: '', interimTranscript: '', partialTranscript: '', recordingSeconds: 0, dockInputMode: 'voice', dockTextValue: '', hintData: { directionZh: '说明', keyPhrasesJa: ['料金'], sentenceStarterJa: '料金は', fullExampleJa: '追加料金はかかりますか？' }, isLoadingHint: false, hintLevel: 4, showHintSheet: sheet, showTranscriptSheet: transcriptSheet, manualInput: false, transcript: { rawText: '原识别文本', cleanedText: '确认文本', finalText: '确认文本' }, showOriginalTranscript: false, inlineError: '测试错误', canConfirmTranscript: true, sttAvailable: true, sttModel: 'scribe', ttsAvailable: true, reviewAudioNotice: notice,
     previousAdvice: previousAdvice ? { expressionImprovement: { turn: 1, userConfirmedJa: 'これをください。', suggestedJa: 'こちらをお願いします。', reasonZh: '更礼貌。' }, sourceSessionId: 'source-session', sourceStartedAt: 1, viewed: false } : undefined,
   } as ActiveSessionModel
   const actions = {
-    endSession: vi.fn(), setShowGoalsSheet: vi.fn(), dispatchInterruptionRecovery: vi.fn(), setAppForegroundNotice: vi.fn(), clearVoiceNotice: vi.fn(), getListeningLevel: vi.fn(() => 0), replayPartnerMessage: vi.fn(), advanceListeningScaffold: vi.fn(), setDockInputMode: vi.fn(), startRecording: mocks.startJapanese, enterTextInput: vi.fn(), enterLifecycleTextInput: vi.fn(), updateFinalText: vi.fn(), setDockTextValue: vi.fn(), openTranscriptSheet: vi.fn(), handleRequestHint: vi.fn().mockResolvedValue(undefined), setShowHintSheet: setSheet, stopRecording: mocks.stopRecording, skipFailedTts: vi.fn(), retryFailedStep: vi.fn(), resetSession: vi.fn(), stopAiPlayback: vi.fn(), releaseAiPlayback: mocks.releaseAi, playReviewAudio: mocks.play, closeTranscriptSheet: vi.fn(), rerecord: vi.fn(), confirmTranscript: vi.fn(), setInlineError: vi.fn(), toggleOriginalTranscript: vi.fn(), onPreviousAdviceViewed: mocks.adviceViewed,
+    endSession: vi.fn(), setShowGoalsSheet: vi.fn(), dispatchInterruptionRecovery: vi.fn(), setAppForegroundNotice: vi.fn(), clearVoiceNotice: vi.fn(), getListeningLevel: vi.fn(() => 0), replayPartnerMessage: vi.fn(), advanceListeningScaffold: vi.fn(), setDockInputMode: vi.fn(), startRecording: mocks.startJapanese, enterTextInput: vi.fn(), enterLifecycleTextInput: vi.fn(), updateFinalText: vi.fn(), setDockTextValue: vi.fn(), openTranscriptSheet: () => setTranscriptSheet(true), handleRequestHint: vi.fn().mockResolvedValue(undefined), setShowHintSheet: setSheet, stopRecording: mocks.stopRecording, skipFailedTts: vi.fn(), retryFailedStep: vi.fn(), resetSession: vi.fn(), stopAiPlayback: vi.fn(), releaseAiPlayback: mocks.releaseAi, playReviewAudio: mocks.play, closeTranscriptSheet: () => setTranscriptSheet(false), rerecord: vi.fn(), confirmTranscript: vi.fn(), setInlineError: vi.fn(), toggleOriginalTranscript: vi.fn(), onPreviousAdviceViewed: mocks.adviceViewed,
   } as unknown as ActiveSessionActions
   return createElement(ActiveSession, { model, actions, messageListRef: { current: null }, chatBottomRef: { current: null } })
 }
@@ -46,6 +47,28 @@ describe('ActiveSession 中文意图录音', () => {
     container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container); flushSync(() => root.render(createElement(Harness)))
   })
   afterEach(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: false }); flushSync(() => root.unmount()); container.remove(); vi.clearAllMocks() })
+  it('确认稿阶段默认显示确认稿，关闭 X 后不会被 phase 强制重新打开', () => {
+    flushSync(() => root.unmount()); root = createRoot(container)
+    flushSync(() => root.render(createElement(Harness, { phase: 'confirming_transcript', hintVisible: false, transcriptVisible: true })))
+    expect(container.querySelector<HTMLTextAreaElement>('#transcript-sheet-input')?.value).toBe('确认文本')
+    flushSync(() => container.querySelector<HTMLButtonElement>('[aria-label="关闭转写确认"]')!.click())
+    expect(container.querySelector('#transcript-sheet-input')).toBeNull()
+  })
+
+  it('确认稿中的怎么说切换到帮助，关闭帮助后可从确认稿入口恢复且保留文本', () => {
+    flushSync(() => root.unmount()); root = createRoot(container)
+    flushSync(() => root.render(createElement(Harness, { phase: 'confirming_transcript', hintVisible: false, transcriptVisible: true })))
+    flushSync(() => click(container, '怎么说').click())
+    expect(container.querySelector('#transcript-sheet-input')).toBeNull()
+    expect(container.querySelector('.im-hint-intention-field')).not.toBeNull()
+    flushSync(() => container.querySelector<HTMLButtonElement>('[aria-label="关闭表达帮助"]')!.click())
+    expect(container.querySelector('.im-hint-intention-field')).toBeNull()
+    expect(container.textContent).toContain('检查/修改回答内容')
+    flushSync(() => click(container, '检查/修改回答内容').click())
+    expect(container.querySelector<HTMLTextAreaElement>('#transcript-sheet-input')?.value).toBe('确认文本')
+    expect(container.textContent).toContain('测试错误')
+  })
+
 
   it('保留已有输入，并在停止后写入最终中文', async () => {
     const area = container.querySelector<HTMLTextAreaElement>('.im-hint-intention-field textarea')!

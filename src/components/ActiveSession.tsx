@@ -160,6 +160,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
   const intentionStoppingRef = useRef<RealtimeSttSession | null>(null)
   const intentionConnectedRef = useRef<RealtimeSttSession | null>(null)
   const previousTurnRef = useRef(turn)
+  const previousPhaseRef = useRef<AppPhase | null>(null)
   const cancelIntentionRecording = useCallback((session = intentionSttRef.current, controller = intentionAbortRef.current) => {
     if (!session || intentionSttRef.current !== session) return
     intentionGenerationRef.current += 1
@@ -216,6 +217,11 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
     }
   }, [showTopMoreMenu])
   useEffect(() => { if (!showHintSheet) cancelIntentionRecording() }, [cancelIntentionRecording, showHintSheet])
+  useEffect(() => {
+    const enteredConfirmation = phase === 'confirming_transcript' && previousPhaseRef.current !== 'confirming_transcript'
+    previousPhaseRef.current = phase
+    if (enteredConfirmation && !showTranscriptSheet) openTranscriptSheet()
+  }, [openTranscriptSheet, phase, showTranscriptSheet])
   const startIntentionRecording = useCallback(async () => {
     if (!model.sttAvailable || !model.sttModel || phase === 'recording' || intentionSttRef.current) return
     releaseAiPlayback()
@@ -690,7 +696,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
             {/* ================================================================
                 Bottom Sheet 1: 转写确认与编辑弹窗 (Bottom Sheet)
                 ================================================================ */}
-            {(showTranscriptSheet || phase === 'confirming_transcript') && (
+            {showTranscriptSheet && (
               <div className="im-bottom-sheet-backdrop" onClick={closeTranscriptSheet}>
                 <div className="im-bottom-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className="im-sheet-drag-handle" />
@@ -734,6 +740,16 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                       </div>
                     )}
                     {inlineError && <p className="im-inline-error" role="alert">{inlineError}</p>}
+                    <button
+                      className="secondary-button im-transcript-hint-button"
+                      type="button"
+                      onClick={() => {
+                        closeTranscriptSheet()
+                        setShowHintSheet(true)
+                      }}
+                    >
+                      <Lightbulb size={16} /> 怎么说
+                    </button>
                   </div>
                   <div className="im-sheet-footer">
                     <button
