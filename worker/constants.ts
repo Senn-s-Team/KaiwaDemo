@@ -29,7 +29,7 @@ export const DEADLINES = {
   elevenLabsTokenMs: 10_000,
 } as const
 export const DEFAULT_MODELS = {
-  openai: 'gpt-5.6-luna',
+  openai: 'gemini-3.8-flash-high',
   stt: 'scribe_v2_realtime',
   tts: 'eleven_flash_v2_5',
 } as const
