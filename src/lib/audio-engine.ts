@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 Web AudioContext 与 navigator.mediaDevices 录音硬件流
  * [OUTPUT]: 对外提供 requestMicrophoneStream（含当前权限预检、single-flight 与取消废弃防护）、releaseMicrophoneStream、isPermissionRequesting、shouldTeardownOnVisibility、MicrophoneAudioPipeline、AudioRingBuffer、isMicrophoneTrackReady 等音频底层接口
- * [POS]: src/lib 的音频底层引擎，管理全局共享 AudioContext/MediaStream 生命周期并挂载重采样与采样处理器
+ * [POS]: src/lib 的音频底层引擎，管理全局共享 AudioContext/MediaStream 生命周期并挂载重采样与采样处理器；后台释放后确保 closed context 不被复用且恢复失败明确退出
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 export class SttError extends Error {
@@ -17,6 +17,11 @@ export class SttError extends Error {
     super(message)
     this.code = code
   }
+}
+
+/** 共享 AudioContext 无法恢复时的唯一错误形状，避免同一文案在恢复与管线启动处各写一遍。 */
+function audioContextUnavailable(): SttError {
+  return new SttError('connection_failed', '音频上下文无法恢复，请重试。')
 }
 
 export function microphoneReadinessFromError(error: unknown): 'denied' | 'unavailable' {
@@ -46,7 +51,7 @@ export function shouldTeardownOnVisibility(hidden: boolean): boolean {
 }
 
 export function getSharedAudioContext(): AudioContext {
-  if (!sharedAudioContext) {
+  if (!sharedAudioContext || sharedAudioContext.state === 'closed') {
     const AudioContextClass = window.AudioContext
     sharedAudioContext = new AudioContextClass()
   }
@@ -55,8 +60,28 @@ export function getSharedAudioContext(): AudioContext {
 
 export async function unlockAudio(): Promise<void> {
   const ctx = getSharedAudioContext()
-  if (ctx.state !== 'running') {
-    await ctx.resume().catch(() => undefined)
+  const isRunning = () => ctx.state === 'running'
+  if (isRunning()) return
+
+  const evictFailedContext = () => {
+    if (sharedAudioContext !== ctx) return
+    sharedAudioContext = null
+    try {
+      void ctx.close().catch(() => undefined)
+    } catch {
+      // Context eviction must not mask the original recovery failure.
+    }
+  }
+
+  try {
+    await ctx.resume()
+  } catch {
+    evictFailedContext()
+    throw audioContextUnavailable()
+  }
+  if (!isRunning()) {
+    evictFailedContext()
+    throw audioContextUnavailable()
   }
 }
 
@@ -290,17 +315,34 @@ export class MicrophoneAudioPipeline {
     this.callback = callback
     this.isRunning = true
 
-    const ctx = getSharedAudioContext()
-    if (ctx.state !== 'running') {
-      await ctx.resume().catch(() => undefined)
+    let ctx: AudioContext
+    try {
+      ctx = getSharedAudioContext()
+      if (ctx.state !== 'running') {
+        await ctx.resume()
+      }
+      if (ctx.state !== 'running') {
+        throw audioContextUnavailable()
+      }
+    } catch (error) {
+      this.stop()
+      if (error instanceof SttError) throw error
+      throw audioContextUnavailable()
     }
 
     if (!this.isRunning || currentGen !== this.generation) {
       return
     }
 
-    const source = ctx.createMediaStreamSource(stream)
-    const processor = ctx.createScriptProcessor(4_096, 1, 1)
+    let source: MediaStreamAudioSourceNode
+    let processor: ScriptProcessorNode
+    try {
+      source = ctx.createMediaStreamSource(stream)
+      processor = ctx.createScriptProcessor(4_096, 1, 1)
+    } catch {
+      this.stop()
+      throw new SttError('connection_failed', '音频管线无法启动，请重试。')
+    }
 
     processor.onaudioprocess = (event: AudioProcessingEvent) => {
       if (!this.isRunning || currentGen !== this.generation || !this.callback) return

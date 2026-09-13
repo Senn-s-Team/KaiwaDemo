@@ -1,10 +1,61 @@
 /**
- * [INPUT]: 依赖 src/lib/stt 的转写状态规约、RealtimeSttSession 停止行为与最终文本选择策略
- * [OUTPUT]: 验证实时转写去重、提交收敛及连接关闭时 stop() 保全已观察文本的回归契约
- * [POS]: tests/client 的 STT 逻辑回归测试，以纯状态转换和无设备会话探针约束自动停止收尾
+ * [INPUT]: 依赖 src/lib/stt 的转写状态规约、RealtimeSttSession 停止行为、连接关闭错误回调与最终文本选择策略
+ * [OUTPUT]: 验证实时转写去重、提交收敛、streaming 连接关闭时错误可观察及 stop() 保全已观察文本的回归契约
+ * [POS]: tests/client 的 STT 逻辑回归测试，以纯状态转换和无设备会话探针约束自动停止收尾与异常恢复
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+const testConnections: Array<{ emit: (event: string) => void }> = []
+vi.mock('@elevenlabs/client', () => ({
+  AudioFormat: { PCM_16000: 'pcm_16000' },
+  CommitStrategy: { MANUAL: 'manual' },
+  RealtimeEvents: {
+    SESSION_STARTED: 'session_started',
+    PARTIAL_TRANSCRIPT: 'partial_transcript',
+    FINAL_TRANSCRIPT: 'final_transcript',
+    COMMITTED_TRANSCRIPT: 'committed_transcript',
+    ERROR: 'error',
+    CLOSE: 'close',
+  },
+  Scribe: {
+    connect: () => {
+      const handlers = new Map<string, () => void>()
+      const connection = {
+        on: (event: string, handler: () => void) => handlers.set(event, handler),
+        send: () => undefined,
+        commit: () => undefined,
+        close: () => undefined,
+        emit: (event: string) => handlers.get(event)?.(),
+      }
+      testConnections.push(connection)
+      return connection
+    },
+  },
+}))
+vi.mock('../../src/lib/audio-engine', () => ({
+  AudioRingBuffer: class {
+    clear(): void {}
+    flush(): Array<{ base64: string; rms: number }> { return [] }
+    push(): void {}
+  },
+  MicrophoneAudioPipeline: class {
+    async start(): Promise<void> {}
+    stop(): void {}
+  },
+  SttError: class SttError extends Error {
+    readonly code: string
+    constructor(code: string, message: string) {
+      super(message)
+      this.code = code
+    }
+  },
+  isMicrophoneTrackReady: () => true,
+  releaseMicrophoneStream: () => undefined,
+  requestMicrophoneStream: async () => ({}),
+  unlockAudio: async () => undefined,
+}))
+
 import {
   createInitialSttTranscriptState,
   reduceSttCommitted,
@@ -136,5 +187,30 @@ describe('STT Observable State Contract', () => {
     expect(freshState.interim).toBe('')
     expect(freshState.lastFinalId).toBeNull()
     expect(freshState.committedResolved).toBe(false)
+  })
+
+  it('notifies the caller when a streaming connection closes unexpectedly', async () => {
+    const originalWindow = globalThis.window
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { setTimeout, clearTimeout } })
+    const errors: Array<{ code: string }> = []
+    try {
+      const session = new RealtimeSttSession()
+      const start = session.start('token', 'model', {
+        onPartial: () => undefined,
+        onConnectionState: () => undefined,
+        onAudioLevel: () => undefined,
+        onError: (error) => errors.push(error),
+      })
+      await vi.waitFor(() => expect(testConnections.length).toBeGreaterThan(0))
+      const connection = testConnections.at(-1)
+      connection?.emit('session_started')
+      await start
+      connection?.emit('close')
+      expect(errors).toHaveLength(1)
+      expect(errors[0]?.code).toBe('connection_failed')
+    } finally {
+      if (originalWindow === undefined) Reflect.deleteProperty(globalThis, 'window')
+      else Object.defineProperty(globalThis, 'window', { configurable: true, value: originalWindow })
+    }
   })
 })

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 @elevenlabs/client 的 Scribe 实时连接、./audio-engine 的麦克风音频采集流水线与缓冲环
- * [OUTPUT]: 对外提供 RealtimeSttSession（可选识别语言及共享流取得回调）、SttTokenManager 类（含 single-flight 与代际隔离）、SttHandlers 接口（含 onPipelineReady 就绪回调）、selectFinalSttText 与转写规约纯函数
+ * [OUTPUT]: 对外提供 RealtimeSttSession（可选识别语言及共享流取得回调）、SttTokenManager 类（含 single-flight 与代际隔离）、SttHandlers 接口（含 onPipelineReady/onError 就绪与失败回调）、selectFinalSttText 与转写规约纯函数
  * [POS]: src/lib 的语音识别核心模块，负责低延迟音频缓冲、实时转写 WebSocket 流处理与取消后的共享麦克风释放，并在最终提交连接关闭或超时时保全已观察到的有效转写
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -27,6 +27,7 @@ export interface SttHandlers {
   onAudioLevel: (level: number) => void
   onPipelineReady?: () => void
   onMicrophoneStream?: (stream: MediaStream) => void
+  onError?: (error: SttError) => void
 }
 
 export interface SttTranscriptState {
@@ -170,22 +171,28 @@ export class RealtimeSttSession {
     }
 
     // 0ms 关键架构：拿到流瞬间立即启动本地采样并写入环形缓冲，不等待 WebSocket 握手
-    await this.pipeline.start(stream, (base64, rms) => {
-      if (currentGen !== this.sessionGeneration) return
-      handlers.onAudioLevel(rms)
+    try {
+      await this.pipeline.start(stream, (base64, rms) => {
+        if (currentGen !== this.sessionGeneration) return
+        handlers.onAudioLevel(rms)
 
-      if (this.state === 'connecting') {
-        // WebSocket 未通：存入本地 Buffer
-        this.ringBuffer.push(base64, rms)
-      } else if (this.state === 'streaming' && this.connection) {
-        // WebSocket 已通：直通发送
-        try {
-          this.connection.send({ audioBase64: base64 })
-        } catch {
-          // ignore transient send error
+        if (this.state === 'connecting') {
+          // WebSocket 未通：存入本地 Buffer
+          this.ringBuffer.push(base64, rms)
+        } else if (this.state === 'streaming' && this.connection) {
+          // WebSocket 已通：直通发送
+          try {
+            this.connection.send({ audioBase64: base64 })
+          } catch {
+            // ignore transient send error
+          }
         }
-      }
-    })
+      })
+    } catch (error) {
+      releaseMicrophoneStream()
+      this.close()
+      throw this.mapStartError(error)
+    }
 
     if (currentGen !== this.sessionGeneration) return
     handlers.onPipelineReady?.()
@@ -323,10 +330,12 @@ export class RealtimeSttSession {
         this.close()
         rejector(new SttError('connection_failed', 'STT connection closed before the final transcript arrived.'))
       } else if (this.state === 'streaming') {
+        const error = new SttError('connection_failed', 'STT connection closed unexpectedly.')
         this.state = 'closed'
         this.connection = null
         this.pipeline.stop()
         handlers.onConnectionState('closed')
+        handlers.onError?.(error)
       }
     })
 

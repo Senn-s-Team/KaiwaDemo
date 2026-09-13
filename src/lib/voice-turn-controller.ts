@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 ./recording-setup、./stt、./api、./audio-engine、./voice-recordings、./text-cleaner、./ui、../types、相手播放资源释放回调与 ../../shared/speech-assist 的固定中止原因契约
- * [OUTPUT]: 对外提供 useVoiceTurnController 语音回合 Hook、录音前相手播放资源释放接缝、确认后本机录音保存、voiceTurnReducer 状态纯机、parseFinalTranscript 校验及 RecordingStartLock 所有权锁契约
+ * [OUTPUT]: 对外提供 useVoiceTurnController 语音回合 Hook、录音前相手播放资源释放接缝、确认后本机录音保存、voiceTurnReducer 状态纯机、parseFinalTranscript 校验及 RecordingStartLock 所有权锁契约；将 STT 流异常关闭转为可观察 error 阶段
  * [POS]: src/lib 的用户语音回合核心控制器，内聚麦克风、转写、可选本机压缩录音暂存、语音辅助中止、文本回退、资源释放与单轮生命周期闭环
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -490,6 +490,14 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
                 lastPartialAtRef.current = now
               }
             },
+            onError: (error) => {
+              if (!deps.operation.isCurrent(operationId)) return
+              deps.touchRound((round) => {
+                round.failureCount += 1
+              })
+              dispatch({ type: 'SET_VOICE_ERROR', error: toUiError(error) })
+              deps.transitionTo('error')
+            },
             onAudioLevel: (level) => {
               if (!deps.operation.isCurrent(operationId)) return
               if (level < 0) {
@@ -523,6 +531,9 @@ export function useVoiceTurnController(deps: VoiceTurnDependencies): VoiceTurnCo
     } catch (error) {
       if (controller.signal.aborted || !deps.operation.isCurrent(operationId)) return
       sttRef.current.close()
+      // 失败路径绝不保留临时录音：既满足「失败不保存」的契约，也避免本地录音器继续占用硬件流。
+      voiceCaptureRef.current.discard()
+      pendingRecordingRef.current = null
       deps.touchRound((round) => {
         round.failureCount += 1
       })

@@ -2,7 +2,7 @@
 > L2 | 父级: /AGENTS.md
 成员清单
 ai-turn-controller.test.ts: 相手 AI 回合状态机、运行时代际隔离与播放降级契约
-audio-engine.test.ts: 音频引擎采样、编码与资源释放纯逻辑契约
+audio-engine.test.ts: 音频引擎采样、编码、资源释放纯逻辑与后台恢复后失效 AudioContext 淘汰重建契约
 audio-feedback.test.ts: 录音计时、音量反馈与静音保全提示阈值契约
 audio-lifecycle.test.ts: 浏览器当前音频权限预检、共享麦克风流、TTS 与 Token 生命周期集成契约
 app-lifecycle.test.ts: 真实 App 挂载下录音前相手播放器释放、草稿/前后台生命周期、后台中断后的真实重试与音频解锁时序、无同意决策的匿名遥测 checkpoint seam 以及提前退出原因与遥测凭据不进入会话恢复序列的回归契约
@@ -15,7 +15,7 @@ session-flow.test.ts: 客户端会话核心推进流程契约
 session-recovery.test.ts: 前后台与离线中断恢复目标及入口契约
 spark-practice.test.ts: 词汇灵感练习场景生成契约
 speech-assist.test.ts: 实时续说辅助触发、过期结果与显示守卫契约
-stt-observable.test.ts: STT 实时片段规约、提交收敛与停止时已观察文本保全契约
+stt-observable.test.ts: STT 实时片段规约、提交收敛、streaming 连接异常关闭错误回调与停止时已观察文本保全契约
 text-cleaner.test.ts: 日语转写文本清洗与规整契约
 home-stt.test.ts: 首页中文 STT 的既有文字保全、迟到结果、取消离页、冲突切换与 300 字上限契约
 session-complete-offline.test.ts: 完成页重做 STT/token/共享流录音确认保存、离线中断废弃、转写保全、文字回退、懒播放 URL 回收与迟到结果隔离契约
@@ -23,6 +23,7 @@ scenario-draft-task.test.ts: 首页场景草稿未完成请求封套持久化、
 home-practice-recovery.test.ts: 首页同场景复练准备恢复的 round-trip、viewed、非法存储与清理纯逻辑契约
 tts-errors.test.ts: TTS 错误分类与界面恢复语义契约
 voice-turn-controller.test.ts: 用户语音回合状态机、最终文本校验与录音启动锁契约
+voice-turn-error.test.ts: 录音建立后 STT 异常关闭进入可重试 error 阶段、旧会话代际隔离与失败路径不保留临时录音契约
 
 practice-history.test.ts: 浏览器历史提交失败、字段边界与完整场景隔离契约
 voice-recordings.test.ts: 本机录音开关、MIME 优先级、暂存 Blob 与重录废弃契约
