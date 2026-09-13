@@ -286,8 +286,8 @@ completed 必须有引用，引用仅来自同轮 userConfirmed，不可引用�
 
 【事実境界】
 1. outcome は唯一の coreGoal、completionRules、userConfirmed の証拠だけで completed / partial / not_completed / insufficient_evidence から選ぶ。証拠不足なら completed にしない。
-2. outcomeEvidenceZh 必须逐字引用至少一条实在的 userConfirmed，并简洁说明它如何支持 outcome，或还缺少什么事实。不得架空达成，必须保留被引用确认稿的原文。
-3. listeningFinding は rerecordCount、partnerAudioPlayCount、ttsReplayCount、transcriptRevealed、listeningScaffoldLevel、failureCount、retryCount、textFallback、speechAssistUsed という観測事実だけに基づける。根拠がなければ null にする。evidenceZh は必ず「第N轮」と、そのターンの実在する記録値を含める。聴解力や能力を推測しない。
+2. outcomeEvidenceZh 必须完整原样包含至少一条 userConfirmed 的整句：从第一个字符到最后一个字符，含句末标点，中间不得省略、改写或重新断句；随后再简洁说明它如何支持 outcome，或还缺少什么事实。只取句中的一段、丢掉句末标点或改动用字都不合格。不得架空达成。
+3. listeningFinding は rerecordCount、partnerAudioPlayCount、ttsReplayCount、transcriptRevealed、listeningScaffoldLevel、failureCount、retryCount、textFallback、speechAssistUsed という観測事実だけに基づける。根拠がなければ null にする。聴解力や能力を推測しない。evidenceZh は必ず「第N轮」を含み、さらに次の表記のまま、そのターンの実在する記録値を最低一つ含める: 回数は「<記録値>次」、聴解支架レベルは「L<0-4>」、原文表示ありは「台词」、文字入力は「文本」。記録値は入力コンテキストの数値をそのまま使い、既定値から動いている記録を優先する。フィールド名だけ、または「次」「L」を伴わない素の数字だけでは不合格となる。
 4. speechAssistUsed=true は、そのターンでリアルタイム継続ガイダンスが画面に表示され、ユーザーがそれを可視的に利用したことを意味する。このターンを「支架なし」「表現支架未使用」と記述してはいけない。speechAssistUsed=false はリアルタイム継続ガイダンスが表示されなかったことだけを意味し、記録された他フィールド以外の支架もなかった証拠にはならない。
 5. expressionImprovement を出す場合、turn は実在するターン、userConfirmedJa はそのターンの userConfirmed と完全一致させる。suggestedJa は意図を変えない簡潔な改善にする。改善根拠がなければ null にする。
 6. redoTask の turn、partnerPromptJa、firstConfirmedJa は同じ実在ターンの値と完全一致させる。ユーザー開場の第1ターンでは partnerPromptJa は null のままにし、directionZh は「相手への返答」ではなく自然な用件の切り出しを助ける中国語の表現方向にする。
@@ -296,11 +296,11 @@ completed 必须有引用，引用仅来自同轮 userConfirmed，不可引用�
 【出力JSONスキーマ】
 {
 ${evaluationOutputExample}${performanceOutputExample}  "outcome": "completed | partial | not_completed | insufficient_evidence",
-  "outcomeEvidenceZh": "事実に基づく簡潔な中国語",
+  "outcomeEvidenceZh": "某条 userConfirmed 的整句逐字原文（含句末标点）+ 简短中文说明",
   "listeningFinding": null | {
     "turn": 1,
     "findingZh": "観測可能な支架利用についての中国語",
-    "evidenceZh": "そのターンの回数・開示・レベル等の具体的事実"
+    "evidenceZh": "「第N轮」を含み、かつ「<記録値>次」「L<0-4>」「台词」「文本」のいずれかを最低一つ含む具体的事実"
   },
   "expressionImprovement": null | {
     "turn": 1,

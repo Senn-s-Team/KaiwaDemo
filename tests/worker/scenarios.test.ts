@@ -200,6 +200,43 @@ describe('dynamic scenario prompts', () => {
     expect(legacyPrompt).not.toContain('"evidenceResults":')
   })
 
+  it('declares the listening evidence notation and whole-utterance quotation the feedback validator enforces', () => {
+    const request = {
+      scenarioType: 'dynamic' as const,
+      sessionToken: 'signed-session-token',
+      turnRecords: [{
+        turn: 1,
+        partnerPromptJa: null,
+        userOriginal: '',
+        userCleaned: '',
+        userConfirmed: 'すみません、忘れ物をしたかもしれません。',
+        inputMode: 'text' as const,
+        transcriptModified: false,
+        rerecordCount: 0,
+        partnerAudioPlayCount: 0,
+        ttsReplayCount: 0,
+        transcriptRevealed: false,
+        listeningScaffoldLevel: 0 as const,
+        expressionScaffoldLevel: 0 as const,
+        failureCount: 0,
+        retryCount: 0,
+        textFallback: true,
+        speechAssistUsed: false,
+      }],
+    }
+    const prompt = buildFeedbackPrompt(scenario, request)
+
+    // 校验器只认这些记法：字段名和裸数字会让证据无法核对，所以提示词必须把它们写成明文契约。
+    expect(prompt).toContain('<記録値>次')
+    expect(prompt).toContain('L<0-4>')
+    expect(prompt).toContain('台词')
+    expect(prompt).toContain('文本')
+    expect(prompt).toContain('フィールド名だけ')
+    // outcomeEvidenceZh 必须整句原样，这条要求同样不能只存在于校验器里。
+    expect(prompt).toContain('从第一个字符到最后一个字符')
+    expect(prompt).toContain('含句末标点')
+  })
+
   it('builds a four-field expression scaffold prompt', () => {
     const prompt = buildHintPrompt(scenario, null, [])
     expect(prompt).toContain('directionZh')

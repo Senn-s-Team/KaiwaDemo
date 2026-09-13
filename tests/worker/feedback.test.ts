@@ -10,7 +10,7 @@ import { executeFeedbackTask } from '../../worker/feedback-task-execute'
 import { handleFeedbackTaskGet, handleFeedbackTaskPost } from '../../worker/feedback-task'
 import type { Env } from '../../worker/env'
 import { signSessionToken } from '../../worker/tokens'
-import { parseConversationFeedbackRequest } from '../../worker/validation'
+import { parseConversationFeedbackRequest, parseConversationFeedbackResponse } from '../../worker/validation'
 import type {
   ConversationFeedbackRequest,
   ConversationFeedbackResponse,
@@ -381,5 +381,45 @@ describe('versioned evidence validation', () => {
     const assistantOnly = structuredClone(grounded)
     assistantOnly.performance!.dimensions.expressionClarity.evidence = [{ turn: 1, role: 'assistant', quoteJa: scenarioOpeningLine }]
     expect(() => parseConversationFeedbackResponse(assistantOnly, records, scenario, true)).toThrow()
+  })
+
+  it('accepts only the recorded-value notation for listening evidence and whole utterances for the outcome', () => {
+    const records = [
+      turnRecord(1, { inputMode: 'text', textFallback: true }),
+      turnRecord(2, { listeningScaffoldLevel: 3, ttsReplayCount: 1, partnerAudioPlayCount: 2, transcriptRevealed: true }),
+    ]
+    const grounded = validFeedback(records)
+    const withFinding = (turn: number, evidenceZh: string) =>
+      ({ ...grounded, listeningFinding: { turn, findingZh: '该轮展开了帮助。', evidenceZh } })
+
+    // 提示词声明的记法：回数は「N次」、レベルは「L<0-4>」、原文表示は「台词」、文字入力は「文本」。
+    for (const [turn, evidenceZh] of [
+      [2, '第2轮：重听2次，台词已展开（L3）。'],
+      [2, '第2轮记录为L3。'],
+      [2, '第2轮重听1次。'],
+      [1, '第1轮为文本输入。'],
+    ] as const) {
+      expect(parseConversationFeedbackResponse(withFinding(turn, evidenceZh), records, scenario, true).listeningFinding?.evidenceZh).toBe(evidenceZh)
+    }
+
+    // 字段名与裸数字是模型最容易写出的形式，但没有任何可核对记法，必须拒绝。
+    for (const evidenceZh of [
+      '第2轮中 partnerAudioPlayCount 为 2，listeningScaffoldLevel 为 3。',
+      '第2轮重听了2回，听力等级3。',
+      '第2轮有支架使用。',
+    ]) {
+      expect(() => parseConversationFeedbackResponse(withFinding(2, evidenceZh), records, scenario, true)).toThrow()
+    }
+
+    // outcomeEvidenceZh 必须整句原样，截断或丢弃句末标点都不合格。
+    const fullUtterance = records[1]!.userConfirmed
+    expect(parseConversationFeedbackResponse({ ...grounded, outcomeEvidenceZh: `第2轮「${fullUtterance}」说明了特征。` }, records, scenario, true).outcome).toBe('completed')
+    for (const outcomeEvidenceZh of [
+      `第2轮「${fullUtterance.slice(0, -1)}」说明了特征。`,
+      `第2轮「${fullUtterance.slice(0, 6)}」说明了特征。`,
+      '两轮都完成了目标。',
+    ]) {
+      expect(() => parseConversationFeedbackResponse({ ...grounded, outcomeEvidenceZh }, records, scenario, true)).toThrow()
+    }
   })
 })
