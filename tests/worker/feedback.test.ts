@@ -1,6 +1,6 @@
 /**
  * [INPUT]: Worker 反馈路由、模型响应与签名会话
- * [OUTPUT]: 验证逐项评价版本、真实引用与回退事实
+ * [OUTPUT]: 验证双开场 nullable 相手事实、逐项评价版本、真实引用与回退事实
  * [POS]: tests/worker 的反馈与重做契约测试
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -10,6 +10,7 @@ import { executeFeedbackTask } from '../../worker/feedback-task-execute'
 import { handleFeedbackTaskGet, handleFeedbackTaskPost } from '../../worker/feedback-task'
 import type { Env } from '../../worker/env'
 import { signSessionToken } from '../../worker/tokens'
+import { parseConversationFeedbackRequest } from '../../worker/validation'
 import type {
   ConversationFeedbackRequest,
   ConversationFeedbackResponse,
@@ -75,11 +76,11 @@ const scenario: DynamicScenarioDefinition = {
   userRole: '宿泊客',
   relationship: '初対面の接客',
   tone: '丁寧体',
-  firstLine: 'いらっしゃいませ。チェックインでございますか？',
+  opening: { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。チェックインでございますか？', planZh: '根据客人到达前台这一可观察事实迎客。' },
   userGoal: '用日语完成酒店入住。',
   coreGoal: { id: 'checkin', titleZh: '完成入住', descriptionZh: '告知预订姓名并明确提出入住请求。' },
   communicationFunction: '在酒店前台确认预订信息并提出入住请求。',
-  initialFacts: ['用户已预订当日一晚住宿', '入住办理从15时开始'],
+  initialFacts: ['用户正在酒店前台', '入住办理从15时开始'],
   partnerPrivateFacts: ['前台可通过预订姓名核对订单'],
   keyIntents: ['告知预订姓名', '明确提出办理入住'],
   keyInformation: ['预订姓名为田中', '住宿一晚'],
@@ -90,18 +91,27 @@ const scenario: DynamicScenarioDefinition = {
   },
   closingRules: ['确认预订姓名和住宿晚数后结束办理'],
   maxTurns: 5,
-  partnerOpeningPlan: '先确认客人是否要办理入住，再依次核对预订姓名和住宿晚数。',
   worldAnchors: ['チェックインは15時から'],
   followUpPrinciples: ['一つずつ確認する', '第4ターンから収束する'],
   hintStrategy: '先说明姓名，再提出入住请求。',
   feedbackFocus: ['请求是否清楚', '支架使用事实'],
   safetyBoundary: '不索取真实证件号码或支付信息。',
 }
+const scenarioOpeningLine = scenario.opening.speaker === 'assistant'
+  ? scenario.opening.partnerLineJa
+  : (() => { throw new Error('Feedback fixture requires assistant opening.') })()
+
+const userOpeningScenario: DynamicScenarioDefinition = {
+  ...scenario,
+  id: 'dynamic-lost-item',
+  opening: { speaker: 'user', planZh: '用户先说明遗失物品并请求查询。' },
+  userGoal: '说明遗失物品并请求查询。',
+}
 
 function turnRecord(turn: number, overrides: Partial<FeedbackTurnRecord> = {}): FeedbackTurnRecord {
   return {
     turn,
-    partnerPromptJa: turn === 1 ? scenario.firstLine : `第${turn}ターンの相手発話です。`,
+    partnerPromptJa: turn === 1 ? scenarioOpeningLine : `第${turn}ターンの相手発話です。`,
     userOriginal: `第${turn}轮原始转写`,
     userCleaned: `第${turn}轮整理稿`,
     userConfirmed: turn === 1 ? '田中です。チェックインをお願いします。' : `第${turn}ターンの確認稿です。`,
@@ -180,6 +190,26 @@ afterEach(() => {
 })
 
 describe('POST /api/conversation/feedback', () => {
+  it('accepts a user-opening first record without partner audio facts', async () => {
+    const userToken = await signSessionToken(env, { scenario: userOpeningScenario, startedAt: Date.now(), expiresAt: Date.now() + 3_600_000 })
+    const records = [
+      turnRecord(1, { partnerPromptJa: null, partnerAudioPlayCount: 0 }),
+      turnRecord(2),
+    ]
+    const response = await fetchWorker(post('/api/conversation/feedback', {
+      scenarioType: 'dynamic', sessionToken: userToken, turnRecords: records,
+    }), { ALLOW_MOCK: 'true', SCENARIO_SIGNING_SECRET: env.SCENARIO_SIGNING_SECRET })
+    expect(response.status).toBe(200)
+    const body = await response.json() as ConversationFeedbackResponse
+    expect(body.redoTask.partnerPromptJa).toBe(records[1]!.partnerPromptJa)
+    expect(() => parseConversationFeedbackRequest({ scenarioType: 'dynamic', sessionToken: userToken, turnRecords: [
+      records[0], { ...records[1]!, partnerPromptJa: null },
+    ] })).toThrow()
+    expect(() => parseConversationFeedbackRequest({ scenarioType: 'dynamic', sessionToken: userToken, turnRecords: [
+      { ...records[0]!, listeningScaffoldLevel: 1, ttsReplayCount: 1, partnerAudioPlayCount: 1 }, records[1],
+    ] })).toThrow()
+  })
+
   it('returns conservative mock feedback instead of inventing completion', async () => {
     const request = await feedbackRequest()
     const response = await fetchWorker(post('/api/conversation/feedback', request), {
@@ -262,7 +292,7 @@ describe('POST /api/conversation/redo-feedback', () => {
       scenarioType: 'dynamic',
       sessionToken: await sessionToken(),
       turn: 1,
-      partnerPromptJa: scenario.firstLine,
+      partnerPromptJa: scenarioOpeningLine,
       firstConfirmedJa: '田中です。チェックインをお願いします。',
       secondConfirmedJa: '予約している田中と申します。チェックインをお願いいたします。',
       secondInputMode: 'stt',
@@ -329,7 +359,7 @@ describe('versioned evidence validation', () => {
       { ...feedback, evidenceResults: [...feedback.evidenceResults, ...feedback.evidenceResults] },
       { ...feedback, evidenceResults: [{ ...feedback.evidenceResults[0], evidence: [] }] },
       { ...feedback, evidenceResults: [{ ...feedback.evidenceResults[0], evidence: [{ turn: 1, quoteJa: '架空の発話' }] }] },
-      { ...feedback, evidenceResults: [{ ...feedback.evidenceResults[0], evidence: [{ turn: 1, quoteJa: scenario.firstLine }] }] },
+      { ...feedback, evidenceResults: [{ ...feedback.evidenceResults[0], evidence: [{ turn: 1, quoteJa: scenarioOpeningLine }] }] },
     ]) expect(() => parseConversationFeedbackResponse(changed, records, rubricScenario)).toThrow()
     expect(() => parseConversationFeedbackResponse(feedback, records, scenario)).toThrow()
     expect(parseConversationFeedbackResponse({ ...feedback, evidenceResults: [{ pointId: scenario.coreGoal.id, status: 'not_observed', evidence: [] }] }, records, rubricScenario).evidenceResults?.[0]?.status).toBe('not_observed')
@@ -349,7 +379,7 @@ describe('versioned evidence validation', () => {
     forged.performance!.dimensions.responseRelevance.evidence[0] = { turn: 1, role: 'assistant', quoteJa: '架空の相手发话' }
     expect(() => parseConversationFeedbackResponse(forged, records, scenario, true)).toThrow()
     const assistantOnly = structuredClone(grounded)
-    assistantOnly.performance!.dimensions.expressionClarity.evidence = [{ turn: 1, role: 'assistant', quoteJa: records[0]!.partnerPromptJa }]
+    assistantOnly.performance!.dimensions.expressionClarity.evidence = [{ turn: 1, role: 'assistant', quoteJa: scenarioOpeningLine }]
     expect(() => parseConversationFeedbackResponse(assistantOnly, records, scenario, true)).toThrow()
   })
 })

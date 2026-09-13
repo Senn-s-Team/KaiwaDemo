@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖场景证据标准、会话回合与反馈引用，以及本机历史记录
- * [OUTPUT]: 提供基于真实引用的表现事实及同场景首次有效练习对比，不生成能力分数
+ * [INPUT]: 依赖场景证据标准、含 nullable 相手发话的会话回合与反馈引用，以及本机历史记录
+ * [OUTPUT]: 提供基于真实存在引用的表现事实及同场景首次有效练习对比，不生成能力分数或相手占位证据
  * [POS]: src/lib 的保守评价纯函数，隔离模型结论与程序可观察的帮助事实
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -31,7 +31,7 @@ function expressionHelpUsed(round: RoundRecord): boolean {
 function uncertainRound(round: RoundRecord): boolean {
   return round.inputMode !== 'stt' || round.transcriptModified || round.transcriptModificationCount > 0
     || round.rerecordCount > 0 || round.failureCount > 0 || round.retryCount > 0
-    || round.timing.audioCompletedAt === null
+    || (round.partnerPromptJa !== null && round.timing.audioCompletedAt === null)
 }
 
 function validatedPerformance(attempt: PracticeAttempt): ConversationPerformance | null {
@@ -42,7 +42,7 @@ function validatedPerformance(attempt: PracticeAttempt): ConversationPerformance
   const citationsValid = dimensions.every((dimension) => {
     return dimension.evidence.every((evidence) => {
       const round = attempt.report.rounds.find(item => item.turn === evidence.turn)
-      const source = evidence.role === 'assistant' ? round?.aiPrompt : round?.userFinal
+      const source = evidence.role === 'assistant' ? round?.partnerPromptJa : round?.userFinal
       return Boolean(source?.includes(evidence.quoteJa))
     })
   })

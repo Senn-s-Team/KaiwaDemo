@@ -1,11 +1,14 @@
 /**
- * [INPUT]: 依赖浏览器会话编排、动态场景协议、共享听力支架协议与语音续说辅助观测数据
- * [OUTPUT]: 提供可选版本化证据、长期复练凭据与旧单场兼容类型；对外提供前端会话、四级支架、反馈、恢复、指标与报告领域类型
+ * [INPUT]: 依赖浏览器会话编排、shared 判别式动态场景开场协议、共享听力支架协议与语音续说辅助观测数据
+ * [OUTPUT]: 提供可选版本化证据、长期复练凭据；对外提供前端双开场会话、四级支架、反馈、恢复、指标与报告领域类型
  * [POS]: src 的前端领域类型总入口，统一动态会话与可序列化消息缓存的数据形状；不含遥测凭据
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import type { ListeningScaffoldResponse } from '../shared/listening-scaffold'
 import type { ConversationPerformance } from '../shared/feedback-task'
+import type { ScenarioOpening } from '../shared/scenario-draft'
+
+export type { ScenarioOpening }
 
 export type AppPhase =
   | 'loading_config'
@@ -51,7 +54,7 @@ export interface DynamicScenarioData {
   userRole: string
   relationship: string
   tone: string
-  firstLine: string
+  opening: ScenarioOpening
   userGoal: string
   coreGoal: TrainingGoal
   communicationFunction: string
@@ -66,7 +69,6 @@ export interface DynamicScenarioData {
   }
   closingRules: readonly string[]
   maxTurns: 5
-  partnerOpeningPlan: string
   worldAnchors: readonly string[]
   followUpPrinciples: readonly string[]
   hintStrategy: string
@@ -78,7 +80,6 @@ export interface SessionScenario {
   id: string
   version: number
   variantId: string
-  firstLine: string
   maxTurns: 5
   reveal: ScenarioReveal
   scenarioType: 'dynamic'
@@ -141,7 +142,7 @@ export interface PreviousAdvice {
 
 export interface RedoTask {
   turn: number
-  partnerPromptJa: string
+  partnerPromptJa: string | null
   firstConfirmedJa: string
   directionZh: string
 }
@@ -165,7 +166,7 @@ export interface ConversationFeedbackResponse {
 
 export interface FeedbackTranscriptRecord {
   turn: number
-  partnerPromptJa: string
+  partnerPromptJa: string | null
   userOriginal: string
   userCleaned: string
   userConfirmed: string
@@ -193,7 +194,7 @@ export interface RedoFeedbackRequest {
   scenarioType: 'dynamic'
   sessionToken: string
   turn: number
-  partnerPromptJa: string
+  partnerPromptJa: string | null
   firstConfirmedJa: string
   secondConfirmedJa: string
   secondInputMode: 'stt' | 'text'
@@ -275,7 +276,7 @@ export interface SpeechAssistEvent {
 
 export interface RoundRecord {
   turn: number
-  aiPrompt: string
+  partnerPromptJa: string | null
   inputMode: 'stt' | 'text'
   userOriginal: string
   userCleaned: string
@@ -303,7 +304,7 @@ export interface RoundRecord {
 }
 export interface RedoRecord {
   turn: number
-  partnerPromptJa: string
+  partnerPromptJa: string | null
   firstConfirmedJa: string
   secondConfirmedJa: string
   inputMode: 'stt' | 'text'

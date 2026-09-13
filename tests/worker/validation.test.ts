@@ -115,12 +115,16 @@ describe('worker request validation', () => {
       scenarioType: 'dynamic',
       sessionToken: 'signed-session-token',
       history: [{ role: 'assistant', text: 'お飲み物はアイスコーヒーでよろしいですか？' }],
-      lastAssistantText: 'お飲み物はアイスコーヒーでよろしいですか？',
+      lastPartnerText: 'お飲み物はアイスコーヒーでよろしいですか？',
       intentionZh: '我想问换成热茶要不要加钱',
     }
     expect(parseHintRequest(valid)).toEqual(valid)
     expect(() => parseHintRequest({ ...valid, intentionZh: '' })).toThrow(ValidationError)
     expect(() => parseHintRequest({ ...valid, unexpected: true })).toThrow(ValidationError)
+    // 跨字段边界：无历史时 lastPartnerText 必须为 null 才通过。
+    expect(parseHintRequest({ ...valid, history: [], lastPartnerText: null })).toEqual({ ...valid, history: [], lastPartnerText: null })
+    // 跨字段边界：lastPartnerText 与历史最后一条 assistant 文本不一致时必须抛错。
+    expect(() => parseHintRequest({ ...valid, lastPartnerText: 'サイズはいかがなさいますか？' })).toThrow(ValidationError)
   })
 
   it('accepts only model key phrases copied from the current partner prompt', () => {

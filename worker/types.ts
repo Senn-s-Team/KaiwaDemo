@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 ../shared wire contracts 与 Worker 动态场景、会话及报告约定
- * [OUTPUT]: 除 shared/ 外的 Worker 动态场景、会话、响应与模型领域类型（会话启动含 telemetry token）
+ * [INPUT]: 依赖 ../shared wire contracts 的判别式开场、反馈与听力支架协议，以及 Worker 会话及报告约定
+ * [OUTPUT]: 除 shared/ 外的 Worker 动态场景、双开场会话、响应与模型领域类型（会话启动含 telemetry token）
  * [POS]: Worker 内部领域类型边界
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -15,6 +15,7 @@ export type {
 import type {
   FeedbackTurnRecord,
 } from '../shared/feedback-task'
+import type { ScenarioOpening } from '../shared/scenario-draft'
 
 export interface TrainingGoal {
   id: string
@@ -33,7 +34,7 @@ export interface DynamicScenarioDefinition {
   userRole: string
   relationship: string
   tone: string
-  firstLine: string
+  opening: ScenarioOpening
   userGoal: string
   coreGoal: TrainingGoal
   communicationFunction: string
@@ -48,7 +49,6 @@ export interface DynamicScenarioDefinition {
   }
   closingRules: readonly string[]
   maxTurns: 5
-  partnerOpeningPlan: string
   worldAnchors: readonly string[]
   followUpPrinciples: readonly string[]
   hintStrategy: string
@@ -131,7 +131,6 @@ export interface SessionStartResponse {
   scenarioType: 'dynamic'
   sessionToken: string
   scenario: DynamicScenarioDefinition
-  firstLine: string
   maxTurns: 5
   reveal: {
     titleZh: string
@@ -158,7 +157,7 @@ export interface HintRequest {
   scenarioType: 'dynamic'
   sessionToken: string
   history: ConversationMessage[]
-  lastAssistantText: string
+  lastPartnerText: string | null
   intentionZh?: string
 }
 
@@ -213,7 +212,7 @@ export interface FeedbackExpressionImprovement {
 
 export interface FeedbackRedoTask {
   turn: number
-  partnerPromptJa: string
+  partnerPromptJa: string | null
   firstConfirmedJa: string
   directionZh: string
 }

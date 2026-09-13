@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 Worker 环境、HTTP 边界、token、严格请求校验及各模型编排入口
- * [OUTPUT]: 对外提供配置、场景、长期复练凭据续签、会话（含 telemetry token）、回复、反馈、四级听力支架、场景润色、语音与 telemetry API 路由
+ * [INPUT]: 依赖 Worker 环境、HTTP 边界、token、判别式开场请求校验及各模型编排入口
+ * [OUTPUT]: 对外提供配置、场景、长期复练凭据续签、双开场会话（含 telemetry token）、回复、反馈、四级听力支架、场景润色、语音与 telemetry API 路由
  * [POS]: Worker 请求入口，统一执行方法、同源、JSON 大小、鉴权与错误响应边界
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -124,7 +124,6 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       sessionToken,
       telemetryToken,
       scenario: scenarioPayload.scenario,
-      firstLine: scenarioPayload.scenario.firstLine,
       maxTurns: LIMITS.maxTurns,
       reveal: {
         titleZh: scenarioPayload.scenario.titleZh,

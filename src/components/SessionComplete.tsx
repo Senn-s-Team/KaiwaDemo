@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 完成页 view model、反馈恢复状态、可选本机录音、共享麦克风流与完成页用户动作
- * [OUTPUT]: 对外提供完成页证据反馈、重做练习、表现比较、确认后本机 redo 录音与懒播放控件；独立拥有重做媒体生命周期
+ * [INPUT]: 含 nullable 相手发话的完成页 view model、反馈恢复状态、可选本机录音、共享麦克风流与完成页用户动作
+ * [OUTPUT]: 对外提供真实双开场重做、证据反馈、表现比较、确认后本机 redo 录音与懒播放控件；user-opening 首轮不提供听力操作
  * [POS]: src/components 的完成页，接收 recovery 驱动的任务状态和动作，并负责重做 STT/token、可选压缩录音的代际隔离与资源释放
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -189,6 +189,14 @@ export function SessionComplete({
     ? messages.find((message) => message.role === 'assistant' && message.turn === feedbackData.redoTask.turn)
     : undefined
   const effectiveRedoScaffold = redoScaffold ?? redoAssistantMessage?.listeningScaffold ?? null
+  /** user-opening 的复盘回合没有相手発話，重做时不得捏造重听、听力等级或台词。 */
+  const redoPartnerPromptJa = feedbackData?.redoTask.partnerPromptJa ?? null
+  const replayRedoPartner = () => {
+    const partnerPromptJa = feedbackData?.redoTask.partnerPromptJa
+    if (partnerPromptJa === null || partnerPromptJa === undefined) return
+    onReplayAi(partnerPromptJa)
+    setRedoListeningLevel((level) => level < 1 ? 1 : level)
+  }
 
 
   const startRedo = () => {
@@ -213,21 +221,24 @@ export function SessionComplete({
     redoSttRef.current = null
     setRedoState('ready')
     setRedoInputMode('stt')
-    setRedoListeningLevel(1)
+    const partnerPromptJa = feedbackData.redoTask.partnerPromptJa
+    setRedoListeningLevel(partnerPromptJa === null ? 0 : 1)
     setRedoExpressionLevel(0)
     setRedoResult(null)
     setRedoError('')
     setRedoScaffold(redoAssistantMessage?.listeningScaffold ?? null)
     setRedoScaffoldLoading(false)
     setRedoScaffoldError('')
-    onReplayAi(feedbackData.redoTask.partnerPromptJa)
+    if (partnerPromptJa !== null) onReplayAi(partnerPromptJa)
   }
 
   const advanceRedoListeningScaffold = async () => {
-    if (!feedbackData || redoScaffoldRequestInFlightRef.current) return
+    if (!feedbackData) return
+    const partnerPromptJa = feedbackData.redoTask.partnerPromptJa
+    if (partnerPromptJa === null || redoScaffoldRequestInFlightRef.current) return
     if (redoListeningLevel === 0) {
       setRedoListeningLevel(1)
-      onReplayAi(feedbackData.redoTask.partnerPromptJa)
+      onReplayAi(partnerPromptJa)
       return
     }
     if (redoListeningLevel === 1) {
@@ -247,7 +258,7 @@ export function SessionComplete({
           scenarioType: 'dynamic',
           sessionToken: scenario.sessionToken,
           turn: feedbackData.redoTask.turn,
-          partnerPromptJa: feedbackData.redoTask.partnerPromptJa,
+          partnerPromptJa,
         })
         if (!redoMountedRef.current || generation !== redoGenerationRef.current || sessionId !== expectedSessionId || !feedbackData || feedbackData.redoTask.turn !== expectedTurn) return
         setRedoScaffold(scaffold)
@@ -412,17 +423,18 @@ export function SessionComplete({
             <h2>把这一句再说顺一点</h2>
             <p lang="ja"><strong>这次回答：</strong>{feedbackData.redoTask.firstConfirmedJa}</p>
             {availableRecordingIds.has(recordingKey({ sessionId, turn: feedbackData.redoTask.turn, kind: 'redo' })) && <div className="retry-actions"><button className="text-button" type="button" onClick={() => void playLocalRecording({ sessionId, turn: feedbackData.redoTask.turn, kind: 'redo' })}>播放重做录音</button><button className="text-button" type="button" onClick={stopLocalPlayback}>停止</button></div>}
-            {redoState === 'idle' && <div className="retry-actions"><button className="primary-button" type="button" onClick={startRedo}><Volume2 size={16} /> 再练这个回合</button></div>}
+            {redoState === 'idle' && <div className="retry-actions"><button className="primary-button" type="button" onClick={startRedo}>{redoPartnerPromptJa === null ? <Mic size={16} /> : <Volume2 size={16} />} 再练这个回合</button></div>}
             {redoState === 'ready' && <div className="retry-actions"><button className="primary-button" type="button" onClick={() => void startRedoRecording()}><Mic size={16} /> 开始回答</button><button className="text-button" type="button" onClick={() => { setRedoInputMode('text'); setRedoState('confirming') }}>改用文字</button></div>}
             {(redoState === 'ready' || redoState === 'recording' || redoState === 'confirming') && (
               <div className="retry-scaffold" aria-live="polite">
-                <div className="retry-scaffold-status">
+                {redoPartnerPromptJa !== null && <div className="retry-scaffold-status">
                   <strong>{LISTENING_LEVEL_LABELS[redoListeningLevel]}</strong>
                   <span>{nextListeningAction(redoListeningLevel) ?? '已显示全部帮助'}</span>
-                </div>
+                </div>}
+                {redoPartnerPromptJa === null && <p>这是你先开场的回合，请直接重做开场表达。</p>}
                 <div className="retry-actions">
-                  <button className="text-button" type="button" onClick={() => { onReplayAi(feedbackData.redoTask.partnerPromptJa); setRedoListeningLevel((level) => level < 1 ? 1 : level) }}>从头重听</button>
-                  {nextListeningAction(redoListeningLevel) && redoListeningLevel > 0 && (
+                  {redoPartnerPromptJa !== null && <button className="text-button" type="button" onClick={replayRedoPartner}>从头重听</button>}
+                  {redoPartnerPromptJa !== null && nextListeningAction(redoListeningLevel) && redoListeningLevel > 0 && (
                     <button className="secondary-button" type="button" disabled={redoScaffoldLoading} onClick={() => void advanceRedoListeningScaffold()}>
                       {redoScaffoldLoading ? '正在获取关键信息…' : nextListeningAction(redoListeningLevel)}
                     </button>
@@ -430,20 +442,20 @@ export function SessionComplete({
                   {redoExpressionLevel === 0 && <button className="text-button" type="button" onClick={() => setRedoExpressionLevel(1)}>看表达方向</button>}
                 </div>
                 {redoScaffoldError && <p className="im-listening-error" role="alert">{redoScaffoldError} 未显示新帮助，可重试。</p>}
-                {redoListeningLevel >= 2 && effectiveRedoScaffold && (
+                {redoPartnerPromptJa !== null && redoListeningLevel >= 2 && effectiveRedoScaffold && (
                   <div className="retry-scaffold-reveal is-hint">
                     <strong>关键信息</strong>
                     <p>{effectiveRedoScaffold.keyInformationHintZh}</p>
                     <p lang="ja">原文线索：{effectiveRedoScaffold.keyPhrasesJa.join(' / ')}</p>
                   </div>
                 )}
-                {redoListeningLevel >= 3 && (
+                {redoPartnerPromptJa !== null && redoListeningLevel >= 3 && (
                   <div className="retry-scaffold-reveal">
                     <strong>日语台词</strong>
-                    <p lang="ja">{feedbackData.redoTask.partnerPromptJa}</p>
+                    <p lang="ja">{redoPartnerPromptJa}</p>
                   </div>
                 )}
-                {redoListeningLevel >= 4 && effectiveRedoScaffold && (
+                {redoPartnerPromptJa !== null && redoListeningLevel >= 4 && effectiveRedoScaffold && (
                   <div className="retry-scaffold-reveal is-intent">
                     <strong>这句话想表达</strong>
                     <p>{effectiveRedoScaffold.intentSummaryZh}</p>

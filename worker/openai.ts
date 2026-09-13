@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖共享听力支架、语音续说与场景润色契约、Worker 环境、模型配置、场景 prompt、token 校验、mock 回退、领域类型与响应校验器
- * [OUTPUT]: 提供按场景版本校验的逐项评价； 对外提供场景草拟、流式回复、提示、反馈、重做、四级听力支架、语音辅助与场景润色的 OpenAI 编排函数及场景草拟错误
+ * [INPUT]: 依赖共享听力支架、语音续说与场景润色契约、Worker 环境、判别式开场 prompt、token 校验、mock 回退、领域类型与响应校验器
+ * [OUTPUT]: 提供按真实开场与场景版本校验的逐项评价；对外提供场景草拟、流式回复、提示、反馈、重做、四级听力支架、语音辅助与场景润色的 OpenAI 编排函数及场景草拟错误
  * [POS]: worker 的模型网关层，负责请求 OpenAI、隔离听力支架上下文、归一化完整场景契约并交由严格校验
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -247,15 +247,14 @@ export function createFallbackReadyScenario(inputZh: string): DynamicScenarioDef
     relationship: '符合用户需求的礼貌关系',
     tone: '自然且符合双方社会距离的日语口语',
     communicationFunction: '在礼貌对话中提出主要需求并确认双方理解一致',
-    firstLine: 'こんにちは。今日はどのようなご用件でしょうか？',
-    partnerOpeningPlan: '以礼貌问候建立场景，并用一个开放问题邀请用户说明主要需求。',
+    opening: { speaker: 'user', planZh: '用户先用日语礼貌说明主要需求，不假定相手已经知道目标或原因。' },
     userGoal,
     coreGoal: {
       id: 'core_1',
       titleZh: '清晰传达主要需求',
       descriptionZh: `在五轮内围绕“${userGoal.slice(0, 80)}”向对方给出可确认的关键信息。`,
     },
-    initialFacts: ['这是一次固定五轮的日语口语练习', '双方需要围绕用户给出的场景需求完成对话'],
+    initialFacts: ['双方处于可以进行礼貌沟通的同一场景中'],
     partnerPrivateFacts: [],
     keyIntents: ['用户：用日语清晰表达主要需求', 'AI：确认需求并在职责范围内自然回应'],
     keyInformation: ['用户的主要需求', '相手对该需求的明确理解或回应'],
@@ -440,8 +439,13 @@ function streamResponse(stream: ReadableStream<Uint8Array>): Response {
 
 export async function streamOpenAiReply(env: Env, request: ReplyRequest, callerSignal?: AbortSignal): Promise<Response> {
   const sessionPayload = await verifySessionToken(env, request.sessionToken)
-  if (request.history[0]?.text !== sessionPayload.scenario.firstLine) {
-    throw new ValidationError('scenario_context_mismatch', 'Conversation history does not start with the scenario first line.')
+  const opening = sessionPayload.scenario.opening
+  const historyStart = request.history[0]
+  const validHistoryStart = opening.speaker === 'assistant'
+    ? historyStart?.role === 'assistant' && historyStart.text === opening.partnerLineJa
+    : historyStart?.role === 'user'
+  if (!validHistoryStart) {
+    throw new ValidationError('scenario_context_mismatch', 'Conversation history does not match the scenario opening contract.')
   }
   const model = env.OPENAI_MODEL || DEFAULT_MODELS.openai
   if (!env.OPENAI_API_KEY) {
@@ -620,8 +624,13 @@ export async function streamOpenAiReply(env: Env, request: ReplyRequest, callerS
 }
 export async function generateHint(env: Env, request: HintRequest, signal?: AbortSignal): Promise<HintResponse> {
   const sessionPayload = await verifySessionToken(env, request.sessionToken)
-  if (request.history[0]?.text !== sessionPayload.scenario.firstLine) {
-    throw new ValidationError('scenario_context_mismatch', 'Hint history does not start with the scenario first line.')
+  const opening = sessionPayload.scenario.opening
+  const historyStart = request.history[0]
+  const validHistoryStart = opening.speaker === 'assistant'
+    ? historyStart?.role === 'assistant' && historyStart.text === opening.partnerLineJa
+    : historyStart === undefined || historyStart.role === 'user'
+  if (!validHistoryStart || (request.lastPartnerText === null) !== (historyStart === undefined)) {
+    throw new ValidationError('scenario_context_mismatch', 'Hint history does not match the scenario opening contract.')
   }
   if (!env.OPENAI_API_KEY) {
     if (env.ALLOW_MOCK === 'true') {
@@ -635,7 +644,7 @@ export async function generateHint(env: Env, request: HintRequest, signal?: Abor
     throw new ScenarioDraftError('openai_unconfigured', 'OpenAI is not configured for this deployment.', 503)
   }
 
-  const prompt = buildHintPrompt(sessionPayload.scenario, request.lastAssistantText, request.history, request.intentionZh)
+  const prompt = buildHintPrompt(sessionPayload.scenario, request.lastPartnerText, request.history, request.intentionZh)
   const responsesUrl = resolveOpenAiResponsesUrl(env.OPENAI_BASE_URL)
   const isResponsesEndpoint = responsesUrl.endsWith('/responses')
 
@@ -683,8 +692,12 @@ export async function generateConversationFeedback(
   signal?: AbortSignal,
 ): Promise<ConversationFeedbackResponse> {
   const sessionPayload = await verifySessionToken(env, request.sessionToken)
-  if (request.turnRecords[0]?.partnerPromptJa !== sessionPayload.scenario.firstLine) {
-    throw new ValidationError('scenario_context_mismatch', 'Feedback records do not start with the scenario first line.')
+  const expectedOpeningPrompt = sessionPayload.scenario.opening.speaker === 'assistant'
+    ? sessionPayload.scenario.opening.partnerLineJa
+    : null
+  if (request.turnRecords[0]?.partnerPromptJa !== expectedOpeningPrompt
+    || request.turnRecords.slice(1).some((record) => record.partnerPromptJa === null)) {
+    throw new ValidationError('scenario_context_mismatch', 'Feedback records do not match the real partner turns.')
   }
 
   if (!env.OPENAI_API_KEY) {
@@ -721,8 +734,10 @@ export async function generateRedoFeedback(
   signal?: AbortSignal,
 ): Promise<RedoFeedbackResponse> {
   const sessionPayload = await verifySessionToken(env, request.sessionToken)
-  if (request.turn === 1 && request.partnerPromptJa !== sessionPayload.scenario.firstLine) {
-    throw new ValidationError('scenario_context_mismatch', 'Redo feedback does not reference the real first turn.')
+  const expectedMissingPrompt = sessionPayload.scenario.opening.speaker === 'user' && request.turn === 1
+  if ((request.partnerPromptJa === null) !== expectedMissingPrompt
+    || (request.turn === 1 && sessionPayload.scenario.opening.speaker === 'assistant' && request.partnerPromptJa !== sessionPayload.scenario.opening.partnerLineJa)) {
+    throw new ValidationError('scenario_context_mismatch', 'Redo feedback does not reference a real partner turn.')
   }
 
   if (!env.OPENAI_API_KEY) {

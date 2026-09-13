@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 活动会话 view model、控制器派生状态与会话动作
- * [OUTPUT]: 渲染活动聊天、听力支架、录音、非阻断静音保全提示、转写确认与提示/目标 sheet
+ * [INPUT]: 含判别式开场的活动会话 view model、控制器派生状态与会话动作
+ * [OUTPUT]: 渲染双开场活动聊天、仅真实相手消息的听力支架、录音、转写确认与提示/目标 sheet
  * [POS]: src/components 的活动会话纯视图；不拥有网络、存储或媒体 controller 生命周期
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -13,7 +13,7 @@ import { RealtimeSttSession } from '../lib/stt'
 import { formatRecordingTime } from '../lib/audio-feedback'
 import type { ActiveSpeechAssistState } from '../lib/speech-assist'
 import type { InterruptionRecoveryAffordances, InterruptionRecoveryEvent, InterruptionRecoveryState, InterruptionRecoveryTarget } from '../lib/session'
-import type { AppPhase, ConversationMessage, HintResponse, ListeningScaffoldLevel, PreviousAdvice, TranscriptText, UiError } from '../types'
+import type { AppPhase, ConversationMessage, HintResponse, ListeningScaffoldLevel, PreviousAdvice, ScenarioOpening, TranscriptText, UiError } from '../types'
 
 interface ListeningRequestState {
   loading: boolean
@@ -42,7 +42,7 @@ function MicIcon(): React.JSX.Element {
 
 export interface ActiveSessionModel {
   phase: AppPhase
-  scenario: { maxTurns: number; dynamicData: { aiRole: string; titleZh: string; summaryZh: string; coreGoal: { titleZh: string; descriptionZh: string } } } | null
+  scenario: { maxTurns: number; dynamicData: { aiRole: string; titleZh: string; summaryZh: string; coreGoal: { titleZh: string; descriptionZh: string }; opening: ScenarioOpening } } | null
   turn: number
   controlsLocked: boolean
   showGoalsSheet: boolean
@@ -308,7 +308,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                     {scenario?.dynamicData.aiRole ?? '相手'}
                   </h2>
                   <span className="im-top-status" aria-live="polite">
-                    {STATUS_LABELS[phase]} · 第 {turn}/{scenario?.maxTurns ?? 5} 轮
+                    {phase === 'waiting_user' && turn === 1 && scenario?.dynamicData.opening.speaker === 'user' ? '轮到你开场' : STATUS_LABELS[phase]} · 第 {turn}/{scenario?.maxTurns ?? 5} 轮
                   </span>
                 </div>
               </div>
@@ -385,6 +385,9 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
               )}
 
               <div className="im-messages-list">
+                {messages.length === 0 && scenario?.dynamicData.opening.speaker === 'user' && (
+                  <p className="im-notice-banner info" role="status">这轮由你先开场，请直接用日语说明来意。</p>
+                )}
                 {messages.map((message) => {
                   const isAssistant = message.role === 'assistant'
                   const listeningLevel = isAssistant ? getListeningLevel(message) : 0
@@ -581,7 +584,7 @@ export function ActiveSession({ model, actions, messageListRef, chatBottomRef }:
                       disabled={!online}
                     >
                       <MicIcon />
-                      <span>开始回答</span>
+                      <span>{turn === 1 && scenario?.dynamicData.opening.speaker === 'user' ? '开始开场' : '开始回答'}</span>
                     </button>
                   ) : (
                     <form

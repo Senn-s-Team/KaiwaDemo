@@ -45,7 +45,7 @@ const payload = {
 
 function snapshot(now: number, pending = {}, sessionId = 'original-session'): CompletedReviewSnapshot {
   return {
-    version: 1, sessionId, scenario: { id: 'scenario', version: 1, variantId: 'v', firstLine: 'ご希望は？', maxTurns: 5, scenarioType: 'dynamic', sessionToken: 'session-token', scenarioToken: 'scenario-token', dynamicData: {} } as never,
+    version: 1, sessionId, scenario: { id: 'scenario', version: 1, variantId: 'v', maxTurns: 5, scenarioType: 'dynamic', sessionToken: 'session-token', scenarioToken: 'scenario-token', dynamicData: { opening: { speaker: 'assistant', partnerLineJa: 'ご希望は？', planZh: '询问需求' } } } as never,
     messages: [], rounds: [], startedAt: now - 1000, endedAt: now, report: { sessionId } as never,
     feedback: null, redoRecords: [], pending,
   }
@@ -186,18 +186,18 @@ describe('completed practice rerender stability', () => {
   it('syncs one completed recovery record once across parent rerenders', async () => {
     vi.resetModules()
     const completedScenario: SessionScenario = {
-      id: 'haircut', version: 1, variantId: 'default', firstLine: 'いらっしゃいませ。今日はどうされますか。', maxTurns: 5,
+      id: 'haircut', version: 1, variantId: 'default', maxTurns: 5,
       reveal: { titleZh: '理发店', summaryZh: '说明理发要求。' }, scenarioType: 'dynamic', sessionToken: 'session-token', scenarioToken: 'scenario-token', practiceToken: 'practice-token',
       dynamicData: {
-        id: 'haircut', version: 1, titleZh: '理发店', summaryZh: '说明理发要求。', aiRole: '理发师', userRole: '顾客', relationship: '顾客与店员', tone: '礼貌', firstLine: 'いらっしゃいませ。今日はどうされますか。', userGoal: '前髪は残してください。',
+        id: 'haircut', version: 1, titleZh: '理发店', summaryZh: '说明理发要求。', aiRole: '理发师', userRole: '顾客', relationship: '顾客与店员', tone: '礼貌', opening: { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。今日はどうされますか。', planZh: '迎客并询问需求' }, userGoal: '前髪は残してください。',
         coreGoal: { id: 'request', titleZh: '说明要求', descriptionZh: '清楚说明理发要求。' }, communicationFunction: '提出要求', initialFacts: [], partnerPrivateFacts: [], keyIntents: [], keyInformation: [], completionRules: { completed: [], partial: [], notCompleted: [] }, closingRules: [], maxTurns: 5,
-        partnerOpeningPlan: '询问要求', worldAnchors: [], followUpPrinciples: [], hintStrategy: 'direct', feedbackFocus: [], safetyBoundary: 'none',
+        worldAnchors: [], followUpPrinciples: [], hintStrategy: 'direct', feedbackFocus: [], safetyBoundary: 'none',
       },
     }
-    const completedRound = createRoundRecord(1, completedScenario.firstLine, 0)
+    const completedRound = createRoundRecord(1, 'いらっしゃいませ。今日はどうされますか。', 0)
     completedRound.userOriginal = '前髪は残してください。'; completedRound.userCleaned = completedRound.userOriginal; completedRound.userFinal = completedRound.userOriginal; completedRound.inputMode = 'text'; completedRound.timing.audioStartedAt = 1; completedRound.timing.audioCompletedAt = 2
-    const redo: RedoRecord = { turn: 1, partnerPromptJa: completedScenario.firstLine, firstConfirmedJa: completedRound.userFinal, secondConfirmedJa: 'もう少し短くしてください。', inputMode: 'text', listeningScaffoldLevel: 0, expressionScaffoldLevel: 0, comparisonZh: '细节更完整。', referenceExpressionJa: 'もう少し短くしてください。' }
-    const feedback: ConversationFeedbackResponse = { outcome: 'partial', outcomeEvidenceZh: '已完成核心请求。', listeningFinding: null, expressionImprovement: null, redoTask: { turn: 1, partnerPromptJa: completedScenario.firstLine, firstConfirmedJa: completedRound.userFinal, directionZh: '补充长度细节。' } }
+    const redo: RedoRecord = { turn: 1, partnerPromptJa: 'いらっしゃいませ。今日はどうされますか。', firstConfirmedJa: completedRound.userFinal, secondConfirmedJa: 'もう少し短くしてください。', inputMode: 'text', listeningScaffoldLevel: 0, expressionScaffoldLevel: 0, comparisonZh: '细节更完整。', referenceExpressionJa: 'もう少し短くしてください。' }
+    const feedback: ConversationFeedbackResponse = { outcome: 'partial', outcomeEvidenceZh: '已完成核心请求。', listeningFinding: null, expressionImprovement: null, redoTask: { turn: 1, partnerPromptJa: 'いらっしゃいませ。今日はどうされますか。', firstConfirmedJa: completedRound.userFinal, directionZh: '补充长度细节。' } }
     const report = buildSessionReport('completed-session', 'mock', completedScenario, 1, 2, [completedRound], [redo])
     const record: CompletedReviewSnapshot = { version: 1, sessionId: 'completed-session', scenario: completedScenario, messages: [], rounds: [completedRound], startedAt: 1, endedAt: 2, report, feedback, redoRecords: [redo], pending: {} }
     const recoveryState: CompletedReviewRecoveryState = { status: 'restored', record, notice: '' }

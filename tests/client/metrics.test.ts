@@ -69,7 +69,7 @@ describe('session metrics and export facts', () => {
 
     const redo: RedoRecord = {
       turn: 1,
-      partnerPromptJa: first.aiPrompt,
+      partnerPromptJa: first.partnerPromptJa,
       firstConfirmedJa: 'はい。',
       secondConfirmedJa: 'はい、パスポートと在留カードを持っています。',
       inputMode: 'text',
@@ -119,7 +119,7 @@ describe('session metrics and export facts', () => {
   })
 
   it('preserves an unrecoverable termination reason without marking it natural', () => {
-    const report = buildSessionReport('failed-session', 'mock', scenario, 2_000, 8_000, [createRoundRecord(1, scenario.firstLine, 0)], [], 'unrecoverable_failure')
+    const report = buildSessionReport('failed-session', 'mock', scenario, 2_000, 8_000, [createRoundRecord(1, null, 0)], [], 'unrecoverable_failure')
 
     expect(report.completion).toEqual({
       maxTurns: 5,

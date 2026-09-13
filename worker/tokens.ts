@@ -1,5 +1,5 @@
 /**
- * [INPUT]: 依赖 zod、Worker 环境密钥，以及动态场景、场景/会话/任务和 telemetry token 契约
+ * [INPUT]: 依赖 zod、Worker 环境密钥，以及含判别式开场的动态场景、场景/会话/任务和 telemetry token 契约
  * [OUTPUT]: 提供各类 HMAC capability 的签发、验签、过期与域隔离
  * [POS]: Worker 的凭据边界；telemetry token 仅用于内存会话上传认证
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
@@ -41,6 +41,11 @@ const completionRulesSchema = z.object({
   notCompleted: z.array(z.string().trim().min(1)).min(1),
 }).strict()
 
+const scenarioOpeningSchema = z.discriminatedUnion('speaker', [
+  z.object({ speaker: z.literal('assistant'), partnerLineJa: z.string().trim().min(1), planZh: z.string().trim().min(1) }).strict(),
+  z.object({ speaker: z.literal('user'), planZh: z.string().trim().min(1) }).strict(),
+])
+
 const dynamicScenarioSchema = z.object({
   id: z.string().trim().min(1),
   version: z.number().int().positive(),
@@ -53,8 +58,7 @@ const dynamicScenarioSchema = z.object({
   relationship: z.string().trim().min(1),
   tone: z.string().trim().min(1),
   communicationFunction: z.string().trim().min(1),
-  firstLine: z.string().trim().min(1),
-  partnerOpeningPlan: z.string().trim().min(1),
+  opening: scenarioOpeningSchema,
   userGoal: z.string().trim().min(1),
   coreGoal: trainingGoalSchema,
   initialFacts: z.array(z.string().trim().min(1)).min(1),

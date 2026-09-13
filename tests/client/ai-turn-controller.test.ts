@@ -16,8 +16,8 @@ import type { SessionScenario } from '../../src/types'
 
 const dummyScenario: SessionScenario = {
   scenarioToken: 'test_token',
-  firstLine: 'こんにちは',
   sessionToken: 'tok',
+  id: 'sc_1', version: 1, variantId: 'test', maxTurns: 5, scenarioType: 'dynamic',
   dynamicData: {
     id: 'sc_1',
     version: 1,
@@ -27,15 +27,14 @@ const dummyScenario: SessionScenario = {
     userRole: '客',
     relationship: '接客',
     tone: '丁寧',
-    firstLine: 'こんにちは',
+    opening: { speaker: 'assistant', partnerLineJa: 'こんにちは', planZh: '迎客' },
     userGoal: 'コーヒーを注文する',
     coreGoal: { id: 'g_1', titleZh: '点咖啡', descriptionZh: '点咖啡' },
-    worldAnchors: [],
+    communicationFunction: '点单', initialFacts: ['顾客在店内'], partnerPrivateFacts: [], keyIntents: ['用户：点单'], keyInformation: ['饮品'], completionRules: { completed: ['点单'], partial: ['部分'], notCompleted: ['未点单'] }, closingRules: ['结束'], maxTurns: 5, worldAnchors: [],
     followUpPrinciples: [],
     hintStrategy: '',
-    feedbackFocus: '',
-    safetyBoundary: [],
-    recommendedMinTurns: 5,
+    feedbackFocus: [],
+    safetyBoundary: '无',
   },
   reveal: { titleZh: '测试', summaryZh: '测试' },
 }

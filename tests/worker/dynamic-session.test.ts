@@ -1,6 +1,6 @@
 /**
  * [INPUT]: Worker 路由、签名凭据与场景定义
- * [OUTPUT]: 验证固定五轮会话和原场景复练的信任边界
+ * [OUTPUT]: 验证双开场固定五次用户确认会话和原场景复练的信任边界
  * [POS]: tests/worker 的动态会话集成测试
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -40,11 +40,11 @@ const scenario: DynamicScenarioDefinition = {
   userRole: '宿泊客',
   relationship: '初対面の接客',
   tone: '丁寧体',
-  firstLine: 'いらっしゃいませ。チェックインでございますか？',
+  opening: { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。チェックインでございますか？', planZh: '以前台可观察的到店事实迎客并确认流程。' },
   userGoal: '用日语完成酒店入住。',
   coreGoal: { id: 'checkin', titleZh: '完成入住', descriptionZh: '告知预订姓名并明确提出入住请求。' },
   communicationFunction: '在酒店前台确认预订信息并提出入住请求。',
-  initialFacts: ['用户已预订当日一晚住宿', '入住办理从15时开始'],
+  initialFacts: ['用户正在酒店前台', '入住办理从15时开始'],
   partnerPrivateFacts: ['前台可通过预订姓名核对订单'],
   keyIntents: ['告知预订姓名', '明确提出办理入住'],
   keyInformation: ['预订姓名为田中', '住宿一晚'],
@@ -55,13 +55,15 @@ const scenario: DynamicScenarioDefinition = {
   },
   closingRules: ['确认预订姓名和住宿晚数后结束办理'],
   maxTurns: 5,
-  partnerOpeningPlan: '先确认客人是否要办理入住，再依次核对预订姓名和住宿晚数。',
   worldAnchors: ['チェックインは15時から'],
   followUpPrinciples: ['一つずつ確認する', '第4ターンから収束する'],
   hintStrategy: '先说明姓名，再明确提出入住请求。',
   feedbackFocus: ['请求是否清楚', '支架使用事实'],
   safetyBoundary: '不索取真实证件号码或支付信息。',
 }
+const scenarioOpeningLine = scenario.opening.speaker === 'assistant'
+  ? scenario.opening.partnerLineJa
+  : (() => { throw new Error('Dynamic session fixture requires assistant opening.') })()
 
 const practiceScenario: DynamicScenarioDefinition = {
   ...scenario,
@@ -97,12 +99,13 @@ describe('dynamic five-turn session', () => {
     const response = await fetchWorker(post('/api/session/start', { type: 'dynamic', scenarioToken }), env)
 
     expect(response.status).toBe(200)
-    await expect(response.json()).resolves.toMatchObject({
+    const body = await response.json() as Record<string, unknown>
+    expect(body).toMatchObject({
       scenarioType: 'dynamic',
       maxTurns: 5,
-      firstLine: scenario.firstLine,
       scenario,
     })
+    expect(body).not.toHaveProperty('firstLine')
   })
 
   it('renews an expired scenario through a signed practice token and starts an empty new session', async () => {
@@ -119,7 +122,7 @@ describe('dynamic five-turn session', () => {
       sessionId: firstSession.sessionId,
       turn: 1,
       history: [
-        { role: 'assistant', text: practiceScenario.firstLine },
+        { role: 'assistant', text: scenarioOpeningLine },
         { role: 'user', text: oldAnswer },
       ],
     }), env)
@@ -168,7 +171,9 @@ describe('dynamic five-turn session', () => {
       expiresAt: Date.now() + 3_600_000,
     })
     const practiceToken = await signPracticeToken(env, practiceScenario)
-    const forgedToken = `${practiceToken.slice(0, -1)}${practiceToken.endsWith('a') ? 'b' : 'a'}`
+    // 署名段末尾の base64url 文字は下位 2 ビットが切り捨てられるため、末尾だけを変えても
+    // デコード結果が同一のまま署名検証を通ってしまう。有意ビットを確実に変えるため中ほどを改竄する。
+    const forgedToken = `${practiceToken.slice(0, 20)}${practiceToken[20] === 'a' ? 'b' : 'a'}${practiceToken.slice(21)}`
 
     const wrongKind = await fetchWorker(post('/api/practice/restart', { practiceToken: scenarioToken }), env)
     const forged = await fetchWorker(post('/api/practice/restart', { practiceToken: forgedToken }), env)
@@ -216,8 +221,8 @@ describe('dynamic five-turn session', () => {
     const response = await fetchWorker(post('/api/hint', {
       scenarioType: 'dynamic',
       sessionToken: token,
-      lastAssistantText: scenario.firstLine,
-      history: [{ role: 'assistant', text: scenario.firstLine }],
+      lastPartnerText: scenarioOpeningLine,
+      history: [{ role: 'assistant', text: scenarioOpeningLine }],
     }), env)
 
     expect(response.status).toBe(200)
@@ -227,6 +232,33 @@ describe('dynamic five-turn session', () => {
       sentenceStarterJa: expect.any(String),
       fullExampleJa: expect.any(String),
     })
+  })
+
+  it('accepts a user-opening first confirmation without an assistant history item', async () => {
+    const userOpeningScenario: DynamicScenarioDefinition = {
+      ...scenario,
+      id: 'dynamic-lost-item',
+      titleZh: '车站报失',
+      opening: { speaker: 'user', planZh: '用户先说明遗失事件并请求工作人员协助。' },
+      userGoal: '询问遗失物是否被找到。',
+      initialFacts: ['双方正在车站服务窗口交谈'],
+      keyIntents: ['用户：报失并求助', 'AI：根据已确认信息协助查询'],
+    }
+    const token = await signSessionToken(env, {
+      scenario: userOpeningScenario,
+      startedAt: Date.now(),
+      expiresAt: Date.now() + 3_600_000,
+    })
+    const response = await fetchWorker(post('/api/respond', {
+      scenarioType: 'dynamic',
+      sessionToken: token,
+      sessionId: 'dynamic123456',
+      turn: 1,
+      history: [{ role: 'user', text: '傘をなくしたので、探していただけますか。' }],
+    }), env)
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain('"type":"done"')
   })
 
   it('instructs turn four to converge and turn five to close without questions or new tasks', () => {
@@ -247,7 +279,7 @@ describe('dynamic five-turn session', () => {
       sessionId: 'dynamic123456',
       turn: 5,
       history: [
-        { role: 'assistant', text: scenario.firstLine },
+        { role: 'assistant', text: scenarioOpeningLine },
         { role: 'user', text: '田中です。チェックインをお願いします。' },
         { role: 'assistant', text: 'ご予約を確認しました。' },
         { role: 'user', text: 'ありがとうございます。' },

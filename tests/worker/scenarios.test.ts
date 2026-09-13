@@ -1,13 +1,13 @@
 /**
  * [INPUT]: 场景与反馈提示词构造器
- * [OUTPUT]: 验证角色边界、五轮收束和版本化评价示例
+ * [OUTPUT]: 验证开场主动权、角色知情边界、五次用户确认收束和版本化评价示例
  * [POS]: tests/worker 的提示词契约测试
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { describe, expect, it } from 'vitest'
 import { createMockReply } from '../../worker/mock'
 import { buildDynamicDeveloperPrompt, buildFeedbackPrompt, buildHintPrompt, buildScenarioDraftPrompt } from '../../worker/scenarios'
-import type { DynamicScenarioDefinition, ReplyRequest } from '../../worker/types'
+import type { ConversationMessage, DynamicScenarioDefinition, ReplyRequest } from '../../worker/types'
 
 const scenario: DynamicScenarioDefinition = {
   id: 'dynamic-schedule-change',
@@ -19,11 +19,10 @@ const scenario: DynamicScenarioDefinition = {
   relationship: '職場の同僚',
   tone: '丁寧体',
   communicationFunction: '礼貌提出会议改期并确认双方接受的新时间',
-  firstLine: '来週の打ち合わせですが、時間の変更をご希望ですか？',
-  partnerOpeningPlan: '先说明正在讨论既有会议，再邀请用户提出一个新的具体时间。',
+  opening: { speaker: 'user', planZh: '用户先提出改期请求与候选时间。' },
   userGoal: '提出新的会议时间并获得确认。',
   coreGoal: { id: 'schedule', titleZh: '确认新时间', descriptionZh: '明确提出一个新的会议时间并确认双方理解一致。' },
-  initialFacts: ['双方原定周二下午开会', '用户需要提出改期'],
+  initialFacts: ['双方原定周二下午开会'],
   partnerPrivateFacts: ['AI一方周五下午三点可以参会'],
   keyIntents: ['用户：提出可行的新会议时间', 'AI：确认新时间是否可接受'],
   keyInformation: ['原会议时间', '用户提出的新时间', '双方对新时间的确认'],
@@ -42,9 +41,8 @@ const scenario: DynamicScenarioDefinition = {
 }
 
 function replyRequest(turn: number): ReplyRequest {
-  const history = [
-    { role: 'assistant' as const, text: scenario.firstLine },
-    { role: 'user' as const, text: '金曜日の午後三時に変更したいです。' },
+  const history: ConversationMessage[] = [
+    { role: 'user', text: '金曜日の午後三時に変更したいです。' },
   ]
   while (history.filter((item) => item.role === 'user').length < turn) {
     history.push({ role: 'assistant', text: '内容を確認しました。' })
@@ -78,7 +76,9 @@ describe('dynamic scenario prompts', () => {
     expect(prompt).toContain('"completed"')
     expect(prompt).toContain('"partial"')
     expect(prompt).toContain('"notCompleted"')
-    expect(prompt).toContain('partnerOpeningPlan')
+    expect(prompt).toContain('"opening"')
+    expect(prompt).toContain('"speaker":"assistant"')
+    expect(prompt).toContain('"speaker":"user"')
     expect(prompt).toContain('closingRules')
     expect(prompt).toContain('"maxTurns": 5')
     expect(prompt).not.toContain('recommendedMinTurns')
@@ -92,7 +92,7 @@ describe('dynamic scenario prompts', () => {
     expect(prompt).toContain(scenario.keyIntents[0])
     expect(prompt).toContain(scenario.keyInformation[0])
     expect(prompt).toContain(scenario.completionRules.completed[0])
-    expect(prompt).toContain(scenario.partnerOpeningPlan)
+    expect(prompt).toContain(scenario.opening.planZh)
     expect(prompt).toContain(scenario.closingRules[0])
   })
 
@@ -104,6 +104,15 @@ describe('dynamic scenario prompts', () => {
     expect(prompt).toContain('役割内で一つの確認質問')
     expect(prompt).toContain('事後フィードバックに任せ')
     expect(prompt).toContain('実行できない外部確認や将来の対応を約束しない')
+    expect(prompt).toContain('ユーザーの交際目標、ユーザー側の主要意図')
+    expect(prompt).toContain('経験、所有物、希望日時、理由、目的を先回りして述べてはいけません')
+  })
+
+  it('keeps private user goals out of assistant opening knowledge and limits initial facts to shared facts', () => {
+    const prompt = buildScenarioDraftPrompt({ inputZh: '我弄丢了祖母留下的红伞，想问车站人员昨晚有没有捡到。', clarifications: [] })
+    expect(prompt).toContain('报失、求助、询问、投诉、主动请求通常由 user 开场')
+    expect(prompt).toContain('用户的目标、经历、持有物、希望时间、原因和 keyIntents 不得因出现在需求里就写入 initialFacts')
+    expect(prompt).toContain('禁止让 assistant 开场提前引用或确认')
   })
 
   it('defines speechAssistUsed as asymmetric observable scaffold evidence', () => {
@@ -112,14 +121,14 @@ describe('dynamic scenario prompts', () => {
       sessionToken: 'signed-session-token',
       turnRecords: [{
         turn: 1,
-        partnerPromptJa: scenario.firstLine,
+        partnerPromptJa: null,
         userOriginal: 'ええと、金曜日の午後三時に変更したいです。',
         userCleaned: '金曜日の午後三時に変更したいです。',
         userConfirmed: '金曜日の午後三時に変更したいです。',
         inputMode: 'stt',
         transcriptModified: false,
         rerecordCount: 0,
-        partnerAudioPlayCount: 1,
+        partnerAudioPlayCount: 0,
         ttsReplayCount: 0,
         transcriptRevealed: false,
         listeningScaffoldLevel: 0,
@@ -140,8 +149,8 @@ describe('dynamic scenario prompts', () => {
   it('uses the optional learner intention while keeping the scenario facts as the boundary', () => {
     const prompt = buildHintPrompt(
       scenario,
-      scenario.firstLine,
-      [{ role: 'assistant', text: scenario.firstLine }],
+      null,
+      [],
       '我想确认改到周五下午三点是否可以',
     )
     expect(prompt).toContain('我想确认改到周五下午三点是否可以')
@@ -163,14 +172,14 @@ describe('dynamic scenario prompts', () => {
       sessionToken: 'signed-session-token',
       turnRecords: [{
         turn: 1,
-        partnerPromptJa: scenario.firstLine,
+        partnerPromptJa: null,
         userOriginal: '金曜日の午後三時に変更したいです。',
         userCleaned: '金曜日の午後三時に変更したいです。',
         userConfirmed: '金曜日の午後三時に変更したいです。',
         inputMode: 'stt' as const,
         transcriptModified: false,
         rerecordCount: 0,
-        partnerAudioPlayCount: 1,
+        partnerAudioPlayCount: 0,
         ttsReplayCount: 0,
         transcriptRevealed: false,
         listeningScaffoldLevel: 0 as const,
@@ -192,11 +201,12 @@ describe('dynamic scenario prompts', () => {
   })
 
   it('builds a four-field expression scaffold prompt', () => {
-    const prompt = buildHintPrompt(scenario, scenario.firstLine, [{ role: 'assistant', text: scenario.firstLine }])
+    const prompt = buildHintPrompt(scenario, null, [])
     expect(prompt).toContain('directionZh')
     expect(prompt).toContain('keyPhrasesJa')
     expect(prompt).toContain('sentenceStarterJa')
     expect(prompt).toContain('fullExampleJa')
+    expect(prompt).toContain('ユーザーが自然に用件を切り出す')
   })
 
   it('uses a converging fourth mock reply and a question-free final reply', () => {

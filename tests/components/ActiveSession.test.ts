@@ -26,10 +26,10 @@ import { ActiveSession, type ActiveSessionActions, type ActiveSessionModel } fro
 
 const flush = async () => { await Promise.resolve(); await Promise.resolve() }
 const click = (box: HTMLElement, text: string) => Array.from(box.querySelectorAll('button')).find((item) => item.textContent?.includes(text)) as HTMLButtonElement
-function Harness({ phase = 'waiting_user' as const, notice = '', previousAdvice = false, online = true, silencePromptVisible = false }: { phase?: ActiveSessionModel['phase']; notice?: string; previousAdvice?: boolean; online?: boolean; silencePromptVisible?: boolean }): React.JSX.Element {
+function Harness({ phase = 'waiting_user' as const, notice = '', previousAdvice = false, online = true, silencePromptVisible = false, userOpening = false }: { phase?: ActiveSessionModel['phase']; notice?: string; previousAdvice?: boolean; online?: boolean; silencePromptVisible?: boolean; userOpening?: boolean }): React.JSX.Element {
   const [sheet, setSheet] = useState(true)
   const model = {
-    phase, scenario: { maxTurns: 5, dynamicData: { aiRole: '店员', titleZh: '测试', summaryZh: '', coreGoal: { titleZh: '', descriptionZh: '' } } }, turn: 1, controlsLocked: false, showGoalsSheet: false, sessionCoreGoal: null, recoveryMessage: '', interruptionRecovery: { status: 'idle' }, interruptionRecoveryAffordances: {}, recoveryTarget: null, online, effectiveForegroundNotice: '', messages: [], listeningRequestStates: {}, activeAiMessageId: null, pausedAiMessageId: null, playedAiMessageIds: new Set(), activeError: null, activeFailedStep: null, silencePromptVisible, activeAssistIsVisible: false, activeAssistState: null, confirmedTranscript: '', interimTranscript: '', partialTranscript: '', recordingSeconds: 0, dockInputMode: 'voice', dockTextValue: '', hintData: { directionZh: '说明', keyPhrasesJa: ['料金'], sentenceStarterJa: '料金は', fullExampleJa: '追加料金はかかりますか？' }, isLoadingHint: false, hintLevel: 4, showHintSheet: sheet, showTranscriptSheet: false, manualInput: false, transcript: { rawText: '', cleanedText: '', finalText: '' }, showOriginalTranscript: false, inlineError: '', canConfirmTranscript: false, sttAvailable: true, sttModel: 'scribe', ttsAvailable: true, reviewAudioNotice: notice,
+    phase, scenario: { maxTurns: 5, dynamicData: { aiRole: '店员', titleZh: '测试', summaryZh: '', coreGoal: { titleZh: '', descriptionZh: '' }, opening: userOpening ? { speaker: 'user', planZh: '说明来意。' } : { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。', planZh: '迎客并询问需求。' } } }, turn: 1, controlsLocked: false, showGoalsSheet: false, sessionCoreGoal: null, recoveryMessage: '', interruptionRecovery: { status: 'idle' }, interruptionRecoveryAffordances: {}, recoveryTarget: null, online, effectiveForegroundNotice: '', messages: [], listeningRequestStates: {}, activeAiMessageId: null, pausedAiMessageId: null, playedAiMessageIds: new Set(), activeError: null, activeFailedStep: null, silencePromptVisible, activeAssistIsVisible: false, activeAssistState: null, confirmedTranscript: '', interimTranscript: '', partialTranscript: '', recordingSeconds: 0, dockInputMode: 'voice', dockTextValue: '', hintData: { directionZh: '说明', keyPhrasesJa: ['料金'], sentenceStarterJa: '料金は', fullExampleJa: '追加料金はかかりますか？' }, isLoadingHint: false, hintLevel: 4, showHintSheet: sheet, showTranscriptSheet: false, manualInput: false, transcript: { rawText: '', cleanedText: '', finalText: '' }, showOriginalTranscript: false, inlineError: '', canConfirmTranscript: false, sttAvailable: true, sttModel: 'scribe', ttsAvailable: true, reviewAudioNotice: notice,
     previousAdvice: previousAdvice ? { expressionImprovement: { turn: 1, userConfirmedJa: 'これをください。', suggestedJa: 'こちらをお願いします。', reasonZh: '更礼貌。' }, sourceSessionId: 'source-session', sourceStartedAt: 1, viewed: false } : undefined,
   } as ActiveSessionModel
   const actions = {
@@ -140,5 +140,15 @@ describe('ActiveSession 中文意图录音', () => {
     expect(mocks.play).toHaveBeenCalledWith('こちらをお願いします。')
     flushSync(() => root.render(createElement(Harness, { phase: 'recording', previousAdvice: true })))
     expect(click(container, '听一听').disabled).toBe(true)
+  })
+
+  it('user 开场首轮展示开场引导，而非 AI 消息与听力控件', () => {
+    flushSync(() => root.unmount()); root = createRoot(container)
+    flushSync(() => root.render(createElement(Harness, { userOpening: true })))
+    expect(container.textContent).toContain('轮到你开场')
+    expect(container.textContent).toContain('这轮由你先开场')
+    expect(container.querySelector('.im-dock-main-btn')?.textContent).toContain('开始开场')
+    expect(container.querySelector('.im-message-item.is-ai')).toBeNull()
+    expect(container.querySelector('.im-listening-controls')).toBeNull()
   })
 })

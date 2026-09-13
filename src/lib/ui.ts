@@ -1,5 +1,5 @@
 /**
- * [INPUT]: 依赖 ./api 的 ApiError、./stt 的 SttError、./tts 的 TtsError、../types 的 UiError
+ * [INPUT]: 依赖 ./api 的 ApiError、./stt 的 SttError、./tts 的 TtsError、../types 的 UiError 与会话快照完整性错误码
  * [OUTPUT]: 对外提供 formatDuration、formatClock、scenarioDraftErrorMessage 与 toUiError 错误归一化纯函数
  * [POS]: src/lib 的界面错误呈现与时间格式化工具，将各引擎与 API 底层错误映射为不泄露服务端正文、具有明确引导和恢复动作的 UiError
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
@@ -33,6 +33,9 @@ export function scenarioDraftErrorMessage(code: string): string {
 
 
 export function toUiError(error: unknown): UiError {
+  if (error && typeof error === 'object' && 'code' in error && error.code === 'session_snapshot_integrity') {
+    return { code: error.code, title: '无法恢复上次会话', message: '这次会话的本地记录不完整。请返回首页重新开始。', recovery: 'retry' }
+  }
   if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
     const code = error.code
     if (code === 'no_speech_detected') {

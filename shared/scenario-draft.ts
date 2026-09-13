@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 zod 定义场景草拟任务请求、结果与状态线协议
- * [OUTPUT]: 对外提供场景草拟任务严格 schema、推导类型及 TTL 常量
+ * [INPUT]: 依赖 zod 定义含判别式开场的场景草拟任务请求、结果与状态线协议
+ * [OUTPUT]: 对外提供含角色知情边界的场景草拟任务严格 schema、推导类型、开场判别式与其相手発話派生及 TTL 常量
  * [POS]: shared 的场景草拟 wire contract 唯一来源，供浏览器与 Worker 使用
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -12,12 +12,34 @@ const TrainingGoalSchema = z.object({
   id: z.string().trim().min(1).max(64), titleZh: z.string().trim().min(1).max(80), descriptionZh: z.string().trim().min(1).max(240),
 }).strict()
 
+export const ScenarioOpeningSchema = z.discriminatedUnion('speaker', [
+  z.object({
+    speaker: z.literal('assistant'),
+    partnerLineJa: z.string().trim().min(1).max(120),
+    planZh: z.string().trim().min(1).max(300),
+  }).strict(),
+  z.object({
+    speaker: z.literal('user'),
+    planZh: z.string().trim().min(1).max(300),
+  }).strict(),
+])
+
+export type ScenarioOpening = z.infer<typeof ScenarioOpeningSchema>
+
+/**
+ * 第 1 輪の相手発話。相手が開場する場面だけ実在し、ユーザーが開場する場面では null。
+ * 会話履歴・固定引用・重做・復元のすべてがこの一箇所を根拠にする。
+ */
+export function openingPartnerLineJa(opening: ScenarioOpening): string | null {
+  return opening.speaker === 'assistant' ? opening.partnerLineJa : null
+}
+
 export const DynamicScenarioDefinitionSchema = z.object({
   id: z.string().trim().min(1).max(64), version: z.number().int().positive(), evaluationVersion: z.number().int().positive().optional(),
   evidencePoints: z.array(TrainingGoalSchema).min(1).max(5).refine(points => new Set(points.map(p => p.id)).size === points.length).optional(),
-  titleZh: z.string().trim().min(1).max(100), summaryZh: z.string().trim().min(1).max(300), aiRole: z.string().trim().min(1).max(160), userRole: z.string().trim().min(1).max(160), relationship: z.string().trim().min(1).max(160), tone: z.string().trim().min(1).max(100), firstLine: z.string().trim().min(1).max(120), userGoal: z.string().trim().min(1).max(240), coreGoal: TrainingGoalSchema, communicationFunction: z.string().trim().min(1).max(300),
+  titleZh: z.string().trim().min(1).max(100), summaryZh: z.string().trim().min(1).max(300), aiRole: z.string().trim().min(1).max(160), userRole: z.string().trim().min(1).max(160), relationship: z.string().trim().min(1).max(160), tone: z.string().trim().min(1).max(100), opening: ScenarioOpeningSchema, userGoal: z.string().trim().min(1).max(240), coreGoal: TrainingGoalSchema, communicationFunction: z.string().trim().min(1).max(300),
   initialFacts: z.array(z.string().trim().min(1).max(240)).min(1).max(8), partnerPrivateFacts: z.array(z.string().trim().min(1).max(240)).max(8), keyIntents: z.array(z.string().trim().min(1).max(160)).min(1).max(6), keyInformation: z.array(z.string().trim().min(1).max(240)).min(1).max(8),
-  completionRules: z.object({ completed: z.array(z.string().trim().min(1).max(240)).min(1).max(6), partial: z.array(z.string().trim().min(1).max(240)).min(1).max(6), notCompleted: z.array(z.string().trim().min(1).max(240)).min(1).max(6) }).strict(), closingRules: z.array(z.string().trim().min(1).max(240)).min(1).max(5), maxTurns: z.literal(5), partnerOpeningPlan: z.string().trim().min(1).max(300), worldAnchors: z.array(z.string().trim().min(1).max(240)).min(1).max(6), followUpPrinciples: z.array(z.string().trim().min(1).max(240)).min(1).max(5), hintStrategy: z.string().trim().min(1).max(300), feedbackFocus: z.array(z.string().trim().min(1).max(160)).min(1).max(5), safetyBoundary: z.string().trim().min(1).max(300),
+  completionRules: z.object({ completed: z.array(z.string().trim().min(1).max(240)).min(1).max(6), partial: z.array(z.string().trim().min(1).max(240)).min(1).max(6), notCompleted: z.array(z.string().trim().min(1).max(240)).min(1).max(6) }).strict(), closingRules: z.array(z.string().trim().min(1).max(240)).min(1).max(5), maxTurns: z.literal(5), worldAnchors: z.array(z.string().trim().min(1).max(240)).min(1).max(6), followUpPrinciples: z.array(z.string().trim().min(1).max(240)).min(1).max(5), hintStrategy: z.string().trim().min(1).max(300), feedbackFocus: z.array(z.string().trim().min(1).max(160)).min(1).max(5), safetyBoundary: z.string().trim().min(1).max(300),
 }).strict().refine(scenario => (scenario.evaluationVersion === undefined) === (scenario.evidencePoints === undefined), 'Evaluation version and evidence points must be provided together.')
 
 const ClarificationSchema = z.object({ questionZh: z.string().trim().min(1).max(120), answerZh: z.string().trim().min(1).max(300) }).strict()

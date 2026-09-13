@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖共享听力支架与语音续说契约、其余 Worker 请求/响应类型与固定五轮限制
- * [OUTPUT]: 提供不虚构完成事实的逐项证据回退； 对外提供动态会话、会后反馈、重做反馈、四级听力支架与语音辅助的确定性 mock 响应
+ * [INPUT]: 依赖共享听力支架与语音续说契约、其余 Worker nullable 相手事实请求/响应类型与固定五轮限制
+ * [OUTPUT]: 提供不虚构完成或相手发话的逐项证据回退；对外提供双开场动态会话、反馈、重做、四级听力支架与语音辅助 mock
  * [POS]: worker 的离线开发回退层，模拟真实接口形状并在第四轮收束、第五轮无问题结束；听力支架只引用当前发话
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -66,7 +66,9 @@ export function createMockFeedback(request: ConversationFeedbackRequest, scenari
       turn: target.turn,
       partnerPromptJa: target.partnerPromptJa,
       firstConfirmedJa: target.userConfirmed,
-      directionZh: '保留原意，尝试用更具体且符合双方关系的表达完整回应。',
+      directionZh: target.partnerPromptJa === null
+        ? '保留原意，尝试用更具体且符合双方关系的表达自然切入用件。'
+        : '保留原意，尝试用更具体且符合双方关系的表达完整回应。',
     },
   }
 }

@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 ./api 的 streamReply 与 ReplyResult，./tts 的 CachedTtsPlayer/TtsCancelledError，./session 的 decideNextSessionStep/createMessageId，./metrics 的 createRoundRecord，./ui 的 toUiError
- * [OUTPUT]: 对外提供 useAiTurnController 自定义 Hook、createAiTurnRuntime（支持运行时依赖快照实时同步）、aiTurnReducer 纯状态机、含暂停/继续与录音前播放器释放的动作及相关类型
- * [POS]: src/lib 的相手 AI 回合控制器深模块，闭环拥有 LLM 流式应答、TTS 语音播放/暂停/继续/降级、五回合自然判定与回合流转
+ * [OUTPUT]: 对外提供 useAiTurnController、自包含运行时与判别式相手开场初始化动作，保持暂停/继续、播放降级及五次用户确认推进
+ * [POS]: src/lib 的相手 AI 回合控制器深模块，闭环拥有真实相手发话、TTS 语音播放/暂停/继续/降级、五次用户确认后的自然收束
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 import { useEffect, useLayoutEffect, useReducer, useState } from 'react'
@@ -193,7 +193,7 @@ export interface AiTurnActions {
   toggleExpandAiMessage: (messageId: string) => void
   toggleAiTextRevealed: () => void
   setAiTextRevealed: (revealed: boolean) => void
-  initFirstLine: (firstLine: string, operationId: number, messageId: string) => Promise<void>
+  initPartnerOpening: (partnerLineJa: string, operationId: number, messageId: string) => Promise<void>
   clearAiError: () => void
   interruptPlaybackForBackground: () => void
   resetAiTurn: () => void
@@ -587,9 +587,9 @@ export function createAiTurnRuntime(
     }
   }
 
-  const initFirstLine = async (firstLine: string, operationId: number, messageId: string) => {
-    dispatch({ type: 'LLM_SUCCESS', replyText: firstLine })
-    await playAiText(firstLine, false, operationId, messageId)
+  const initPartnerOpening = async (partnerLineJa: string, operationId: number, messageId: string) => {
+    dispatch({ type: 'LLM_SUCCESS', replyText: partnerLineJa })
+    await playAiText(partnerLineJa, false, operationId, messageId)
   }
 
   const actions: AiTurnActions = {
@@ -604,7 +604,7 @@ export function createAiTurnRuntime(
     toggleExpandAiMessage,
     toggleAiTextRevealed,
     setAiTextRevealed,
-    initFirstLine,
+    initPartnerOpening,
     clearAiError,
     interruptPlaybackForBackground,
     resetAiTurn,

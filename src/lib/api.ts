@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 zod、../types 与 shared/ 下跨端 wire schema
- * [OUTPUT]: 提供动态会话启动包装器、训练服务与严格校验的同意遥测 batch API 通信；遥测凭据不进入 SessionScenario
+ * [INPUT]: 依赖 zod、../types 与 shared/ 下含判别式开场、nullable 相手事实的跨端 wire schema
+ * [OUTPUT]: 提供双开场动态会话启动包装器、训练服务与严格校验的同意遥测 batch API 通信；遥测凭据不进入 SessionScenario
  * [POS]: src/lib 的前端 API 通信边界
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -20,6 +20,7 @@ import {
   ScenarioDraftTaskAcceptedSchema,
   ScenarioDraftTaskRequestSchema,
   ScenarioDraftTaskStatusSchema,
+  DynamicScenarioDefinitionSchema,
   type ScenarioDraftTaskAccepted,
   type ScenarioDraftTaskRequest,
   type ScenarioDraftTaskStatus,
@@ -75,6 +76,16 @@ const StreamEventSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('error'), code: z.string(), message: z.string() }),
 ])
+const SessionStartResponseSchema = z.object({
+  sessionId: z.string().min(1),
+  scenarioType: z.literal('dynamic'),
+  sessionToken: z.string().min(1),
+  telemetryToken: z.string().min(1),
+  practiceToken: z.string().min(1).optional(),
+  scenario: DynamicScenarioDefinitionSchema,
+  maxTurns: z.literal(5),
+  reveal: z.object({ titleZh: z.string().min(1), summaryZh: z.string() }).strict(),
+}).strict()
 
 export class ApiError extends Error {
   readonly code: string
@@ -126,24 +137,21 @@ export async function startScenarioSession(
     body: JSON.stringify({ type: 'dynamic', scenarioToken }),
   })
   if (!response.ok) throw await errorFromResponse(response)
-  const data = (await response.json()) as Record<string, unknown>
-  const dynamicData = data.scenario as SessionScenario['dynamicData']
+  const data = SessionStartResponseSchema.parse(await response.json())
+  const dynamicData = data.scenario
   const scenario: SessionScenario = {
     id: dynamicData.id,
     version: dynamicData.version,
     variantId: 'dynamic-variant',
-    firstLine: data.firstLine as string,
     maxTurns: 5,
     scenarioType: 'dynamic',
-    sessionToken: data.sessionToken as string,
+    sessionToken: data.sessionToken,
     scenarioToken,
-    practiceToken: data.practiceToken as string | undefined,
+    practiceToken: data.practiceToken,
     dynamicData,
-    reveal: data.reveal as SessionScenario['reveal'],
+    reveal: data.reveal,
   }
-  const telemetrySession = typeof data.sessionId === 'string' && typeof data.telemetryToken === 'string'
-    ? { sessionId: data.sessionId, telemetryToken: data.telemetryToken }
-    : null
+  const telemetrySession = { sessionId: data.sessionId, telemetryToken: data.telemetryToken }
   return { scenario, telemetrySession }
 }
 
@@ -260,7 +268,7 @@ export async function getScenarioDraftTask(
 
 export async function fetchHint(
   scenario: SessionScenario,
-  lastAssistantText: string,
+  lastPartnerText: string | null,
   history: ConversationMessage[],
   intentionZh?: string,
   signal?: AbortSignal,
@@ -268,7 +276,7 @@ export async function fetchHint(
   const body = {
     scenarioType: 'dynamic',
     sessionToken: scenario.sessionToken,
-    lastAssistantText,
+    lastPartnerText,
     history: history.map(({ role, text }) => ({ role, text })),
     ...(intentionZh?.trim() ? { intentionZh: intentionZh.trim() } : {}),
   }
@@ -307,14 +315,18 @@ export function buildFeedbackRequestPayload(
     sessionToken: scenario.sessionToken,
     turnRecords: rounds.map((record, index) => ({
       turn: record.turn || index + 1,
-      partnerPromptJa: record.aiPrompt,
+      partnerPromptJa: record.partnerPromptJa,
       userOriginal: record.userOriginal,
       userCleaned: record.userCleaned,
       userConfirmed: record.userFinal,
       inputMode: record.inputMode,
       transcriptModified: record.transcriptModified,
       rerecordCount: record.rerecordCount,
-      partnerAudioPlayCount: (record.timing.audioStartedAt === null ? 0 : 1) + record.ttsReplayCount,
+      // 相手発話は次の回合を建てる前に再生されるため、その回合の発話音声は一つ前の回合タイミングに記録される。
+      // 第 1 回合だけは開場再生が同時点で行われるため自分自身を参照する。
+      partnerAudioPlayCount: record.partnerPromptJa === null
+        ? 0
+        : ((index === 0 ? record : rounds[index - 1]).timing.audioStartedAt === null ? 0 : 1) + record.ttsReplayCount,
       ttsReplayCount: record.ttsReplayCount,
       transcriptRevealed: record.transcriptRevealed,
       listeningScaffoldLevel: record.listeningScaffoldLevel,

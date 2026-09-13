@@ -12,9 +12,9 @@ import { createRoundRecord, buildSessionReport } from '../../src/lib/metrics'
 import type { SessionScenario } from '../../src/types'
 
 const scenario = {
-  id: 'session', version: 1, variantId: 'v', firstLine: 'ご希望は？', maxTurns: 5, scenarioType: 'dynamic', sessionToken: 'token', scenarioToken: 'scenario-token', practiceToken: 'practice-token',
+  id: 'session', version: 1, variantId: 'v', maxTurns: 5, scenarioType: 'dynamic', sessionToken: 'token', scenarioToken: 'scenario-token', practiceToken: 'practice-token',
   reveal: { titleZh: '改期', summaryZh: '改约时间' },
-  dynamicData: { id: 'appointment', version: 1, evaluationVersion: 1, evidencePoints: [{ id: 'request', titleZh: '请求', descriptionZh: '提出改期' }], titleZh: '改期', summaryZh: '改约时间', aiRole: '店员', userRole: '顾客', relationship: '初见', tone: '礼貌', firstLine: 'ご希望は？', userGoal: '改期', coreGoal: { id: 'request', titleZh: '请求', descriptionZh: '提出改期' }, communicationFunction: '协商', initialFacts: [], partnerPrivateFacts: [], keyIntents: [], keyInformation: [], completionRules: { completed: [], partial: [], notCompleted: [] }, closingRules: [], maxTurns: 5, partnerOpeningPlan: '', worldAnchors: [], followUpPrinciples: [], hintStrategy: '', feedbackFocus: [], safetyBoundary: '' },
+  dynamicData: { id: 'appointment', version: 1, evaluationVersion: 1, evidencePoints: [{ id: 'request', titleZh: '请求', descriptionZh: '提出改期' }], titleZh: '改期', summaryZh: '改约时间', aiRole: '店员', userRole: '顾客', relationship: '初见', tone: '礼貌', opening: { speaker: 'assistant', partnerLineJa: 'ご希望は？', planZh: '询问需求' }, userGoal: '改期', coreGoal: { id: 'request', titleZh: '请求', descriptionZh: '提出改期' }, communicationFunction: '协商', initialFacts: [], partnerPrivateFacts: [], keyIntents: [], keyInformation: [], completionRules: { completed: [], partial: [], notCompleted: [] }, closingRules: [], maxTurns: 5, worldAnchors: [], followUpPrinciples: [], hintStrategy: '', feedbackFocus: [], safetyBoundary: '' },
 } as SessionScenario
 
 function markup(): string {

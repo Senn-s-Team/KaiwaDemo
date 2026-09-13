@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖首页/会话/复盘控制器、既有本机练习历史、可选本机录音与独立技术验证遥测出站控制器
- * [OUTPUT]: 对外提供 App 根组件，驱动训练流程、确认后本机录音保存并在稳定生命周期 seam 派生匿名技术验证 checkpoint/汇总
+ * [INPUT]: 依赖首页/双开场会话/复盘控制器、既有本机练习历史、可选本机录音与独立技术验证遥测出站控制器
+ * [OUTPUT]: 对外提供 App 根组件，按场景开场者启动五次用户确认流程，并在稳定生命周期 seam 派生匿名技术验证 checkpoint/汇总
  * [POS]: src/ 核心入口；训练状态始终独立于录音存储、遥测存储与传输失败
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -32,7 +32,8 @@ import { useSessionLifecycle } from './lib/use-session-lifecycle'
 import { useValidationLifecycle } from './lib/use-validation-lifecycle'
 import { readVoiceRecordingEnabled, writeVoiceRecordingEnabled } from './lib/voice-recordings'
 import type { ValidationTelemetrySession } from './lib/use-validation-telemetry'
-import { clearSessionSnapshot, readSessionSnapshot, removeLastSubmittedUserMessage, type SessionSnapshot } from './lib/session-snapshot'
+import { clearSessionSnapshot, readSessionSnapshot, removeLastSubmittedUserMessage, SessionSnapshotIntegrityError, type SessionSnapshot } from './lib/session-snapshot'
+import { openingPartnerLineJa } from '../shared/scenario-draft'
 import type {
   AppPhase,
   ConversationMessage,
@@ -268,7 +269,7 @@ function App() {
     resumeAiPlayback,
     skipFailedTts,
     playReviewAudio,
-    initFirstLine,
+    initPartnerOpening,
     resetAiTurn,
     dispose: disposeAiTurn,
     unlockAudio,
@@ -352,7 +353,7 @@ function App() {
             const nextTurn = snapshot.turn + 1
             const nextPrompt = restoredMessages.findLast((message) => message.role === 'assistant' && message.turn === nextTurn)?.text
               ?? restoredRound.nextAiReply
-              ?? snapshot.scenario.firstLine
+            if (!nextPrompt) throw new SessionSnapshotIntegrityError('恢复快照缺少真实相手发话。')
             restoredTurn = nextTurn
             restoredRound = createRoundRecord(nextTurn, nextPrompt, 0)
           }
@@ -449,12 +450,6 @@ function App() {
       const nextScenario = startedSession.scenario
       const id = createSessionId()
       const startedAt = Date.now()
-      const firstMessage: ConversationMessage = {
-        id: createMessageId(1, 'assistant'),
-        turn: 1,
-        role: 'assistant',
-        text: nextScenario.firstLine,
-      }
       const localScenario = previousAdvice ? { ...nextScenario, previousAdvice } : nextScenario
       setTelemetrySession(startedSession.telemetrySession)
       setScenario(localScenario)
@@ -462,13 +457,27 @@ function App() {
       setSessionId(id)
       setSessionStartedAt(startedAt)
       setTurn(1)
-      replaceMessages([firstMessage])
-      const firstRound = createRoundRecord(1, nextScenario.firstLine, 0)
+      const openingPartner = openingPartnerLineJa(nextScenario.dynamicData.opening)
+      const firstRound = createRoundRecord(1, openingPartner, 0)
       if (previousAdvice?.viewed) firstRound.expressionScaffoldLevel = 4
       replaceCurrentRound(firstRound)
       setAppForegroundNotice('')
       clearVoiceNotice()
-      await initFirstLine(nextScenario.firstLine, operationId, firstMessage.id)
+      if (openingPartner !== null) {
+        const firstMessage: ConversationMessage = {
+          id: createMessageId(1, 'assistant'),
+          turn: 1,
+          role: 'assistant',
+          text: openingPartner,
+        }
+        replaceMessages([firstMessage])
+        await initPartnerOpening(openingPartner, operationId, firstMessage.id)
+      } else {
+        replaceMessages([])
+        // user-opening 没有相手 TTS 准备阶段，启动请求完成后直接进入首轮用户回答。
+        phaseRef.current = 'waiting_user'
+        setPhase('waiting_user')
+      }
       preparedStartRef.current = null
     } catch (error) {
       if (controller.signal.aborted || !isCurrentOperation(operationId)) return
@@ -479,7 +488,7 @@ function App() {
       if (requestAbortRef.current === controller) requestAbortRef.current = null
       sessionStartLockRef.current = false
     }
-  }, [beginOperation, clearVoiceNotice, config, discardDraft, initFirstLine, isCurrentOperation, online, replaceCurrentRound, replaceMessages, resetAiTurn, resetVoiceTurn, setHintSheetVisible, syncMicrophoneReadiness, transitionTo, unlockAudio])
+  }, [beginOperation, clearVoiceNotice, config, discardDraft, initPartnerOpening, isCurrentOperation, online, replaceCurrentRound, replaceMessages, resetAiTurn, resetVoiceTurn, setHintSheetVisible, syncMicrophoneReadiness, transitionTo, unlockAudio])
   const handleRequestHint = useCallback(async (intentionZh?: string) => {
     const trimmedIntention = intentionZh?.trim()
     const nextLevel = Math.min(4, hintLevel + 1) as 0 | 1 | 2 | 3 | 4
@@ -505,7 +514,7 @@ function App() {
     }
     setIsLoadingHint(true)
     try {
-      const res = await fetchHint(scenario, currentAiText, messagesRef.current, trimmedIntention, controller.signal)
+      const res = await fetchHint(scenario, currentRoundRef.current?.partnerPromptJa ?? null, messagesRef.current, trimmedIntention, controller.signal)
       if (controller.signal.aborted || hintRequestRef.current !== controller || !hintSheetVisibleRef.current || !isCurrentOperation(requestOperation) || sessionId !== requestSessionId || turn !== requestTurn || currentRoundRef.current?.turn !== requestTurn) return
       setHintData(res)
       // 明确说出想表达的意思后，直接给完整例句；泛化求助仍按四级渐进。
@@ -525,7 +534,7 @@ function App() {
         setIsLoadingHint(false)
       }
     }
-  }, [currentAiText, hintData, hintLevel, isCurrentOperation, scenario, sessionId, touchRound, turn])
+  }, [hintData, hintLevel, isCurrentOperation, scenario, sessionId, touchRound, turn])
   const endSession = useCallback((includeConfirmedCurrent: boolean) => {
     stopActiveResources()
     const activeRound = currentRoundRef.current

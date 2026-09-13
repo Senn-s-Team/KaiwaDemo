@@ -1,6 +1,6 @@
 /**
- * [INPUT]: shared feedback task envelope、签名会话与 Workflow binding
- * [OUTPUT]: feedback/redo durable task 提交与查询 HTTP handler
+ * [INPUT]: shared nullable 相手事实 feedback task envelope、签名会话与 Workflow binding
+ * [OUTPUT]: 按判别式开场校验 feedback/redo durable task 的提交与查询 HTTP handler
  * [POS]: Node 可导入的 Worker durable task seam
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -67,8 +67,12 @@ export async function submitFeedbackTask(env: Env, request: FeedbackTaskRequest)
       throw replayError
     }
   }
-  if (parsed.kind === 'conversation' && parsed.payload.turnRecords[0]?.partnerPromptJa !== session.scenario.firstLine) throw new FeedbackTaskError('scenario_context_mismatch', 'Feedback records do not start with the scenario first line.', 400)
-  if (parsed.kind === 'redo' && parsed.payload.turn === 1 && parsed.payload.partnerPromptJa !== session.scenario.firstLine) throw new FeedbackTaskError('scenario_context_mismatch', 'Redo feedback does not reference the real first turn.', 400)
+  const expectedOpeningPrompt = session.scenario.opening.speaker === 'assistant' ? session.scenario.opening.partnerLineJa : null
+  if (parsed.kind === 'conversation' && (parsed.payload.turnRecords[0]?.partnerPromptJa !== expectedOpeningPrompt || parsed.payload.turnRecords.slice(1).some((record) => record.partnerPromptJa === null))) throw new FeedbackTaskError('scenario_context_mismatch', 'Feedback records do not match the real partner turns.', 400)
+  if (parsed.kind === 'redo') {
+    const expectedMissingPrompt = session.scenario.opening.speaker === 'user' && parsed.payload.turn === 1
+    if ((parsed.payload.partnerPromptJa === null) !== expectedMissingPrompt || (parsed.payload.turn === 1 && expectedOpeningPrompt !== null && parsed.payload.partnerPromptJa !== expectedOpeningPrompt)) throw new FeedbackTaskError('scenario_context_mismatch', 'Redo feedback does not reference a real partner turn.', 400)
+  }
   const taskId = await taskIdForFeedbackRequest(parsed)
   const taskToken = await signFeedbackTaskCapability(env, taskId, expiresAt)
   if (sessionExpired) {

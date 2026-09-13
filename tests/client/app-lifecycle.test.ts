@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 真实浏览器可见 App DOM、会话快照、visibilitychange 生命周期事件与匿名遥测控制器
- * [OUTPUT]: 锁定会话媒体/草稿生命周期、异步所有权、后台中断后的真实重试与录音入口音频解锁时序及自动匿名遥测 checkpoint seam
+ * [OUTPUT]: 锁定双开场会话状态、五次用户确认、媒体/草稿生命周期、恢复重试与自动匿名遥测 checkpoint seam
  * [POS]: tests/client 的 App 根组件生命周期集成回归契约
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -27,7 +27,6 @@ const scenario: SessionScenario = {
   id: 'haircut',
   version: 1,
   variantId: 'default',
-  firstLine: 'いらっしゃいませ。今日はどうされましたか。',
   maxTurns: 5,
   reveal: { titleZh: '理发店', summaryZh: '说明你的理发要求。' },
   scenarioType: 'dynamic',
@@ -35,19 +34,36 @@ const scenario: SessionScenario = {
   scenarioToken: 'scenario-token',
   dynamicData: {
     id: 'haircut', version: 1, titleZh: '理发店', summaryZh: '说明你的理发要求。', aiRole: '理发师', userRole: '顾客', relationship: '顾客与店员', tone: '礼貌',
-    firstLine: 'いらっしゃいませ。今日はどうされましたか。', userGoal: '我想剪短一点，但不要露出额头。',
+    opening: { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。今日はどうされましたか。', planZh: '根据顾客到店这一可观察事实迎客并询问需求。' }, userGoal: '我想剪短一点，但不要露出额头。',
     coreGoal: { id: 'goal', titleZh: '说明要求', descriptionZh: '清楚说明理发要求。' }, communicationFunction: '提出要求',
     initialFacts: [], partnerPrivateFacts: [], keyIntents: [], keyInformation: [], completionRules: { completed: [], partial: [], notCompleted: [] }, closingRules: [], maxTurns: 5,
-    partnerOpeningPlan: '询问要求', worldAnchors: [], followUpPrinciples: [], hintStrategy: 'direct', feedbackFocus: [], safetyBoundary: 'none',
+    worldAnchors: [], followUpPrinciples: [], hintStrategy: 'direct', feedbackFocus: [], safetyBoundary: 'none',
   },
+}
+const assistantOpeningLine = scenario.dynamicData.opening.speaker === 'assistant'
+  ? scenario.dynamicData.opening.partnerLineJa
+  : (() => { throw new Error('App lifecycle fixture requires assistant opening.') })()
+
+const userOpeningScenario: SessionScenario = {
+  ...scenario,
+  dynamicData: { ...scenario.dynamicData, opening: { speaker: 'user', planZh: '用户先说明需求并请求帮助。' } },
 }
 
 function installSessionSnapshot(): void {
   window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({
     version: 1, phase: 'confirming_transcript', sessionId: 'session-id', scenario,
-    messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }], rounds: [],
-    currentRound: createRoundRecord(1, scenario.firstLine, 0), turn: 1, sessionStartedAt: 1,
+    messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: assistantOpeningLine }], rounds: [],
+    currentRound: createRoundRecord(1, assistantOpeningLine, 0), turn: 1, sessionStartedAt: 1,
     transcript: { rawText: '前髪は残して、少し短くしてください。', cleanedText: '前髪は残して、少し短くしてください。', finalText: '前髪は残して、少し短くしてください。' },
+  }))
+}
+
+function installUserOpeningSnapshot(): void {
+  const round = createRoundRecord(1, null, 0)
+  window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({
+    version: 1, phase: 'waiting_user', sessionId: 'user-opening-session', scenario: userOpeningScenario,
+    messages: [], rounds: [], currentRound: round, turn: 1, sessionStartedAt: 1,
+    transcript: { rawText: '', cleanedText: '', finalText: '' },
   }))
 }
 
@@ -69,13 +85,13 @@ function deferred<T>() {
 }
 
 function installWaitingSessionSnapshot(listeningScaffoldLevel = 0): void {
-  const round = createRoundRecord(1, scenario.firstLine, 0)
+  const round = createRoundRecord(1, assistantOpeningLine, 0)
   round.listeningScaffoldLevel = listeningScaffoldLevel
   round.timing.audioStartedAt = 1
   round.timing.audioCompletedAt = 2
   window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({
     version: 1, phase: 'waiting_user', sessionId: 'guard-session', scenario,
-    messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }], rounds: [],
+    messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: assistantOpeningLine }], rounds: [],
     currentRound: round, turn: 1, sessionStartedAt: 1,
     transcript: { rawText: '', cleanedText: '', finalText: '' },
   }))
@@ -142,7 +158,7 @@ describe('App lifecycle integration', () => {
     listPracticeAttempts = vi.fn().mockResolvedValue([])
     const feedbackResult = {
       outcome: 'partial', outcomeEvidenceZh: '已完成一项沟通目标。', listeningFinding: null, expressionImprovement: null,
-      redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', directionZh: '保留请求并补充细节。' },
+      redoTask: { turn: 1, partnerPromptJa: assistantOpeningLine, firstConfirmedJa: '前髪は残してください。', directionZh: '保留请求并补充细节。' },
     }
     vi.doMock('../../src/lib/api', async () => ({
       ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')),
@@ -401,8 +417,8 @@ describe('App config lifecycle regression', () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
     const attempt: StoredPracticeAttempt = {
       scenario: scenario.dynamicData, practiceToken: 'practice-token', scenarioKey: 'haircut-key',
-      report: buildSessionReport('source-session', 'mock', scenario, 123, 456, [createRoundRecord(1, scenario.firstLine, 0)]),
-      feedback: { outcome: 'partial', outcomeEvidenceZh: '', listeningFinding: null, expressionImprovement: { turn: 1, userConfirmedJa: 'これをください。', suggestedJa: 'こちらをお願いします。', reasonZh: '更礼貌。' }, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: 'これをください。', directionZh: '' } },
+      report: buildSessionReport('source-session', 'mock', scenario, 123, 456, [createRoundRecord(1, assistantOpeningLine, 0)]),
+      feedback: { outcome: 'partial', outcomeEvidenceZh: '', listeningFinding: null, expressionImprovement: { turn: 1, userConfirmedJa: 'これをください。', suggestedJa: 'こちらをお願いします。', reasonZh: '更礼貌。' }, redoTask: { turn: 1, partnerPromptJa: assistantOpeningLine, firstConfirmedJa: 'これをください。', directionZh: '' } },
     }
     vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }), restartPractice: vi.fn().mockResolvedValue({ scenario: scenario.dynamicData, scenarioToken: 'repeat-token', practiceToken: 'practice-token' }), startScenarioSession: vi.fn().mockResolvedValue({ scenario: { ...scenario, scenarioToken: 'repeat-token' }, telemetrySession: null }) }))
     vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([attempt]) }))
@@ -457,7 +473,7 @@ describe('App config lifecycle regression', () => {
   it('恢复带建议的快照，且兼容旧快照并拒绝无效建议', async () => {
     vi.resetModules(); window.sessionStorage.clear(); Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
     const advice = { expressionImprovement: { turn: 1, userConfirmedJa: 'これ', suggestedJa: 'こちら', reasonZh: '更礼貌。' }, sourceSessionId: 'source', sourceStartedAt: 1, viewed: true }
-    const snapshot = { version: 1, phase: 'waiting_user', sessionId: 'restored', scenario: { ...scenario, previousAdvice: advice }, messages: [], rounds: [], currentRound: createRoundRecord(1, scenario.firstLine, 0), turn: 1, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' } }
+    const snapshot = { version: 1, phase: 'waiting_user', sessionId: 'restored', scenario: { ...scenario, previousAdvice: advice }, messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: assistantOpeningLine }], rounds: [], currentRound: createRoundRecord(1, assistantOpeningLine, 0), turn: 1, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' } }
     window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify(snapshot))
     vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }) }))
     vi.doMock('../../src/lib/practice-history', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/practice-history')>('../../src/lib/practice-history')), listPracticeAttempts: vi.fn().mockResolvedValue([]) }))
@@ -649,11 +665,100 @@ describe('App async owner guards', () => {
     root = null
     container = null
     window.sessionStorage.clear()
+    window.localStorage?.clear()
     if (scrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollIntoView)
     else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
     vi.doUnmock('../../src/lib/api')
     vi.doUnmock('../../src/lib/practice-history')
+    vi.doUnmock('../../src/lib/stt')
+    vi.doUnmock('../../src/lib/audio-engine')
     vi.clearAllMocks()
+  })
+
+  it('keeps user-opening turn 1 free of assistant audio and advances to a real AI prompt after confirmation', async () => {
+    vi.resetModules()
+    const streamReply = vi.fn().mockResolvedValue({ text: '内容を承知しました。', model: 'mock', mock: true, usage: { inputTokens: null, outputTokens: null, totalTokens: null } })
+    installUserOpeningSnapshot()
+    installRecordingLifecycleMocks({ extraApi: {
+      streamReply,
+      submitFeedbackTask: vi.fn().mockResolvedValue({ taskToken: 'feedback-token', expiresAt: Date.now() + 86_400_000 }),
+      getFeedbackTask: vi.fn().mockResolvedValue({ status: 'pending' }),
+      requestListeningScaffold: vi.fn().mockResolvedValue({ keyInformationHintZh: '駅の忘れ物窓口に連絡してください。', keyPhrasesJa: ['忘れ物', '傘'], intentSummaryZh: '说明遗失物品并请求查询。' }),
+    } })
+    container = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App')
+    root = createRoot(container); flushSync(() => root.render(createElement(appModule.default)))
+    await vi.waitFor(() => expect(container?.textContent).toContain('轮到你开场'), { interval: 0 })
+    expect(container?.querySelector('.im-message-item.is-ai')).toBeNull()
+    expect(container?.querySelector('.im-listening-controls')).toBeNull()
+    expect(container?.textContent).toContain('这轮由你先开场')
+
+    const keyboard = container.querySelector<HTMLButtonElement>('[aria-label="切换为键盘打字"]')
+    expect(keyboard).not.toBeNull()
+    flushSync(() => keyboard?.click())
+    const input = container.querySelector<HTMLInputElement>('.im-dock-input')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    flushSync(() => { setter?.call(input, '駅で傘をなくしました。'); input?.dispatchEvent(new Event('input', { bubbles: true })) })
+    flushSync(() => Array.from(container?.querySelectorAll('button') ?? []).find((item) => item.textContent === '发送')?.click())
+    const confirm = await vi.waitFor(() => {
+      const button = Array.from(container?.querySelectorAll('button') ?? []).find((item) => item.textContent?.includes('确认发送'))
+      expect(button).toBeDefined()
+      return button as HTMLButtonElement
+    }, { interval: 0 })
+    flushSync(() => confirm.click())
+    await vi.waitFor(() => expect(streamReply).toHaveBeenCalledOnce(), { interval: 0 })
+    await vi.waitFor(() => expect(container?.textContent).toContain('显示文字继续'), { interval: 0 })
+    flushSync(() => Array.from(container?.querySelectorAll('button') ?? []).find((item) => item.textContent?.includes('显示文字继续'))?.click())
+    await vi.waitFor(() => expect(container?.textContent).toContain('第 2/5 轮'), { interval: 0 })
+    expect(container?.querySelector('.im-message-item.is-ai')).not.toBeNull()
+    await vi.waitFor(() => {
+      const snapshot = JSON.parse(window.sessionStorage.getItem('kaiwa.current-session.v1') ?? 'null') as {
+        messages?: { role: string; turn: number; text: string }[]
+        rounds?: { turn: number; partnerPromptJa: string | null }[]
+      } | null
+      expect(snapshot?.messages?.filter((message) => message.role === 'assistant').map((message) => [message.turn, message.text])).toEqual([[2, '内容を承知しました。']])
+      expect(snapshot?.rounds?.find((round) => round.turn === 1)?.partnerPromptJa).toBeNull()
+    }, { interval: 0 })
+
+    const confirmTextRound = async (text: string): Promise<void> => {
+      const expectedCalls = streamReply.mock.calls.length + 1
+      const input = await vi.waitFor(() => {
+        const next = container?.querySelector<HTMLInputElement>('.im-dock-input')
+        expect(next).not.toBeNull()
+        return next as HTMLInputElement
+      }, { interval: 0 })
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      flushSync(() => { valueSetter?.call(input, text); input.dispatchEvent(new Event('input', { bubbles: true })) })
+      flushSync(() => Array.from(container?.querySelectorAll('button') ?? []).find((item) => item.textContent === '发送')?.click())
+      const send = await vi.waitFor(() => {
+        const next = Array.from(container?.querySelectorAll('button') ?? []).find((item) => item.textContent?.includes('确认发送'))
+        expect(next).toBeDefined()
+        return next as HTMLButtonElement
+      }, { interval: 0 })
+      flushSync(() => send.click())
+      await vi.waitFor(() => expect(streamReply).toHaveBeenCalledTimes(expectedCalls), { interval: 0 })
+      await vi.waitFor(() => expect(container?.textContent).toContain('显示文字继续'), { interval: 0 })
+      flushSync(() => Array.from(container?.querySelectorAll('button') ?? []).find((item) => item.textContent?.includes('显示文字继续'))?.click())
+    }
+    await confirmTextRound('駅の場所を教えてください。')
+    await confirmTextRound('ありがとうございます。')
+    await confirmTextRound('はい、お願いします。')
+    await confirmTextRound('承知しました。')
+    await vi.waitFor(() => expect(container?.querySelector('.complete-view')).not.toBeNull(), { interval: 0 })
+    expect(container?.textContent).toContain('复盘')
+  })
+
+  it('keeps assistant-opening turn 1 as a real played prompt before user input', async () => {
+    vi.resetModules()
+    installWaitingSessionSnapshot()
+    installRecordingLifecycleMocks()
+    container = document.createElement('div'); document.body.appendChild(container)
+    const appModule = await import('../../src/App')
+    root = createRoot(container); flushSync(() => root.render(createElement(appModule.default)))
+    await vi.waitFor(() => expect(container?.textContent).toContain('轮到你回答'), { interval: 0 })
+    expect(container?.querySelector('.im-message-item.is-ai')).not.toBeNull()
+    expect(container?.querySelector('.im-listening-controls')).not.toBeNull()
+    expect(container?.textContent).not.toContain('这轮由你先开场')
   })
 
   it('drops late hint and listening scaffold results after the App unmounts', async () => {
@@ -811,7 +916,7 @@ describe('SessionComplete redo lifecycle', () => {
   })
 
   function installCompletedConversationTask(status: 'transport_error' | 'failed', taskToken: string): string {
-    const round = createRoundRecord(1, scenario.firstLine, 0)
+    const round = createRoundRecord(1, assistantOpeningLine, 0)
     round.userOriginal = '前髪は残してください。'
     round.userCleaned = round.userOriginal
     round.userFinal = round.userOriginal
@@ -823,10 +928,10 @@ describe('SessionComplete redo lifecycle', () => {
     const report = buildSessionReport('feedback-retry-session', 'mock', scenario, 1, endedAt, [round], [])
     window.localStorage.setItem('kaiwa.completed-review.v1', JSON.stringify({
       version: 1, sessionId: 'feedback-retry-session', scenario,
-      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }, { id: 'user-1', turn: 1, role: 'user', text: round.userFinal, transcript: { rawText: round.userOriginal, cleanedText: round.userCleaned, finalText: round.userFinal } }],
+      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: assistantOpeningLine }, { id: 'user-1', turn: 1, role: 'user', text: round.userFinal, transcript: { rawText: round.userOriginal, cleanedText: round.userCleaned, finalText: round.userFinal } }],
       rounds: [round], startedAt: 1, endedAt, report, feedback: null, redoRecords: [],
       pending: { conversation: {
-        request: { kind: 'conversation', requestId, createdAt: endedAt, payload: { scenarioType: 'dynamic', sessionToken: scenario.sessionToken, turnRecords: [{ turn: 1, partnerPromptJa: scenario.firstLine, userOriginal: round.userOriginal, userCleaned: round.userCleaned, userConfirmed: round.userFinal, inputMode: 'text', transcriptModified: false, rerecordCount: 0, partnerAudioPlayCount: 1, ttsReplayCount: 0, transcriptRevealed: false, listeningScaffoldLevel: 0, expressionScaffoldLevel: 0, failureCount: 0, retryCount: 0, textFallback: true, speechAssistUsed: false }] } },
+        request: { kind: 'conversation', requestId, createdAt: endedAt, payload: { scenarioType: 'dynamic', sessionToken: scenario.sessionToken, turnRecords: [{ turn: 1, partnerPromptJa: assistantOpeningLine, userOriginal: round.userOriginal, userCleaned: round.userCleaned, userConfirmed: round.userFinal, inputMode: 'text', transcriptModified: false, rerecordCount: 0, partnerAudioPlayCount: 1, ttsReplayCount: 0, transcriptRevealed: false, listeningScaffoldLevel: 0, expressionScaffoldLevel: 0, failureCount: 0, retryCount: 0, textFallback: true, speechAssistUsed: false }] } },
         taskToken, status, error: { code: status, message: '反馈任务暂时不可用。' },
       } },
     }))
@@ -896,12 +1001,12 @@ describe('SessionComplete redo lifecycle', () => {
       expressionImprovement: null,
       redoTask: {
         turn: 1,
-        partnerPromptJa: scenario.firstLine,
+        partnerPromptJa: assistantOpeningLine,
         firstConfirmedJa: '前髪は残してください。',
         directionZh: '保留请求并补充细节。',
       },
     }
-    const round = createRoundRecord(1, scenario.firstLine, 0)
+    const round = createRoundRecord(1, assistantOpeningLine, 0)
     round.userFinal = '前髪は残してください。'
     round.timing.audioStartedAt = 1
     round.timing.audioCompletedAt = 2
@@ -936,7 +1041,7 @@ describe('SessionComplete redo lifecycle', () => {
       phase: 'preparing_tts',
       sessionId: 'session-id',
       scenario,
-      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }],
+      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: assistantOpeningLine }],
       rounds: [],
       currentRound: round,
       turn: 5,
@@ -982,7 +1087,7 @@ describe('SessionComplete redo lifecycle', () => {
         openai: { available: false, model: 'mock', mockAllowed: true },
       }),
       submitFeedbackTask: vi.fn().mockResolvedValue({ taskToken: 'feedback-token', expiresAt: Date.now() + 86_400_000 }),
-      getFeedbackTask: vi.fn().mockResolvedValue({ status: 'complete', kind: 'conversation', result: { outcome: 'partial', outcomeEvidenceZh: '已完成一项沟通目标。', listeningFinding: null, expressionImprovement: { turn: 1, userConfirmedJa: '前髪は残してください。', suggestedJa: '前髪を少し整えてください。', reasonZh: '补充具体程度。' }, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', directionZh: '保留请求并补充细节。' } } }),
+      getFeedbackTask: vi.fn().mockResolvedValue({ status: 'complete', kind: 'conversation', result: { outcome: 'partial', outcomeEvidenceZh: '已完成一项沟通目标。', listeningFinding: null, expressionImprovement: { turn: 1, userConfirmedJa: '前髪は残してください。', suggestedJa: '前髪を少し整えてください。', reasonZh: '补充具体程度。' }, redoTask: { turn: 1, partnerPromptJa: assistantOpeningLine, firstConfirmedJa: '前髪は残してください。', directionZh: '保留请求并补充细节。' } } }),
       requestElevenLabsToken: vi.fn().mockResolvedValue('ready-token'),
       listPracticeAttempts: vi.fn().mockResolvedValue([]),
     }))
@@ -1000,13 +1105,13 @@ describe('SessionComplete redo lifecycle', () => {
       requestMicrophoneStream: vi.fn().mockResolvedValue({ getAudioTracks: () => [{ readyState: 'live' }] }),
       releaseMicrophoneStream,
     }))
-    const round = createRoundRecord(1, scenario.firstLine, 0)
+    const round = createRoundRecord(1, assistantOpeningLine, 0)
     round.userFinal = '前髪は残してください。'
     round.timing.audioStartedAt = 1
     round.timing.audioCompletedAt = 2
     window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({
       version: 1, phase: 'preparing_tts', sessionId: 'session-id', scenario,
-      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }], rounds: [], currentRound: round,
+      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: assistantOpeningLine }], rounds: [], currentRound: round,
       turn: 5, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' },
     }))
     const container = activeContainer = document.createElement('div')
@@ -1066,7 +1171,7 @@ describe('SessionComplete redo lifecycle', () => {
       fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }),
       submitFeedbackTask: taskSubmit, getFeedbackTask: taskGet, listPracticeAttempts: vi.fn().mockResolvedValue([]),
     }))
-    const completedRound = createRoundRecord(1, scenario.firstLine, 1)
+    const completedRound = createRoundRecord(1, assistantOpeningLine, 1)
     completedRound.userOriginal = '前髪を少し短くしてください。'
     completedRound.userCleaned = completedRound.userOriginal
     completedRound.userFinal = completedRound.userOriginal
@@ -1077,11 +1182,11 @@ describe('SessionComplete redo lifecycle', () => {
     const report = buildSessionReport('completed-session', 'mock', scenario, 1, endedAt, [completedRound], [])
     window.localStorage.setItem('kaiwa.completed-review.v1', JSON.stringify({
       version: 1, sessionId: 'completed-session', scenario, messages: [
-        { id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine },
+        { id: 'assistant-1', turn: 1, role: 'assistant', text: assistantOpeningLine },
         { id: 'user-1', turn: 1, role: 'user', text: completedRound.userFinal, transcript: { rawText: completedRound.userOriginal, cleanedText: completedRound.userCleaned, finalText: completedRound.userFinal } },
       ], rounds: [completedRound],
-      startedAt: 1, endedAt, report, feedback: { outcome: 'partial', outcomeEvidenceZh: '证据', listeningFinding: null, expressionImprovement: null, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', directionZh: '补充细节。' } },
-      redoRecords: [], pending: { redo: { request: { kind: 'redo', requestId: crypto.randomUUID(), createdAt: Date.now(), payload: { scenarioType: 'dynamic', sessionToken: scenario.sessionToken, turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', secondConfirmedJa: '前髪を少し短くしてください。', secondInputMode: 'text', secondListeningScaffoldLevel: 0, secondExpressionScaffoldLevel: 0 } }, status: 'pending', taskToken: 'redo-token' } },
+      startedAt: 1, endedAt, report, feedback: { outcome: 'partial', outcomeEvidenceZh: '证据', listeningFinding: null, expressionImprovement: null, redoTask: { turn: 1, partnerPromptJa: assistantOpeningLine, firstConfirmedJa: '前髪は残してください。', directionZh: '补充细节。' } },
+      redoRecords: [], pending: { redo: { request: { kind: 'redo', requestId: crypto.randomUUID(), createdAt: Date.now(), payload: { scenarioType: 'dynamic', sessionToken: scenario.sessionToken, turn: 1, partnerPromptJa: assistantOpeningLine, firstConfirmedJa: '前髪は残してください。', secondConfirmedJa: '前髪を少し短くしてください。', secondInputMode: 'text', secondListeningScaffoldLevel: 0, secondExpressionScaffoldLevel: 0 } }, status: 'pending', taskToken: 'redo-token' } },
     }))
     const container = activeContainer = document.createElement('div'); document.body.appendChild(container)
     const appModule = await import('../../src/App'); const root = activeRoot = createRoot(container)
@@ -1105,7 +1210,7 @@ describe('SessionComplete redo lifecycle', () => {
       getFeedbackTask: vi.fn().mockResolvedValue({ status: 'complete', kind: 'redo', result: { comparisonZh: '迟到比较不得写入', referenceExpressionJa: '新しい表現です。' } }),
       listPracticeAttempts: vi.fn().mockResolvedValue([]),
     }))
-    const round = createRoundRecord(1, scenario.firstLine, 0)
+    const round = createRoundRecord(1, assistantOpeningLine, 0)
     round.userOriginal = '前髪を短くしてください。'
     round.userCleaned = round.userOriginal
     round.userFinal = round.userOriginal
@@ -1116,8 +1221,8 @@ describe('SessionComplete redo lifecycle', () => {
     const report = buildSessionReport('redo-owner-session', 'mock', scenario, 1, endedAt, [round], [])
     window.localStorage.setItem('kaiwa.completed-review.v1', JSON.stringify({
       version: 1, sessionId: 'redo-owner-session', scenario,
-      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }], rounds: [round], startedAt: 1, endedAt, report,
-      feedback: { outcome: 'partial', outcomeEvidenceZh: '证据', listeningFinding: null, expressionImprovement: null, redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '前髪は残してください。', directionZh: '补充细节。' } }, redoRecords: [], pending: {},
+      messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: assistantOpeningLine }], rounds: [round], startedAt: 1, endedAt, report,
+      feedback: { outcome: 'partial', outcomeEvidenceZh: '证据', listeningFinding: null, expressionImprovement: null, redoTask: { turn: 1, partnerPromptJa: assistantOpeningLine, firstConfirmedJa: '前髪は残してください。', directionZh: '补充细节。' } }, redoRecords: [], pending: {},
     }))
     const container = activeContainer = document.createElement('div'); document.body.appendChild(container)
     const appModule = await import('../../src/App'); const root = activeRoot = createRoot(container)
@@ -1160,8 +1265,8 @@ describe('SessionComplete redo lifecycle', () => {
 
   it('records user_exit when the learner ends an active session early', async () => {
     vi.resetModules()
-    const round = createRoundRecord(1, scenario.firstLine, 0); round.inputMode = 'text'; round.userFinal = '前髪は残してください。'
-    window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({ version: 1, phase: 'waiting_user', sessionId: 'early-exit-session', scenario, messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: scenario.firstLine }], rounds: [], currentRound: round, turn: 1, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' } }))
+    const round = createRoundRecord(1, assistantOpeningLine, 0); round.inputMode = 'text'; round.userFinal = '前髪は残してください。'
+    window.sessionStorage.setItem('kaiwa.current-session.v1', JSON.stringify({ version: 1, phase: 'waiting_user', sessionId: 'early-exit-session', scenario, messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: assistantOpeningLine }], rounds: [], currentRound: round, turn: 1, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' } }))
     vi.doMock('../../src/lib/api', async () => ({ ...(await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api')), fetchConfig: vi.fn().mockResolvedValue({ mode: 'mock', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: false, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }), submitFeedbackTask: vi.fn().mockResolvedValue({ taskToken: 'feedback-token', expiresAt: Date.now() + 86_400_000 }), getFeedbackTask: vi.fn().mockResolvedValue({ status: 'pending' }) }))
     const container = activeContainer = document.createElement('div'); document.body.appendChild(container)
     const appModule = await import('../../src/App'); const root = activeRoot = createRoot(container); flushSync(() => root.render(createElement(appModule.default)))
@@ -1174,7 +1279,7 @@ describe('SessionComplete redo lifecycle', () => {
 describe('App validation telemetry lifecycle', () => {
   it('never restores telemetry credentials from a session snapshot', async () => {
     vi.resetModules()
-    const snapshot = { version: 1, phase: 'waiting_user', sessionId: 'local-session', scenario, messages: [], rounds: [], currentRound: createRoundRecord(1, scenario.firstLine, 0), turn: 1, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' } }
+    const snapshot = { version: 1, phase: 'waiting_user', sessionId: 'local-session', scenario, messages: [{ id: 'assistant-1', turn: 1, role: 'assistant', text: assistantOpeningLine }], rounds: [], currentRound: createRoundRecord(1, assistantOpeningLine, 0), turn: 1, sessionStartedAt: 1, transcript: { rawText: '', cleanedText: '', finalText: '' } }
     const serialized = JSON.stringify(snapshot)
     expect(serialized).not.toContain('telemetryToken')
     expect(serialized).not.toContain('dyn_ses_')

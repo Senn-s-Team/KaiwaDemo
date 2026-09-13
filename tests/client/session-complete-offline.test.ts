@@ -54,26 +54,38 @@ vi.mock('../../src/lib/stt', () => ({
 import { SessionComplete } from '../../src/components/SessionComplete'
 
 const scenario: SessionScenario = {
-  id: 'haircut', version: 1, variantId: 'default', firstLine: 'いらっしゃいませ。', maxTurns: 5,
+  id: 'haircut', version: 1, variantId: 'default', maxTurns: 5,
   reveal: { titleZh: '理发店', summaryZh: '说明要求。' }, scenarioType: 'dynamic', sessionToken: 'session-token', scenarioToken: 'scenario-token',
   dynamicData: {
-    id: 'haircut', version: 1, titleZh: '理发店', summaryZh: '说明要求。', aiRole: '理发师', userRole: '顾客', relationship: '顾客与店员', tone: '礼貌', firstLine: 'いらっしゃいませ。', userGoal: '说明要求。',
-    coreGoal: { id: 'goal', titleZh: '说明要求', descriptionZh: '清楚说明。' }, communicationFunction: '提出要求', initialFacts: [], partnerPrivateFacts: [], keyIntents: [], keyInformation: [], completionRules: { completed: [], partial: [], notCompleted: [] }, closingRules: [], maxTurns: 5, partnerOpeningPlan: '询问要求', worldAnchors: [], followUpPrinciples: [], hintStrategy: 'direct', feedbackFocus: [], safetyBoundary: 'none',
+    id: 'haircut', version: 1, titleZh: '理发店', summaryZh: '说明要求。', aiRole: '理发师', userRole: '顾客', relationship: '顾客与店员', tone: '礼貌', opening: { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。', planZh: '迎接到店顾客' }, userGoal: '说明要求。',
+    coreGoal: { id: 'goal', titleZh: '说明要求', descriptionZh: '清楚说明。' }, communicationFunction: '提出要求', initialFacts: [], partnerPrivateFacts: [], keyIntents: [], keyInformation: [], completionRules: { completed: [], partial: [], notCompleted: [] }, closingRules: [], maxTurns: 5, worldAnchors: [], followUpPrinciples: [], hintStrategy: 'direct', feedbackFocus: [], safetyBoundary: 'none',
   },
 }
 const feedbackData: ConversationFeedbackResponse = {
   outcome: 'partial', outcomeEvidenceZh: '部分完成。', listeningFinding: null, expressionImprovement: null,
-  redoTask: { turn: 1, partnerPromptJa: scenario.firstLine, firstConfirmedJa: '短くしてください。', directionZh: '保留要求。' },
+  redoTask: { turn: 1, partnerPromptJa: 'いらっしゃいませ。', firstConfirmedJa: '短くしてください。', directionZh: '保留要求。' },
 }
 const config: PrototypeConfig = { mode: 'real', limits: { maxTurns: 5 }, elevenlabs: { sttAvailable: true, ttsAvailable: false, voiceId: null, sttModel: 'scribe', ttsModel: 'tts' }, openai: { available: false, model: 'mock', mockAllowed: true } }
-const report = buildSessionReport('session-id', 'real', scenario, 1, 2, [createRoundRecord(1, scenario.firstLine, 0)])
+const report = buildSessionReport('session-id', 'real', scenario, 1, 2, [createRoundRecord(1, 'いらっしゃいませ。', 0)])
 const flush = async (): Promise<void> => { await Promise.resolve(); await new Promise<void>((resolve) => queueMicrotask(resolve)) }
 
-function props(online: boolean, saveRecordingsEnabled = false) {
+function props(online: boolean, saveRecordingsEnabled = false, overrides: { scenario?: SessionScenario; feedbackData?: ConversationFeedbackResponse; report?: ReturnType<typeof buildSessionReport> } = {}) {
+  const activeScenario = overrides.scenario ?? scenario
+  const activeFeedback = overrides.feedbackData ?? feedbackData
+  const activeReport = overrides.report ?? report
   return {
-    messages: [{ id: 'assistant-1', turn: 1, role: 'assistant' as const, text: scenario.firstLine }], rounds: [], report, sessionId: 'session-id', scenario, reveal: scenario.reveal, config, online, feedbackData, feedbackStatus: 'success' as const, feedbackErrorMsg: '',
+    messages: activeScenario.dynamicData.opening.speaker === 'assistant' ? [{ id: 'assistant-1', turn: 1, role: 'assistant' as const, text: activeScenario.dynamicData.opening.partnerLineJa }] : [], rounds: [], report: activeReport, sessionId: 'session-id', scenario: activeScenario, reveal: activeScenario.reveal, config, online, feedbackData: activeFeedback, feedbackStatus: 'success' as const, feedbackErrorMsg: '',
     onRetryFeedback: vi.fn(), copyStatus: '', onCopy: vi.fn(), onDownload: vi.fn(), onReplayAi: vi.fn(), onStopAudio: vi.fn(), onRequestRedo: vi.fn(), onRequestListeningScaffold: vi.fn(), onCacheListeningScaffold: vi.fn(), onNewScenario: vi.fn(), audioNotice: '', practiceComparison: null, historyNotice: '', saveRecordingsEnabled,
   }
+}
+
+const userOpeningScenario: SessionScenario = {
+  ...scenario,
+  dynamicData: { ...scenario.dynamicData, opening: { speaker: 'user', planZh: '用户先说明遗失物品并请求查询。' } },
+}
+const userOpeningFeedback: ConversationFeedbackResponse = {
+  ...feedbackData,
+  redoTask: { ...feedbackData.redoTask, partnerPromptJa: null },
 }
 
 describe('SessionComplete offline redo lifecycle', () => {
@@ -224,5 +236,19 @@ describe('SessionComplete offline redo lifecycle', () => {
     await vi.waitFor(() => expect(createUrl).toHaveBeenCalledTimes(4), { interval: 0 })
     root.unmount()
     expect(revokeUrl).toHaveBeenCalledWith('blob:fourth')
+  })
+
+  it('user-opening first redo skips nonexistent partner replay and listening scaffold', async () => {
+    const onReplayAi = vi.fn()
+    const view = props(true, false, { scenario: userOpeningScenario, feedbackData: userOpeningFeedback, report: buildSessionReport('session-id', 'real', userOpeningScenario, 1, 2, [createRoundRecord(1, null, 0)]) })
+    view.onReplayAi = onReplayAi
+    flushSync(() => root.render(createElement(SessionComplete, view)))
+    flushSync(() => Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('再练这个回合'))?.click())
+    expect(onReplayAi).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('这是你先开场的回合，请直接重做开场表达。')
+    expect(container.textContent).toContain('看表达方向')
+    expect(container.textContent).not.toContain('从头重听')
+    expect(container.textContent).not.toContain('先重听一遍')
+    expect(container.textContent).not.toContain('关键信息')
   })
 })

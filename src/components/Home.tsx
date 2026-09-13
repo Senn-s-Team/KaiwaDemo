@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 首页场景草稿 view model、中文语音识别/可取消润色动作、录音保存选择与结构化本机练习历史
- * [OUTPUT]: 渲染首页场景准备、澄清、实时中文语音输入、可撤回润色、录音保存选择与示例入口
+ * [INPUT]: 首页含判别式开场的场景草稿 view model、中文语音识别/可取消润色动作、录音保存选择与结构化本机练习历史
+ * [OUTPUT]: 渲染明确开场者的首页场景准备卡、澄清、实时中文语音输入、可撤回润色、录音保存选择与示例入口
  * [POS]: src/components 的首页纯视图；不拥有任务持久化或场景会话编排
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -301,6 +301,7 @@ export function Home({
           <div className="ready-meta">
             <p><strong>你是：</strong>{readyScenarioData.scenario.userRole}</p>
             <p><strong>对方是：</strong>{readyScenarioData.scenario.aiRole}</p>
+            <p><strong>开场：</strong>{readyScenarioData.scenario.opening.speaker === 'user' ? '你先说' : '对方先说'}</p>
           </div>
           <div className="ready-goal"><strong>这次想做到</strong><p>{readyScenarioData.scenario.coreGoal.descriptionZh}</p></div>
           <div className="ready-actions">

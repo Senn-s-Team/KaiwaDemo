@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 shared/feedback-task 任务 wire schema、练习完成页可序列化上下文、浏览器 localStorage 与页面前后台生命周期
- * [OUTPUT]: 提供完成复盘状态的本机恢复、反馈/重做任务 start/resume 与轮询 runtime，结果只写回原 sessionId/requestId
+ * [INPUT]: 依赖 shared/feedback-task nullable 相手事实 wire schema、./recovery-guards 共享形状守卫、双开场练习完成页上下文、浏览器 localStorage 与页面前后台生命周期
+ * [OUTPUT]: 提供单轨双开场完成复盘恢复、反馈/重做任务 start/resume 与轮询 runtime，旧字段记录自然失效
  * [POS]: src/lib 的 durable completed-review 边界；不启动麦克风、音频或模型，不拥有 App 当前活动会话
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -16,6 +16,8 @@ import {
   type FeedbackTaskStatus,
 } from '../../shared/feedback-task'
 import { ApiError, getFeedbackTask, submitFeedbackTask } from './api'
+import { isObject, isStoredRoundRecord, readScenarioOpening } from './recovery-guards'
+import { openingPartnerLineJa } from '../../shared/scenario-draft'
 import type {
   ConversationFeedbackResponse,
   ConversationMessage,
@@ -88,21 +90,19 @@ export interface CompletedReviewRecoveryRuntime {
   subscribe(listener: (state: CompletedReviewRecoveryState) => void): () => void
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
 function isStoredScenario(value: unknown): value is SessionScenario {
   if (!isObject(value)) return false
+  const dynamicData = value.dynamicData
+  const validOpening = isObject(dynamicData) && readScenarioOpening(dynamicData.opening) !== null
   return typeof value.id === 'string' && value.id.length > 0
     && isFiniteNumber(value.version) && typeof value.variantId === 'string'
-    && typeof value.firstLine === 'string' && value.maxTurns === 5
+    && value.maxTurns === 5
     && value.scenarioType === 'dynamic' && typeof value.sessionToken === 'string'
-    && typeof value.scenarioToken === 'string' && isObject(value.dynamicData)
+    && typeof value.scenarioToken === 'string' && validOpening
     && isObject(value.reveal)
 }
 
@@ -115,40 +115,53 @@ function isStoredMessage(value: unknown): value is ConversationMessage {
     && (value.listeningScaffold === undefined || isObject(value.listeningScaffold))
 }
 
-function isStoredRound(value: unknown): value is RoundRecord {
-  if (!isObject(value)) return false
-  return isFiniteNumber(value.turn) && typeof value.aiPrompt === 'string'
-    && (value.inputMode === 'stt' || value.inputMode === 'text')
-    && typeof value.userOriginal === 'string' && typeof value.userCleaned === 'string' && typeof value.userFinal === 'string'
-    && isFiniteNumber(value.listeningScaffoldLevel) && isFiniteNumber(value.expressionScaffoldLevel)
-    && isObject(value.timing) && Array.isArray(value.speechAssistEvents)
-}
-
 function isStoredReport(value: unknown): value is SessionReport {
   if (!isObject(value)) return false
   return value.schemaVersion === 3 && typeof value.sessionId === 'string'
     && typeof value.scenarioId === 'string' && isFiniteNumber(value.startedAt)
-    && isFiniteNumber(value.endedAt) && Array.isArray(value.rounds) && value.rounds.every(isStoredRound)
+    && isFiniteNumber(value.endedAt) && Array.isArray(value.rounds) && value.rounds.every(isStoredRoundRecord)
     && Array.isArray(value.redos) && isObject(value.totals)
     && isObject(value.completion) && isObject(value.recovery)
 }
 
 function isStoredRedo(value: unknown): value is RedoRecord {
   if (!isObject(value)) return false
-  return isFiniteNumber(value.turn) && typeof value.partnerPromptJa === 'string'
+  return isFiniteNumber(value.turn) && ((typeof value.partnerPromptJa === 'string' && value.partnerPromptJa.trim().length > 0) || value.partnerPromptJa === null && value.turn === 1)
     && typeof value.firstConfirmedJa === 'string' && typeof value.secondConfirmedJa === 'string'
     && (value.inputMode === 'stt' || value.inputMode === 'text')
     && isFiniteNumber(value.listeningScaffoldLevel) && isFiniteNumber(value.expressionScaffoldLevel)
+    && (value.partnerPromptJa !== null || value.listeningScaffoldLevel === 0)
     && typeof value.comparisonZh === 'string' && typeof value.referenceExpressionJa === 'string'
+}
+
+function matchesPartnerPrompt(opening: SessionScenario['dynamicData']['opening'], turn: number, partnerPromptJa: string | null): boolean {
+  if (turn === 1) return partnerPromptJa === openingPartnerLineJa(opening)
+  return partnerPromptJa !== null
 }
 
 function parseStored(value: unknown): CompletedReviewSnapshot | null {
   if (!isObject(value) || value.version !== 1 || typeof value.sessionId !== 'string' || value.sessionId.length === 0) return null
   if (!isStoredScenario(value.scenario) || !Array.isArray(value.messages) || !value.messages.every(isStoredMessage)
-    || !Array.isArray(value.rounds) || !value.rounds.every(isStoredRound) || !isStoredReport(value.report)) return null
+    || !Array.isArray(value.rounds) || !value.rounds.every(isStoredRoundRecord) || !isStoredReport(value.report)) return null
+  const opening = value.scenario.dynamicData.opening
+  const firstMessage = value.messages[0]
+  if (opening.speaker === 'assistant') {
+    if (!isStoredMessage(firstMessage) || firstMessage.role !== 'assistant' || firstMessage.turn !== 1 || firstMessage.text !== opening.partnerLineJa) return null
+  } else if (firstMessage && (!isStoredMessage(firstMessage) || firstMessage.role !== 'user' || firstMessage.turn !== 1)) return null
+  const storedRounds = value.rounds as RoundRecord[]
+  const allRounds = [...storedRounds, ...value.report.rounds]
+  if (allRounds.some((round) => round.turn > 1 && round.partnerPromptJa === null)) return null
+  const expectedOpeningPrompt = openingPartnerLineJa(opening)
+  if (allRounds.filter((round) => round.turn === 1).some((round) => round.partnerPromptJa !== expectedOpeningPrompt)) return null
+  if (!value.report.redos.every(isStoredRedo) || value.report.redos.some((redo) => !matchesPartnerPrompt(opening, redo.turn, redo.partnerPromptJa))) return null
   if (typeof value.startedAt !== 'number' || typeof value.endedAt !== 'number') return null
   if (!Array.isArray(value.redoRecords) || !value.redoRecords.every(isStoredRedo) || !isObject(value.pending)) return null
-  if (value.feedback !== null && value.feedback !== undefined && !ConversationFeedbackResponseSchema.safeParse(value.feedback).success) return null
+  const storedRedos = value.redoRecords as RedoRecord[]
+  if (value.feedback !== null && value.feedback !== undefined) {
+    const parsedFeedback = ConversationFeedbackResponseSchema.safeParse(value.feedback)
+    if (!parsedFeedback.success || !matchesPartnerPrompt(opening, parsedFeedback.data.redoTask.turn, parsedFeedback.data.redoTask.partnerPromptJa)) return null
+  }
+  if (storedRedos.some((redo) => !matchesPartnerPrompt(opening, redo.turn, redo.partnerPromptJa))) return null
   const pending: Partial<Record<FeedbackTaskKind, StoredFeedbackTask>> = {}
   for (const kind of ['conversation', 'redo'] as const) {
     const task = value.pending[kind]
@@ -156,6 +169,8 @@ function parseStored(value: unknown): CompletedReviewSnapshot | null {
     if (!isObject(task) || !['pending', 'transport_error', 'failed', 'complete'].includes(String(task.status))) return null
     const parsedRequest = FeedbackTaskRequestSchema.safeParse(task.request)
     if (!parsedRequest.success || parsedRequest.data.kind !== kind) return null
+    if (parsedRequest.data.kind === 'conversation' && parsedRequest.data.payload.turnRecords.some((record) => !matchesPartnerPrompt(opening, record.turn, record.partnerPromptJa))) return null
+    if (parsedRequest.data.kind === 'redo' && !matchesPartnerPrompt(opening, parsedRequest.data.payload.turn, parsedRequest.data.payload.partnerPromptJa)) return null
     if (task.taskToken !== undefined && (typeof task.taskToken !== 'string' || task.taskToken.length === 0)) return null
     if ((task.status === 'failed' || task.status === 'transport_error')
       && (!isObject(task.error) || typeof task.error.code !== 'string' || typeof task.error.message !== 'string')) return null

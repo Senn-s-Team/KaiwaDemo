@@ -25,9 +25,9 @@ class MemoryStorage implements Storage {
 
 const prepared: PreparedRestartData = {
   scenario: {
-    id: 'scenario-1', version: 1, titleZh: '场景', summaryZh: '摘要', aiRole: '店员', userRole: '顾客', relationship: '顾客与店员', tone: '礼貌', firstLine: 'いらっしゃいませ', userGoal: '预订',
+    id: 'scenario-1', version: 1, titleZh: '场景', summaryZh: '摘要', aiRole: '店员', userRole: '顾客', relationship: '顾客与店员', tone: '礼貌', opening: { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ', planZh: '迎客' }, userGoal: '预订',
     coreGoal: { id: 'goal-1', titleZh: '目标', descriptionZh: '完成预订' }, communicationFunction: '请求', initialFacts: ['事实'], partnerPrivateFacts: ['隐情'], keyIntents: ['意图'], keyInformation: ['信息'],
-    completionRules: { completed: ['完成'], partial: ['部分'], notCompleted: ['未完成'] }, closingRules: ['结束'], maxTurns: 5, partnerOpeningPlan: '开场', worldAnchors: ['地点'], followUpPrinciples: ['追问'], hintStrategy: '提示', feedbackFocus: ['表达'], safetyBoundary: '边界',
+    completionRules: { completed: ['完成'], partial: ['部分'], notCompleted: ['未完成'] }, closingRules: ['结束'], maxTurns: 5, worldAnchors: ['地点'], followUpPrinciples: ['追问'], hintStrategy: '提示', feedbackFocus: ['表达'], safetyBoundary: '边界',
   },
   scenarioToken: 'scenario-token', practiceToken: 'practice-token',
   previousAdvice: { expressionImprovement: { turn: 1, userConfirmedJa: '予約したい', suggestedJa: '予約をお願いします', reasonZh: '更自然' }, sourceSessionId: 'session-1', sourceStartedAt: 100, viewed: false },

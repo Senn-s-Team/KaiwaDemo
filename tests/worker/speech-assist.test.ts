@@ -23,7 +23,7 @@ const testScenario: DynamicScenarioDefinition = {
   userRole: '客',
   relationship: '接客',
   tone: '丁寧',
-  firstLine: 'いらっしゃいませ。何になさいますか？',
+  opening: { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。何になさいますか？', planZh: '根据客人位于柜台这一可观察事实迎客并询问点单。' },
   userGoal: 'ホットコーヒーを1つ注文する。',
   coreGoal: { id: 'order', titleZh: '点单', descriptionZh: '明确点单内容。' },
   communicationFunction: '在咖啡店向店员明确点一杯指定饮品。',
@@ -38,13 +38,15 @@ const testScenario: DynamicScenarioDefinition = {
   },
   closingRules: ['确认饮品和数量后结束点单'],
   maxTurns: 5,
-  partnerOpeningPlan: '先询问客人想点什么，再确认饮品和数量。',
   worldAnchors: ['店内にいます'],
   followUpPrinciples: ['丁寧に対応する'],
   hintStrategy: '商品名を伝える',
   feedbackFocus: ['注文の明確さ'],
   safetyBoundary: '決済情報は扱わない',
 }
+const scenarioOpeningLine = testScenario.opening.speaker === 'assistant'
+  ? testScenario.opening.partnerLineJa
+  : (() => { throw new Error('Speech assist fixture requires assistant opening.') })()
 
 const env = {
   SCENARIO_SIGNING_SECRET: 'test-secret-for-speech-assist-e2e',
@@ -75,7 +77,9 @@ describe('Worker Speech Assist - Request & Validation', () => {
     expect(() => parseSpeechAssistRequest({ ...valid, transcriptVersion: -1 })).toThrow(ValidationError)
     expect(() => parseSpeechAssistRequest({ ...valid, trailingSilenceMs: 899 })).toThrow(ValidationError)
     expect(() => parseSpeechAssistRequest({ ...valid, trailingSilenceMs: 15_000 })).toThrow(ValidationError)
+    // 空文字は「相手発話が空」という不正な表現なので拒否し、user-opening 首輪の不在は null だけが表す。
     expect(() => parseSpeechAssistRequest({ ...valid, lastAssistantTextJa: '' })).toThrow(ValidationError)
+    expect(parseSpeechAssistRequest({ ...valid, lastAssistantTextJa: null }).lastAssistantTextJa).toBeNull()
     // Extra unallowed keys rejected by strict()
     expect(() => parseSpeechAssistRequest({ ...valid, history: [] })).toThrow(ValidationError)
   })
@@ -207,7 +211,7 @@ describe('Worker Speech Assist - Request & Validation', () => {
       const req: SpeechAssistRequest = {
         requestId: 'req_nomock',
         transcriptVersion: 1,
-        lastAssistantTextJa: testScenario.firstLine,
+        lastAssistantTextJa: scenarioOpeningLine,
         trailingSilenceMs: 1000,
         sessionToken: token,
         turn: 1,
@@ -232,7 +236,7 @@ describe('Worker Speech Assist - Request & Validation', () => {
         requestId: 'req_e2e_1',
         transcriptVersion: 1,
         observedTextJa: 'あの、ええと、アイスコーヒーをください',
-        lastAssistantTextJa: testScenario.firstLine,
+        lastAssistantTextJa: scenarioOpeningLine,
         trailingSilenceMs: 1200,
         sessionToken: token,
         turn: 1,
@@ -255,6 +259,33 @@ describe('Worker Speech Assist - Request & Validation', () => {
       expect(Object.keys(body).sort()).toEqual(['cleanedObservedTextJa', 'continuationSuggestionJa'])
       expect(typeof body.cleanedObservedTextJa).toBe('string')
       expect(body.cleanedObservedTextJa.length).toBeGreaterThan(0)
+    })
+
+    it('accepts a user-opening first turn without any partner utterance', async () => {
+      const token = await signSessionToken(env, {
+        scenario: testScenario,
+        startedAt: Date.now(),
+        expiresAt: Date.now() + 3_600_000,
+      })
+      const payload: SpeechAssistRequest = {
+        requestId: 'req_e2e_user_open',
+        transcriptVersion: 1,
+        observedTextJa: 'あの、ええと、すみません、忘れ物をしたかもしれなくて',
+        lastAssistantTextJa: null,
+        trailingSilenceMs: 1200,
+        sessionToken: token,
+        turn: 1,
+      }
+      const response = await fetchWorker(new Request('https://kaiwa.example/api/speech/assist', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      }), env)
+      expect(response.status).toBe(200)
+      const body = (await response.json()) as { cleanedObservedTextJa: string; continuationSuggestionJa: string | null }
+      // A 只依据用户自己的观察文本清理，不借用不存在的相手発話。
+      expect(isCharacterSubsequence(body.cleanedObservedTextJa, payload.observedTextJa)).toBe(true)
+      expect(body.cleanedObservedTextJa.length).toBeLessThan(payload.observedTextJa.length)
     })
   })
 })

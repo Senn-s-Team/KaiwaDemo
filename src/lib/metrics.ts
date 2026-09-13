@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 ../types 的会话/回合记录契约与 ./session 的五回合终止规则
- * [OUTPUT]: 对外提供回合指标初始化、时长计算、含 completion/recovery 事实的会话报告构建与下载
+ * [INPUT]: 依赖 ../types 的 nullable 相手发话回合契约与 ./session 的五回合终止规则
+ * [OUTPUT]: 对外提供真实相手发话回合指标初始化、时长计算、含 completion/recovery 事实的会话报告构建与下载
  * [POS]: src/lib 的可观测会话指标聚合层，仅从既有回合、失败/重试与实时辅助事件导出事实
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -24,10 +24,10 @@ export function createTiming(): RoundTiming {
   }
 }
 
-export function createRoundRecord(turn: number, aiPrompt: string, rerecordCount: number): RoundRecord {
+export function createRoundRecord(turn: number, partnerPromptJa: string | null, rerecordCount: number): RoundRecord {
   return {
     turn,
-    aiPrompt,
+    partnerPromptJa,
     userOriginal: '',
     userCleaned: '',
     userFinal: '',

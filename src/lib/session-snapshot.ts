@@ -1,9 +1,11 @@
 /**
- * [INPUT]: 当前会话领域类型与浏览器 sessionStorage
- * [OUTPUT]: 校验、读取和清理可恢复会话快照
+ * [INPUT]: 依赖 ./recovery-guards 的共享恢复形状守卫、含判别式开场与 nullable 相手回合事实的当前会话领域类型及浏览器 sessionStorage
+ * [OUTPUT]: 严格校验、读取和清理单轨双开场可恢复会话快照，旧字段快照自然失效
  * [POS]: src/lib 的会话快照持久化边界；不拥有会话状态迁移或媒体资源
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
+import { readScenarioOpening, isObject, isStoredRoundRecord } from './recovery-guards'
+import { openingPartnerLineJa } from '../../shared/scenario-draft'
 import type { AppPhase, ConversationMessage, RoundRecord, SessionScenario, TranscriptText } from '../types'
 
 export const SESSION_SNAPSHOT_KEY = 'kaiwa.current-session.v1'
@@ -32,6 +34,18 @@ export function clearSessionSnapshot(): void {
   }
 }
 
+/**
+ * 可解析快照在与会话状态机结合时才暴露的不一致，例如进入 TTS 阶段却没有可恢复的真实相手発話。
+ * 携带 code 以复用 ./ui 的既有错误归一化，而不是抛裸 Error 落到通用兜底。
+ */
+export class SessionSnapshotIntegrityError extends Error {
+  readonly code = 'session_snapshot_integrity'
+
+  constructor(message: string) {
+    super(message)
+    this.name = 'SessionSnapshotIntegrityError'
+  }
+}
 
 export interface SessionSnapshot {
   version: 1
@@ -65,6 +79,19 @@ function isSessionSnapshot(value: unknown): value is SessionSnapshot {
   const scenario = candidate.scenario
   const transcript = candidate.transcript
   const hasKnownPhase = typeof candidate.phase === 'string' && SNAPSHOT_PHASES.some((phase) => phase === candidate.phase)
+  const opening = isObject(scenario) && isObject(scenario.dynamicData) ? readScenarioOpening(scenario.dynamicData.opening) : null
+  const firstMessage = Array.isArray(candidate.messages) ? candidate.messages[0] : undefined
+  const allRounds = [
+    ...(Array.isArray(candidate.rounds) ? candidate.rounds : []),
+    ...(candidate.currentRound ? [candidate.currentRound] : []),
+  ]
+  const openingMatches = opening?.speaker === 'assistant'
+    ? isObject(firstMessage) && firstMessage.role === 'assistant' && firstMessage.text === opening.partnerLineJa
+    : opening?.speaker === 'user' && (firstMessage === undefined || (isObject(firstMessage) && firstMessage.role === 'user'))
+  const expectedOpeningPrompt = opening === null ? null : openingPartnerLineJa(opening)
+  const roundsMatch = allRounds.every(isStoredRoundRecord)
+    && allRounds.every((round) => round.turn > 1 ? round.partnerPromptJa !== null : true)
+    && allRounds.filter((round) => round.turn === 1).every((round) => round.partnerPromptJa === expectedOpeningPrompt)
   return candidate.version === 1
     && hasKnownPhase
     && typeof candidate.sessionId === 'string'
@@ -75,13 +102,14 @@ function isSessionSnapshot(value: unknown): value is SessionSnapshot {
     && candidate.turn >= 1
     && candidate.turn <= 5
     && Array.isArray(candidate.messages)
-    && Array.isArray(candidate.rounds)
+    && Array.isArray(candidate.rounds) && roundsMatch && openingMatches
     && typeof scenario === 'object'
     && scenario !== null
     && typeof scenario.id === 'string'
     && scenario.maxTurns === 5
     && typeof scenario.dynamicData === 'object'
     && scenario.dynamicData !== null
+    && opening !== null
     && isPreviousAdvice((scenario as SessionScenario).previousAdvice)
     && typeof transcript === 'object'
     && transcript !== null

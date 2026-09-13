@@ -62,11 +62,11 @@
 | `/api/scenario/draft` | POST | 校验 `ScenarioDraftTaskRequest`，按请求摘要建立/复用场景草拟 Workflow，返回 task capability | `SCENARIO_DRAFT`；`scenario_draft` capability |
 | `/api/scenario/draft` | GET | 验证 task capability，查询场景草拟 Workflow，返回 pending/complete/failed | `Authorization: Bearer <taskToken>` |
 | `/api/practice/restart` | POST | 验证 practice token，重新签发短期 scenario token，返回可开始的场景数据 | `practice` token → `scenario` token |
-| `/api/session/start` | POST | 验证 scenario token，创建动态 session id，签发 session token 和只用于匿名验证写入的短期 telemetry token，并返回场景首句及回合上限 | `scenario` token → `session`/`telemetry` token |
+| `/api/session/start` | POST | 验证含判别式 `opening` 的 scenario token，创建动态 session id，签发 session token 和只用于匿名验证写入的短期 telemetry token，并返回场景及回合上限 | `scenario` token → `session`/`telemetry` token |
 | `/api/respond` | POST | 校验动态会话回复请求，向 OpenAI-compatible endpoint 请求流式相手回复 | session token；NDJSON response |
 | `/api/hint` | POST | 生成表达提示 | session token；OpenAI-compatible endpoint 或受控 mock |
 | `/api/listening-scaffold` | POST | 生成四级听力支架响应 | session token；`shared/listening-scaffold.ts` |
-| `/api/feedback/tasks` | POST | 校验 conversation/redo 任务，验证 session 与场景首句，创建/复用反馈 Workflow | `FEEDBACK_TASK`；`feedback_task` capability |
+| `/api/feedback/tasks` | POST | 校验 conversation/redo 任务，验证 session 与真实开场；仅 user-opening 第 1 轮允许 `partnerPromptJa=null` | `FEEDBACK_TASK`；`feedback_task` capability |
 | `/api/feedback/tasks` | GET | 验证 task capability，查询反馈/重做 Workflow 状态并校验结果 | `Authorization: Bearer <taskToken>` |
 | `/api/speech/assist` | POST | 在已观察转写和停顿条件下生成续说辅助 | session token；`shared/speech-assist.ts` |
 | `/api/validation/batch` | POST | 以 shared 严格 Schema 校验版本 2 的自动匿名技术验证批次，验证会话绑定的 telemetry token，并幂等写入 D1 | `telemetry` token；`VALIDATION_DB` |
@@ -82,7 +82,7 @@
 ### 4.1 `sessionStorage`：当前页面会话恢复
 
 - `src/lib/session-snapshot.ts` 的 `kaiwa.current-session.v1` 由 `use-session-snapshot-persistence.ts` 写入。
-- 所有者是浏览器端当前会话生命周期；内容是可恢复的会话阶段、session id、场景、消息、回合、当前回合、回合号、开始时间和转写文本。
+- 所有者是浏览器端当前会话生命周期；内容是可恢复的会话阶段、session id、含判别式开场的场景、真实消息、nullable 相手发话回合、当前回合、回合号、开始时间和转写文本。旧 `firstLine` / `aiPrompt` 形状不通过当前校验并自然清除，不设兼容转换。
 - 活动会话且已开始时更新；读取期间不写入；无活动会话或会话结束时清理。存储不可用时会话仍可继续。
 - `src/lib/home-practice-recovery.ts` 的 `kaiwa.home-practice-restart.v1` 也属于 `sessionStorage`，只保存首页同场景复练准备数据，按严格形状读取、写入和清理。
 - 这些快照不拥有麦克风流、音频播放、网络请求或 Worker 状态；媒体资源由音频/会话控制器管理。

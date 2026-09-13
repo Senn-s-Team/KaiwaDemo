@@ -45,8 +45,7 @@ const scenario: DynamicScenarioDefinition = {
   relationship: '初次见面的服务关系',
   tone: '礼貌自然的丁寧体',
   communicationFunction: '在咖啡店礼貌提出具体饮品需求并完成确认',
-  firstLine: 'いらっしゃいませ。ご注文はお決まりですか？',
-  partnerOpeningPlan: '以店员问候建立点单场景，并邀请顾客先说明饮品。',
+  opening: { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。ご注文はお決まりですか？', planZh: '以可观察的到店事实迎客并邀请顾客点单。' },
   userGoal: '用日语完成一杯燕麦奶拿铁的点单。',
   coreGoal: { id: 'order', titleZh: '完成点单', descriptionZh: '明确说明饮品与燕麦奶选项。' },
   initialFacts: ['顾客正在咖啡店点单', '店内可以制作拿铁'],
@@ -152,7 +151,7 @@ describe('POST /api/scenario/draft', () => {
     expect(response.status).toBe(200)
     expect(body.scenario).toMatchObject({
       communicationFunction: scenario.communicationFunction,
-      partnerOpeningPlan: scenario.partnerOpeningPlan,
+      opening: scenario.opening,
       initialFacts: ['顾客正在咖啡店点单'],
       partnerPrivateFacts: ['燕麦奶可以替换普通牛奶'],
       keyIntents: ['用户：点一杯燕麦奶拿铁'],
@@ -217,7 +216,7 @@ describe('POST /api/scenario/draft', () => {
       },
       closingRules: expect.any(Array),
       maxTurns: 5,
-      partnerOpeningPlan: expect.any(String),
+      opening: { speaker: 'user', planZh: expect.any(String) },
     })
   })
   it('rejects a request containing more than one clarification', async () => {

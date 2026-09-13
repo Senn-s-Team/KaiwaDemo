@@ -25,7 +25,7 @@ const scenario: DynamicScenarioDefinition = {
   userRole: '宿泊客',
   relationship: '初対面の接客',
   tone: '丁寧体',
-  firstLine: 'いらっしゃいませ。ご予約のお名前を伺ってもよろしいでしょうか？',
+  opening: { speaker: 'assistant', partnerLineJa: 'いらっしゃいませ。ご予約のお名前を伺ってもよろしいでしょうか？', planZh: '根据用户到达前台这一可观察事实迎客并询问预约姓名。' },
   userGoal: '告知预约姓名并办理入住。',
   coreGoal: {
     id: 'check-in',
@@ -44,13 +44,15 @@ const scenario: DynamicScenarioDefinition = {
   },
   closingRules: ['確認後に会話を収束する'],
   maxTurns: 5,
-  partnerOpeningPlan: '予約名を尋ねる',
   worldAnchors: ['ホテルのフロントで対応中'],
   followUpPrinciples: ['一度に一つだけ確認する'],
   hintStrategy: '固有名詞を答えとして与えない',
   feedbackFocus: ['依頼の明確さ'],
   safetyBoundary: '実在の個人情報を要求しない',
 }
+const scenarioOpeningLine = scenario.opening.speaker === 'assistant'
+  ? scenario.opening.partnerLineJa
+  : (() => { throw new Error('Listening scaffold fixture requires assistant opening.') })()
 
 type WorkerFetch = (request: Request, workerEnv: Env) => Response | Promise<Response>
 const fetchWorker = worker.fetch as unknown as WorkerFetch
@@ -73,7 +75,7 @@ async function listeningRequest(overrides: Partial<ListeningScaffoldRequest> = {
     scenarioType: 'dynamic',
     sessionToken,
     turn: 1,
-    partnerPromptJa: scenario.firstLine,
+    partnerPromptJa: scenarioOpeningLine,
     ...overrides,
   }
 }
@@ -217,7 +219,7 @@ describe('POST /api/listening-scaffold', () => {
       scenarioType: 'dynamic',
       sessionToken: 'not-a-signed-session-token',
       turn: 1,
-      partnerPromptJa: scenario.firstLine,
+      partnerPromptJa: scenarioOpeningLine,
     }), {
       ALLOW_MOCK: 'true',
       SCENARIO_SIGNING_SECRET: env.SCENARIO_SIGNING_SECRET,
@@ -250,7 +252,7 @@ describe('POST /api/listening-scaffold', () => {
       scenarioType: 'dynamic',
       sessionToken: '',
       turn: 1,
-      partnerPromptJa: scenario.firstLine,
+      partnerPromptJa: scenarioOpeningLine,
     }), env)
     expect(badResponse.status).toBe(400)
 

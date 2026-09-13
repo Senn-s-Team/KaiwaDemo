@@ -1,6 +1,6 @@
 /**
- * [INPUT]: zod 与反馈/重做 wire payload 字段
- * [OUTPUT]: 浏览器与 Worker 共用的 durable feedback task 严格契约
+ * [INPUT]: zod 与允许 user-opening 首轮无相手发话的反馈/重做 wire payload 字段
+ * [OUTPUT]: 浏览器与 Worker 共用的 durable feedback task 严格契约，保留真实 nullable 相手事实
  * [POS]: 跨端反馈任务 schema 唯一来源；不依赖 worker runtime
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -14,7 +14,7 @@ const ExpressionScaffoldLevelSchema = z.union([z.literal(0), z.literal(1), z.lit
 
 export const FeedbackTurnRecordSchema = z.object({
   turn: z.number().int().min(1).max(5),
-  partnerPromptJa: z.string().trim().min(1).max(120),
+  partnerPromptJa: z.string().trim().min(1).max(120).nullable(),
   userOriginal: z.string().max(600),
   userCleaned: z.string().max(600),
   userConfirmed: z.string().trim().min(1).max(600),
@@ -37,7 +37,10 @@ export const FeedbackTurnRecordSchema = z.object({
   if (record.listeningScaffoldLevel === 1 && record.ttsReplayCount < 1) {
     context.addIssue({ code: 'custom', message: 'Listening scaffold level 1 requires a recorded replay.' })
   }
-  if (!record.textFallback && record.partnerAudioPlayCount < 1) {
+  if (record.partnerPromptJa === null && (record.turn !== 1 || record.partnerAudioPlayCount !== 0 || record.ttsReplayCount !== 0 || record.transcriptRevealed || record.listeningScaffoldLevel !== 0)) {
+    context.addIssue({ code: 'custom', message: 'Only turn 1 may omit the partner prompt, without listening or audio facts.' })
+  }
+  if (record.partnerPromptJa !== null && !record.textFallback && record.partnerAudioPlayCount < 1) {
     context.addIssue({ code: 'custom', message: 'Audio-first rounds require at least one partner audio play.' })
   }
   if (record.textFallback && record.inputMode !== 'text') {
@@ -122,7 +125,7 @@ export const ConversationFeedbackResponseSchema = z.object({
     turn: z.number().int().min(1).max(5), userConfirmedJa: z.string().trim().min(1), suggestedJa: EvaluationTextSchema, reasonZh: EvaluationTextSchema,
   }).strict().nullable(),
   redoTask: z.object({
-    turn: z.number().int().min(1).max(5), partnerPromptJa: z.string().trim().min(1), firstConfirmedJa: z.string().trim().min(1), directionZh: ChineseDirectionSchema,
+    turn: z.number().int().min(1).max(5), partnerPromptJa: z.string().trim().min(1).nullable(), firstConfirmedJa: z.string().trim().min(1), directionZh: ChineseDirectionSchema,
   }).strict(),
 }).strict()
 export type ConversationFeedbackResponse = z.infer<typeof ConversationFeedbackResponseSchema>
@@ -131,13 +134,17 @@ export const RedoFeedbackRequestSchema = z.object({
   scenarioType: z.literal('dynamic'),
   sessionToken: z.string().trim().min(1),
   turn: z.number().int().min(1).max(5),
-  partnerPromptJa: z.string().trim().min(1).max(120),
+  partnerPromptJa: z.string().trim().min(1).max(120).nullable(),
   firstConfirmedJa: z.string().trim().min(1).max(600),
   secondConfirmedJa: z.string().trim().min(1).max(600),
   secondInputMode: InputModeSchema,
   secondListeningScaffoldLevel: ListeningScaffoldLevelSchema,
   secondExpressionScaffoldLevel: ExpressionScaffoldLevelSchema,
-}).strict()
+}).strict().superRefine((request, context) => {
+  if (request.partnerPromptJa === null && (request.turn !== 1 || request.secondListeningScaffoldLevel !== 0)) {
+    context.addIssue({ code: 'custom', message: 'A redo without a partner prompt is limited to turn 1 without listening help.' })
+  }
+})
 export type RedoFeedbackRequest = z.infer<typeof RedoFeedbackRequestSchema>
 
 export const RedoFeedbackResponseSchema = z.object({

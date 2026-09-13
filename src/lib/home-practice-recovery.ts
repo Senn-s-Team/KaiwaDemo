@@ -1,9 +1,10 @@
 /**
- * [INPUT]: 首页复练准备响应、复练建议与浏览器 sessionStorage
- * [OUTPUT]: 严格校验、读取、写入和清理同场景准备恢复记录
+ * [INPUT]: 依赖 ./recovery-guards 的共享恢复形状守卫、含判别式开场的首页复练准备响应、复练建议与浏览器 sessionStorage
+ * [OUTPUT]: 严格校验、读取、写入和清理单轨开场同场景准备恢复记录
  * [POS]: src/lib 的首页准备恢复边界；仅限当前标签页，不保存账户或跨设备状态
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
+import { readScenarioOpening } from './recovery-guards'
 import type { DynamicScenarioData, ExpressionImprovement, PreviousAdvice, TrainingGoal } from '../types'
 
 export const HOME_PRACTICE_RECOVERY_STORAGE_KEY = 'kaiwa.home-practice-restart.v1'
@@ -34,6 +35,7 @@ function isTrainingGoal(value: unknown): value is TrainingGoal {
   return nonEmptyString(goal.id) && nonEmptyString(goal.titleZh) && nonEmptyString(goal.descriptionZh)
 }
 
+
 function isExpressionImprovement(value: unknown): value is ExpressionImprovement {
   if (typeof value !== 'object' || value === null) return false
   const improvement = value as Partial<ExpressionImprovement>
@@ -63,14 +65,14 @@ function isDynamicScenarioData(value: unknown): value is DynamicScenarioData {
     && nonEmptyString(scenario.titleZh) && typeof scenario.summaryZh === 'string'
     && nonEmptyString(scenario.aiRole) && nonEmptyString(scenario.userRole)
     && nonEmptyString(scenario.relationship) && nonEmptyString(scenario.tone)
-    && nonEmptyString(scenario.firstLine) && nonEmptyString(scenario.userGoal)
+    && readScenarioOpening(scenario.opening) !== null && nonEmptyString(scenario.userGoal)
     && isTrainingGoal(scenario.coreGoal) && nonEmptyString(scenario.communicationFunction)
     && isStringArray(scenario.initialFacts) && isStringArray(scenario.partnerPrivateFacts)
     && isStringArray(scenario.keyIntents) && isStringArray(scenario.keyInformation)
     && typeof rules === 'object' && rules !== null
     && isStringArray(rules.completed) && isStringArray(rules.partial) && isStringArray(rules.notCompleted)
     && isStringArray(scenario.closingRules) && scenario.maxTurns === 5
-    && nonEmptyString(scenario.partnerOpeningPlan) && isStringArray(scenario.worldAnchors)
+    && isStringArray(scenario.worldAnchors)
     && isStringArray(scenario.followUpPrinciples) && nonEmptyString(scenario.hintStrategy)
     && isStringArray(scenario.feedbackFocus) && nonEmptyString(scenario.safetyBoundary)
 }

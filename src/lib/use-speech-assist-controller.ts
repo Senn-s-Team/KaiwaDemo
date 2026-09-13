@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 录音转写、会话上下文、当前回合与语音 controller 元数据
- * [OUTPUT]: 管理续说辅助请求、超时/失败事件、可见结果与中止动作
+ * [INPUT]: 录音转写、会话上下文、含 nullable 相手发话的当前回合与语音 controller 元数据
+ * [OUTPUT]: 管理有或无相手上下文时的续说辅助请求、超时/失败事件、可见结果与中止动作；首轮只清理已说内容
  * [POS]: src/lib 的 speech assist 生命周期控制器；不拥有语音媒体或会话状态迁移
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -37,6 +37,7 @@ export function useSpeechAssistController(options: UseSpeechAssistControllerOpti
     if (options.phase !== 'recording' || options.recordingUiStartedAt === null) return
     const now = Date.now(); const fullTranscript = [options.confirmedTranscript.trim(), options.interimTranscript.trim()].filter(Boolean).join(' ') || options.partialTranscript.trim(); const currentVersion = options.transcriptVersion
     const shouldTrigger = shouldTriggerSpeechAssist({ isRecording: options.isRecording(), transcript: fullTranscript, timeSinceLastSpeechSoundMs: now - (options.lastSpeechSoundAt ?? now), timeSinceLastPartialMs: now - (options.lastPartialAt ?? now), timeSinceLastRequestMs: now - lastAssistRequestAtRef.current, inFlight: assistInFlightRef.current, currentVersion, lastAssistedVersion: lastAssistedVersionRef.current })
+    const currentPartnerPrompt = options.currentRound?.partnerPromptJa ?? null
     if (!shouldTrigger || !options.scenario) return
     lastAssistedVersionRef.current = currentVersion; lastAssistRequestAtRef.current = now; assistInFlightRef.current = true
     const assistController = new AbortController(); assistAbortControllerRef.current = assistController
@@ -46,7 +47,7 @@ export function useSpeechAssistController(options: UseSpeechAssistControllerOpti
       let assistEvent: SpeechAssistEvent | null = null
       try {
         const trailingSilenceMs = Math.min(10_000, Math.max(900, now - (options.lastSpeechSoundAt ?? now)))
-        const lastAssistantTextJa = options.currentRound?.aiPrompt || scenario.firstLine
+        const lastAssistantTextJa = currentPartnerPrompt
         const res = await requestSpeechAssist({ requestId: `sa_${crypto.randomUUID()}`, transcriptVersion: requestVersion, observedTextJa: observedText, lastAssistantTextJa, trailingSilenceMs, sessionToken: scenario.sessionToken, turn: triggerTurn }, assistController.signal)
         const latencyMs = Date.now() - startTime
         const shouldDisplay = shouldDisplaySpeechAssistResult({ isRecording: options.isRecording(), requestVersion, currentVersion: transcriptVersionRef.current, isAborted: assistController.signal.aborted, timeSinceLastSpeechSoundMs: Date.now() - (options.lastSpeechSoundAt ?? 0) })

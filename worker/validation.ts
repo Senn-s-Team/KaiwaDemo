@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 zod、./constants、./types，以及 shared 下场景草拟、反馈、听力支架、语音续说与场景润色的跨端 wire schema
- * [OUTPUT]: 对外提供 scenario-draft、feedback-task、动态会话、四级听力支架、语音续说与场景润色数据的严格解析；校验版本化证据覆盖、确认稿引用及跨字段协议约束
+ * [INPUT]: 依赖 zod、./constants、./types，以及 shared 下判别式场景、反馈、听力支架、语音续说与场景润色的跨端 wire schema
+ * [OUTPUT]: 对外提供 scenario-draft、feedback-task、双开场动态会话、四级听力支架、语音续说与场景润色数据的严格解析；校验版本化证据覆盖、确认稿引用及跨字段协议约束
  * [POS]: worker 的边界校验层，在路由与模型调用前后统一拒绝无效、越界或非原文协议数据
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
@@ -78,10 +78,10 @@ const ReplyRequestSchema = z.object({
   sessionToken: z.string().trim().min(1),
   sessionId: z.string().regex(/^[a-zA-Z0-9_-]{8,64}$/),
   turn: z.number().int().min(1).max(LIMITS.maxTurns),
-  history: z.array(ConversationMessageSchema).min(2).max(LIMITS.maxHistoryMessages),
+  history: z.array(ConversationMessageSchema).min(1).max(LIMITS.maxHistoryMessages),
 }).strict().superRefine((request, context) => {
-  if (request.history[0]?.role !== 'assistant' || request.history.at(-1)?.role !== 'user') {
-    context.addIssue({ code: 'custom', message: 'History must start with the assistant and end with the user.' })
+  if (request.history.at(-1)?.role !== 'user') {
+    context.addIssue({ code: 'custom', message: 'History must end with the confirmed user turn.' })
   }
   for (let index = 1; index < request.history.length; index += 1) {
     if (request.history[index]?.role === request.history[index - 1]?.role) {
@@ -104,10 +104,21 @@ const ReplyRequestSchema = z.object({
 const HintRequestSchema = z.object({
   scenarioType: z.literal('dynamic'),
   sessionToken: z.string().trim().min(1),
-  history: z.array(ConversationMessageSchema).min(1).max(LIMITS.maxHistoryMessages),
-  lastAssistantText: z.string().trim().min(1).max(LIMITS.maxAssistantCharacters),
+  history: z.array(ConversationMessageSchema).max(LIMITS.maxHistoryMessages),
+  lastPartnerText: z.string().trim().min(1).max(LIMITS.maxAssistantCharacters).nullable(),
   intentionZh: z.string().trim().min(1).max(LIMITS.maxUserCharacters).optional(),
-}).strict()
+}).strict().superRefine((request, context) => {
+  for (let index = 1; index < request.history.length; index += 1) {
+    if (request.history[index]?.role === request.history[index - 1]?.role) {
+      context.addIssue({ code: 'custom', message: 'Hint history roles must alternate.' })
+      break
+    }
+  }
+  const lastPartnerMessage = request.history.findLast((item) => item.role === 'assistant')
+  if ((lastPartnerMessage?.text ?? null) !== request.lastPartnerText) {
+    context.addIssue({ code: 'custom', message: 'Last partner text must match the latest real assistant message.' })
+  }
+})
 
 const KANA_REGEX = /[\u3040-\u309F\u30A0-\u30FF]/
 const HintResponseSchema = z.object({

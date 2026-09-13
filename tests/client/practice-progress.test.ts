@@ -12,11 +12,11 @@ import { comparePracticeAttempts, summarizePracticeAttempt } from '../../src/lib
 function attempt(id = 'current', startedAt = 200): PracticeAttempt {
   const scenario: PracticeAttempt['scenario'] = {
     id: 'appointment', version: 1, titleZh: '改期', summaryZh: '改约时间', aiRole: '店员', userRole: '顾客',
-    relationship: '初见', tone: '礼貌', firstLine: 'ご希望は？', userGoal: '改期',
+    relationship: '初见', tone: '礼貌', opening: { speaker: 'assistant', partnerLineJa: 'ご希望は？', planZh: '询问需求' }, userGoal: '改期',
     coreGoal: { id: 'reschedule', titleZh: '改期', descriptionZh: '确认新时间' }, communicationFunction: '协商',
     initialFacts: [], partnerPrivateFacts: [], keyIntents: [], keyInformation: [],
     completionRules: { completed: [], partial: [], notCompleted: [] }, closingRules: [], maxTurns: 5,
-    partnerOpeningPlan: '', worldAnchors: [], followUpPrinciples: [], hintStrategy: '', feedbackFocus: [], safetyBoundary: '',
+    worldAnchors: [], followUpPrinciples: [], hintStrategy: '', feedbackFocus: [], safetyBoundary: '',
     evaluationVersion: 1, evidencePoints: [
       { id: 'request', titleZh: '说明需求', descriptionZh: '提出改期' },
       { id: 'confirm', titleZh: '确认时间', descriptionZh: '确认最终安排' },
@@ -57,6 +57,20 @@ describe('practice performance', () => {
     })
   })
 
+  it('treats a user-opening first round without partner audio as observable rather than uncertain', () => {
+    const value = attempt()
+    value.scenario.opening = { speaker: 'user', planZh: '先说明改期请求。' }
+    value.report.rounds[0]!.partnerPromptJa = null
+    value.feedback!.redoTask.partnerPromptJa = null
+    value.report.rounds[0]!.timing.audioCompletedAt = null
+    expect(summarizePracticeAttempt(value)).toMatchObject({
+      completed: 2,
+      listeningIndependent: 2,
+      expressionIndependent: 2,
+      independenceUnknown: 0,
+    })
+  })
+
   it('counts displayed continuation suggestions as expression assistance only', () => {
     const value = attempt()
     value.report.rounds[0].speechAssistEvents = [{
@@ -90,7 +104,9 @@ describe('practice performance', () => {
 
   it('does not count a partner quote as proof of independent user completion', () => {
     const value = attempt()
-    value.feedback!.evidenceResults![0].evidence[0].quoteJa = value.report.rounds[0].aiPrompt
+    const partnerPromptJa = value.report.rounds[0].partnerPromptJa
+    if (partnerPromptJa === null) throw new Error('Assistant-opening fixture lost its partner prompt.')
+    value.feedback!.evidenceResults![0].evidence[0].quoteJa = partnerPromptJa
     expect(summarizePracticeAttempt(value)).toMatchObject({ completed: 1, insufficientEvidence: 1, validEvaluation: false })
   })
 
